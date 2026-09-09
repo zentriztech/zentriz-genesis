@@ -2245,8 +2245,16 @@ def _nonstreaming_timeout_sec(max_tokens: int) -> int:
     return max(60, min(3600, max(base, scaled)))
 
 
-def _thinking_extra(provider: str | None = None) -> dict:
+def _thinking_extra(provider: str | None = None, opt_in: bool = False) -> dict:
     """`thinking={"type":"disabled"}` para TODA chamada que emite JSON/código estruturado.
+
+    🔴 GAP-144 — `opt_in=True` INVERTE a decisão para UMA chamada: devolve
+    `thinking={"type":"adaptive"}` explicitamente. Existe porque refutar é a tarefa onde raciocínio
+    paga mais (recall do juiz MEDIDO em 43%..57%, `sutil` 20%..40%, `fora_do_vocabulario` 0%) e a
+    saída do refutador é pequena. É opt-in do chamador, nunca global: quem liga é quem sabe que
+    aquela chamada tem orçamento de saída folgado (ver `_refuter_max_tokens`). O tipo vai EXPLÍCITO
+    (`adaptive`) em vez de simplesmente omitir o parâmetro para que o pedido fique declarado no
+    corpo — e se a rota recusar, o guard do chamador reenvia sem ele (degradação declarada em log).
 
     Achado #51 (2026-08-11, Foundry) + prova em PROD no BEDROCK (2026-09-05, `blocks=thinking,text`
     no `call_bedrock_direct`): os modelos Claude 5 usam raciocínio ADAPTATIVO **ligado por padrão** e
@@ -2264,6 +2272,8 @@ def _thinking_extra(provider: str | None = None) -> dict:
     (`GENESIS_FOUNDRY_DISABLE_THINKING=0` segue valendo só para o Foundry, por compatibilidade).
     Nota: `thinking.type="enabled"` dá 400 nos modelos Claude 5 (só `adaptive`|`disabled`).
     """
+    if opt_in:
+        return {"thinking": {"type": "adaptive"}}
     if (provider or "").strip().lower() == "foundry" and \
             os.environ.get("GENESIS_FOUNDRY_DISABLE_THINKING", "1").strip() == "0":
         return {}
@@ -2486,7 +2496,8 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                         usage_project_id: str | None = None,
                         usage_agent: str = "direct",
                         llm_cfg: dict | None = None,
-                        cache_prefix: bool = False) -> str:
+                        cache_prefix: bool = False,
+                        thinking: bool = False) -> str:
     """Chama Bedrock com system + user; retorna string bruta da resposta.
 
     `llm_cfg` (opcional, mesmo shape do envelope `llm_config` da fábrica): credenciais AWS
@@ -2508,6 +2519,14 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     desenho — quem chama é quem sabe se o MESMO prefixo vai repetir dentro do TTL de 5 min; marcar
     um prefixo que não repete paga 1,25× e não lê nada de volta (regressão). Só o caminho Bedrock
     (Claude e Converse) marca; no Foundry o parâmetro é ignorado (declarado em log).
+
+    🔴 GAP-144: `thinking=True` liga raciocínio ADAPTATIVO só nesta chamada (ver `_thinking_extra`).
+    Também opt-in, e por dois motivos MEDIDOS: (a) os tokens de raciocínio contam contra
+    `max_tokens` — quem liga tem de ter subido o teto de saída antes, senão paga um retry pelo mesmo
+    resultado (achado #51); (b) raciocínio estendido exige `temperature = 1` na API, então o valor
+    pedido é SOBRESCRITO aqui, com log — silenciar isso faria a chamada morrer com 400 falando de
+    temperatura, num lugar onde ninguém procuraria. Honrado no caminho Bedrock/Claude; no Foundry é
+    IGNORADO (o `text_stream` descarta blocos de raciocínio — foi ali que o achado #51 cortou JSON).
     """
     _t0 = time.time()
     # Zera o resultado publicado: se ESTA chamada morrer antes de reportar, ninguém lê o
@@ -2517,6 +2536,12 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
         if cache_prefix:
             logger.info("[call_bedrock_direct] cache_prefix pedido, mas o provider é foundry — "
                         "IGNORADO (o ganho medido e o guard só existem no Bedrock).")
+        if thinking:
+            # GAP-144: no Foundry o caminho de alto orçamento é `stream.text_stream`, que DESCARTA
+            # blocos de raciocínio — ligar aqui reabriria exatamente o achado #51 (JSON cortado ou
+            # vazio). Ignorar em silêncio faria o A/B comparar dois braços iguais.
+            logger.warning("[call_bedrock_direct] thinking pedido, mas o provider é foundry — "
+                           "IGNORADO (o `text_stream` descarta blocos de raciocínio; achado #51).")
         client = _build_foundry_client()
         # temperature é depreciada nos modelos Claude 5 do Foundry — omitir.
         # STREAMING obrigatório p/ max_tokens alto: o Foundry rejeita chamadas não-streaming
@@ -2601,6 +2626,13 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     # Roteamento por `model_id`, sem flag nova: quem pedir um modelo não-Anthropic recebe
     # Converse; todo o resto segue exatamente pelo caminho antigo (risco zero para o pipeline).
     if not _looks_anthropic(model_id):
+        if thinking:
+            # GAP-144: cada família não-Claude expõe raciocínio por um campo próprio em
+            # `additionalModelRequestFields`; mandar o dialeto do Anthropic aqui daria 400. Fica
+            # DECLARADO em log — um braço de A/B que silenciosamente não ligou nada é um braço falso.
+            logger.warning("[call_bedrock_direct] thinking pedido para modelo não-Anthropic '%s' — "
+                           "IGNORADO (a Converse não aceita o dialeto `thinking` do Anthropic).",
+                           model_id)
         return _call_converse(system=system, user=user, model_id=model_id, max_tokens=max_tokens,
                               temperature=temperature, usage_project_id=usage_project_id,
                               usage_agent=usage_agent, llm_cfg=llm_cfg, t0=_t0,
@@ -2648,12 +2680,21 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
         # (ver `_nonstreaming_timeout_sec`). Mesma convenção do `run_agent`.
         "timeout": _nonstreaming_timeout_sec(max_tokens),
         # Raciocínio adaptativo DESLIGADO: todo o orçamento vai para o JSON (ver `_thinking_extra`).
-        **_thinking_extra("bedrock"),
+        # GAP-144: `thinking=True` (opt-in do chamador) inverte SÓ esta chamada.
+        **_thinking_extra("bedrock", opt_in=thinking),
     }
+    # GAP-144: raciocínio estendido exige `temperature = 1` na API. O refutador já roda a 1.0 nos
+    # modelos de raciocínio, mas um `SPEC_VALIDATOR_MODEL` fora dessa lista cairia em 0.2 e a chamada
+    # morreria com 400 sobre temperatura — erro que o guard de `thinking` NÃO reconhece.
+    _temp = temperature
+    if thinking and _temp != 1.0:
+        logger.info("[call_bedrock_direct] thinking ligado — temperature %.2f → 1.0 (exigência da "
+                    "API de raciocínio estendido).", _temp)
+        _temp = 1.0
     try:
         import inspect as _inspect
         if "temperature" in _inspect.signature(client.messages.create).parameters:
-            _create_kw["temperature"] = temperature
+            _create_kw["temperature"] = _temp
     except Exception:
         pass
     # 🔴 GAP-142 etapa 2: ponto de cache no prefixo (system + user). Dois breakpoints em vez de um
@@ -2723,9 +2764,16 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     # comido pelo raciocínio (achado #51, hoje comprovado só no Foundry).
     try:
         _blocks = [str(getattr(b, "type", "?")) for b in (getattr(resp, "content", []) or [])]
-        logger.info("[call_bedrock_direct] %s agent=%s stop_reason=%s blocks=%s max_tokens=%d",
+        # GAP-144: o PEDIDO (`thinking=`) e o FATO (`blocks=`) saem lado a lado. Se o braço pediu
+        # raciocínio e não veio bloco `thinking`, a linha de log é a prova — e o A/B não pode
+        # atribuir ao raciocínio um resultado que rodou sem ele.
+        logger.info("[call_bedrock_direct] %s agent=%s stop_reason=%s blocks=%s max_tokens=%d "
+                    "thinking=%s cache=%s",
                     _used_model, usage_agent, getattr(resp, "stop_reason", None),
-                    ",".join(_blocks) or "-", max_tokens)
+                    ",".join(_blocks) or "-", max_tokens,
+                    "adaptive" if "thinking" in _create_kw and thinking else
+                    ("disabled" if "thinking" in _create_kw else "sem-parametro"),
+                    "on" if _cache_on else "off")
     except Exception:
         pass
     _u = getattr(resp, "usage", None)

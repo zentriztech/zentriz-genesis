@@ -293,7 +293,24 @@ def _known_block(known_findings) -> str:
     return (f"{_KNOWN_OPEN}\n" + "\n".join(lines) + f"\n{_KNOWN_CLOSE}")
 
 
-def _refuter_max_tokens(model: str) -> int:
+def _thinking_enabled(explicit: Optional[bool] = None) -> bool:
+    """🔴 GAP-144 — o refutador raciocina? Decisão por CHAMADA, não por container.
+
+    Precedência: parâmetro explícito da requisição (`thinking` no corpo do
+    `/invoke/spec_validator/async`) > env `SPEC_VALIDATOR_THINKING` > desligado.
+
+    Por que por requisição, e não só por env: o A/B do braço com raciocínio roda sobre o MESMO gold
+    set do braço sem raciocínio, de preferência em minutos (o recall medido em prod varia 14%..57%
+    entre gold sets — comparar entre containers reiniciados mediria o gold set). E recriar o
+    container `agents` no meio de uma run CORTA a chamada do LLM em voo, então "reverter por env" não
+    pode ser o único caminho.
+    """
+    if explicit is not None:
+        return bool(explicit)
+    return (os.environ.get("SPEC_VALIDATOR_THINKING") or "").strip().lower() in ("1", "on", "true")
+
+
+def _refuter_max_tokens(model: str, thinking: bool = False) -> int:
     """Orçamento de saída do refutador por família de modelo.
 
     Achado em prod 2026-09-04 (Fable 5.1 via config do tenant): a saída bateu EXATAMENTE nos 4000
@@ -308,14 +325,22 @@ def _refuter_max_tokens(model: str) -> int:
     teto — subir o teto não encarece a validação de spec pequena e elimina a chamada duplicada
     (metade do custo e metade do tempo nas grandes). O retry (`min(budget*2, 32000)`) segue existindo
     como rede, agora sem folga para dobrar.
+
+    🔴 GAP-144: com raciocínio ligado o teto DOBRA (piso de 32.000, teto de 64.000 = saída máxima do
+    Opus 5). Os tokens de raciocínio contam contra `max_tokens` e a fatia é VARIÁVEL — com o default
+    do refutador (sonnet-4-6, 4.000) o braço com raciocínio bateria no teto na primeira chamada e
+    pagaria um retry pelo mesmo resultado, e o A/B mediria truncamento em vez de recall. Token de
+    saída é cobrado pelo que é GERADO, não pelo teto: subir o teto do braço é grátis; não subir custa
+    a chamada inteira. `SPEC_VALIDATOR_MAX_TOKENS` continua vencendo tudo (override explícito).
     """
     env = (os.environ.get("SPEC_VALIDATOR_MAX_TOKENS") or "").strip()
     if env.isdigit() and int(env) > 0:
         return int(env)
     ml = (model or "").lower()
-    if any(m in ml for m in ("opus-5", "sonnet-5", "fable-5")):
-        return 32000
-    return 4000
+    base = 32000 if any(m in ml for m in ("opus-5", "sonnet-5", "fable-5")) else 4000
+    if thinking:
+        return min(max(base * 2, 32000), 64000)
+    return base
 
 
 def _salvage_findings(raw: str) -> list:
@@ -385,6 +410,7 @@ def validate_spec(
     model_id: Optional[str] = None,
     llm_cfg: Optional[dict] = None,
     known_findings: Optional[list] = None,
+    thinking: Optional[bool] = None,
 ) -> dict:
     """Roda a refutação adversarial. Retorna {"findings": [...], "triage": {...}|None}.
 
@@ -394,6 +420,11 @@ def validate_spec(
     `model_id`/`llm_cfg` (Bancada = mesma config da fábrica, 2026-09-04): modelo e credenciais do
     TENANT. Precedência do refutador: SPEC_VALIDATOR_MODEL (env, override explícito) > model_id
     do tenant > default por desenho (Sonnet). `llm_cfg` vai para call_bedrock_direct (credenciais).
+
+    🔴 GAP-144 `thinking`: braço do A/B de raciocínio estendido. `None` = decide o env
+    `SPEC_VALIDATOR_THINKING` (default OFF = comportamento histórico, byte a byte). Vale SÓ para o
+    refutador: a triagem tem teto de 800 tokens de saída e a consolidação 6.000 — nesses dois o
+    raciocínio comeria o orçamento e cortaria o JSON, que é o achado #51 de novo.
     """
     if llm_fn is None:
         from orchestrator.agents.runtime import call_bedrock_direct
@@ -409,7 +440,8 @@ def validate_spec(
                                        usage_project_id=usage_project_id,
                                        usage_agent=kw.get("usage_agent", "spec_validator"),
                                        llm_cfg=llm_cfg,
-                                       cache_prefix=bool(kw.get("cache_prefix", False)))
+                                       cache_prefix=bool(kw.get("cache_prefix", False)),
+                                       thinking=bool(kw.get("thinking", False)))
 
     fenced = _fence(spec_text)
     # GAP-39: a continuidade acompanha SÓ a refutação. A triagem ("isto é uma spec?") não julga
@@ -466,10 +498,18 @@ def validate_spec(
     # Com votes == 1 NÃO se marca nada: sem repetição, cache é só a multa de 1,25×.
     usar_cache = votes > 1
 
+    # 🔴 GAP-144 — braço de raciocínio estendido, SÓ no refutador (ver `_thinking_enabled`).
+    usar_thinking = _thinking_enabled(thinking)
+    if usar_thinking:
+        logger.info("[spec_validator] refutador com RACIOCÍNIO ADAPTATIVO (GAP-144, braço B): "
+                    "modelo=%s votos=%d teto de saída=%d. Triagem e consolidação seguem sem "
+                    "raciocínio (tetos de 800 e 6.000 cortariam o JSON).",
+                    model, votes, _refuter_max_tokens(model, thinking=True))
+
     def _run_refuter() -> list:
-        budget = _refuter_max_tokens(model)
+        budget = _refuter_max_tokens(model, thinking=usar_thinking)
         raw = llm_fn(REFUTER_SYSTEM, refuter_user, model, max_tokens=budget, usage_agent="spec_validator",
-                     cache_prefix=usar_cache)
+                     cache_prefix=usar_cache, thinking=usar_thinking)
         try:
             data = _extract_json(raw)
         except ValueError:
@@ -480,7 +520,8 @@ def validate_spec(
             retry_budget = min(budget * 2, 64000)
             try:
                 raw2 = llm_fn(REFUTER_SYSTEM, refuter_user, model, max_tokens=retry_budget,
-                              usage_agent="spec_validator", cache_prefix=usar_cache)
+                              usage_agent="spec_validator", cache_prefix=usar_cache,
+                              thinking=usar_thinking)
             except Exception:
                 # O RETRY pode falhar por si (quota, indisponibilidade, guard de streaming do SDK).
                 # Sem este resgate a exceção do retry APAGA os findings que a 1ª resposta já trouxe —

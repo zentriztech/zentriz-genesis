@@ -737,9 +737,15 @@ def _run_spec_validator_async(job_id: str, body: dict) -> None:
         # sempre. Com ele, o juiz pode REUTILIZAR o anchor do defeito que reencontrar, e só então a
         # contagem de GAPs de duas validações seguidas fala da mesma coisa.
         known = body.get("known_findings")
+        # 🔴 GAP-144: `thinking` é o braço do A/B de raciocínio estendido do refutador. Só um BOOLEANO
+        # explícito decide; qualquer outra coisa (ausente, null, string) devolve a decisão ao env
+        # `SPEC_VALIDATOR_THINKING` — um `"false"` de texto virando `True` faria o braço A rodar como
+        # braço B e o A/B compararia o mesmo juiz consigo mesmo.
+        _think = body.get("thinking")
         result = validate_spec(spec_text, usage_project_id=(body.get("originProjectId") or None),
                                model_id=(body.get("model_id") or None), llm_cfg=llm_cfg,
-                               known_findings=known if isinstance(known, list) else None)
+                               known_findings=known if isinstance(known, list) else None,
+                               thinking=_think if isinstance(_think, bool) else None)
         with _jobs_lock:
             if job_id in _async_jobs:
                 _async_jobs[job_id]["status"] = "done"

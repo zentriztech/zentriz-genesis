@@ -1089,6 +1089,56 @@ export async function specRoutes(app: FastifyInstance) {
     return reply.send(toWire(scope));
   });
 
+  // 🔴 GAP-149 — o RECALL do juiz deixa de ser um número só de dentro do container.
+  //
+  // A medição (migração 109, `spec_judge_recall_runs`) existia e ninguém a lia: nem rota, nem tela.
+  // Sem isto, "0 GAPs ATIVOS" e "o juiz está cego" são a MESMA observação, e a Bancada não tem como
+  // distinguir as duas — foi o que motivou este GAP, da mesma família do GAP-141.
+  //
+  // A rota devolve UMA LINHA POR BRAÇO do A/B (GAP-144) e diz explicitamente se a medição cobre o
+  // `spec_hash` ATUAL: recall de uma spec anterior é histórico, não estado — apresentá-lo como estado
+  // seria repetir o GAP-95 na tela. Um GET nunca chama modelo (custo zero).
+  app.get<{ Params: { id: string } }>("/api/specs/:id/judge-recall", async (request, reply) => {
+    const user = getUser(request);
+    if (user.svc === "runner") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Sem caso de uso p/ token de serviço." });
+    }
+    const { id } = request.params;
+    const proj = await loadAccessibleProject(id, user);
+    if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+    const { computeCurrentSpecHash } = await import("../services/specValidation.js");
+    const current = await computeCurrentSpecHash(pool, id).catch(() => null);
+    // `judge_thinking`/`ab_paired` chegaram na migração 118: banco atrás do código não pode virar 500.
+    const rows = await pool.query(
+      `SELECT id, spec_hash, gold_set_version, judge_model, judge_thinking, match_model, audit_model,
+              same_family, injected, eligible, found, partial_matches, missed, undecided, uncovered,
+              recall_min, recall_max, findings_count, matcher_sample, matcher_disagreement,
+              matcher_no_opinion, ab_paired, note, limitations, strata, autonomy_run_id, created_at
+         FROM spec_judge_recall_runs
+        WHERE project_id = $1
+        ORDER BY created_at DESC LIMIT 20`,
+      [id],
+    ).catch(() => ({ rows: [] as Record<string, unknown>[] }));
+    const medicoes = (rows.rows as Record<string, unknown>[]).map((r) => ({
+      ...r,
+      // O nome do campo diz o que ele é: a medição vale para O HASH que ela mediu, não para o de hoje.
+      coversCurrentSpec: !!current && r.spec_hash === current.specHash,
+    }));
+    return reply.send({
+      enabled: (process.env.SPEC_JUDGE_RECALL ?? "").trim().toLowerCase() === "on",
+      abEnabled: (process.env.SPEC_JUDGE_RECALL_THINKING_AB ?? "").trim().toLowerCase() === "on",
+      currentSpecHash: current?.specHash ?? null,
+      measurements: medicoes,
+      // Ausência é FATO, não erro: sem medição, o recall do juiz nesta spec é DESCONHECIDO — e é isso
+      // que a tela tem de dizer, em vez de sugerir que os GAPs contados são todos os que existem.
+      note: medicoes.length === 0
+        ? "Nenhuma medição de recall para este projeto: a cegueira do juiz é DESCONHECIDA aqui, e a contagem de GAPs não pode ser lida como 'todos os que existem'."
+        : (medicoes.some((m) => m.coversCurrentSpec)
+          ? "Há medição para a spec ATUAL."
+          : "Só há medição de spec(s) ANTERIOR(es) — histórico, não estado (o gold set e o recorte eram outros)."),
+    });
+  });
+
   app.post<{ Params: { id: string } }>("/api/specs/:id/gap-routes", async (request, reply) => {
     const user = getUser(request);
     if (user.svc === "runner") {

@@ -20,6 +20,7 @@ import { advanceAutonomyRunsTick } from "./specAutonomy.js";
 import { collectSpecSplitsTick } from "./specSplit.js";
 import { collectBancadaLessonsTick } from "./specLearning.js";
 import { ensureConnectDeclarationsTick } from "./connectDeclaration.js";
+import { judgeRecallTick } from "./specJudgeRecall.js";
 import { collectStageBResults } from "./specValidation.js";
 import { extractSpecMarkdown, httpGet } from "../routes/specs.js";
 
@@ -116,6 +117,18 @@ async function tick(): Promise<void> {
   });
   if (decl.started || decl.skipped || decl.recovered) {
     console.info(`[SpecChatWorker] declaração Connect: ${decl.started} pedida(s), ${decl.skipped} dispensada(s), ${decl.recovered} recuperada(s) de ${decl.scanned} varrida(s).`);
+  }
+  // 🔴 GAP-149 (migração 118): o RECALL do juiz ganha chamador. Até aqui `runJudgeRecall` não tinha
+  // nenhum — a medição que torna "0 GAPs ATIVOS" interpretável só rodava se alguém a importasse à mão
+  // dentro do container. Vem por ÚLTIMO e só sobre laços TERMINADOS: uma medição é um estágio B
+  // completo pago, e disputá-lo com o laço em voo mediria a disputa. Desligada por padrão
+  // (`SPEC_JUDGE_RECALL=on`), porque saber custa e a escolha de pagar é do Jean.
+  const recall = await judgeRecallTick(pool).catch((e) => {
+    console.warn(`[SpecChatWorker] medição de recall do juiz falhou: ${e instanceof Error ? e.message : String(e)}`);
+    return { scanned: 0, started: 0, skipped: 0, busy: false };
+  });
+  if (recall.started) {
+    console.info(`[SpecChatWorker] recall do juiz: medição iniciada (${recall.skipped} spec(s) já medida(s) de ${recall.scanned} varrida(s)).`);
   }
 }
 

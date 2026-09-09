@@ -12,8 +12,9 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  applyInjections, AUDIT_MIN_SAMPLE, goldSetVersion, modelFamily, normalizeMatches, parseInjections,
-  recallConfig, recallLimitations, RECALL_MIN_ELIGIBLE, recallNote, recallTally, sameFamily, wilson95,
+  abNote, applyInjections, AUDIT_MIN_SAMPLE, goldSetVersion, modelFamily, normalizeMatches,
+  pairedComparison, parseInjections, recallConfig, recallLimitations, RECALL_MIN_ELIGIBLE, recallNote,
+  recallTally, sameFamily, wilson95,
   type GoldDefect,
 } from "./specJudgeRecall.js";
 import type { ValidationFinding } from "./specValidation.js";
@@ -537,5 +538,134 @@ describe("sameFamily — GAP-93: casador e juiz da mesma família são a mesma o
 
   it("modelo desconhecido nunca é declarado como mesma família (não inventa garantia)", () => {
     expect(sameFamily("", "")).toBe(false);
+  });
+});
+
+describe("GAP-144 — A/B do raciocínio: pareado, e recusando concluir quando a amostra não permite", () => {
+  const it0 = (defectId: string, verdict: "encontrado" | "parcial" | "nao_encontrado" | "indecidivel",
+               covered = true) => ({
+    defectId, file: "01-visao.md", anchor: "## Escopo", defectClass: "ambiguous_fr",
+    inVocabulary: true, difficulty: "sutil" as const, position: "secao_nomeada" as const,
+    scope: "local" as const, covered, verdict, findingRef: "", citation: "",
+    citationVerbatim: verdict === "encontrado", classAgreed: true, reason: "",
+  });
+
+  it("classifica cada defeito como ambos / nenhum / só um dos braços", () => {
+    const p = pairedComparison(
+      [it0("D1", "encontrado"), it0("D2", "nao_encontrado"), it0("D3", "encontrado"), it0("D4", "nao_encontrado")],
+      [it0("D1", "encontrado"), it0("D2", "encontrado"), it0("D3", "nao_encontrado"), it0("D4", "nao_encontrado")],
+    );
+    expect(p).toMatchObject({
+      eligible: 4, both: 1, neither: 1, only_baseline: 1, only_thinking: 1, discordant: 2, unpaired: 0,
+    });
+  });
+
+  it("`parcial` e `indecidivel` não contam para nenhum lado (mesmo critério do piso)", () => {
+    const p = pairedComparison(
+      [it0("D1", "parcial"), it0("D2", "indecidivel")],
+      [it0("D1", "encontrado"), it0("D2", "parcial")],
+    );
+    expect(p).toMatchObject({ eligible: 2, both: 0, neither: 1, only_baseline: 0, only_thinking: 1 });
+  });
+
+  it("GAP-97 nos dois lados: defeito sem cobertura em UM braço sai do pareamento, não vira derrota", () => {
+    const p = pairedComparison(
+      [it0("D1", "encontrado"), it0("D2", "nao_encontrado", false)],
+      [it0("D1", "encontrado"), it0("D2", "encontrado")],
+    );
+    expect(p).toMatchObject({ eligible: 1, both: 1, only_thinking: 0, unpaired: 1 });
+  });
+
+  it("defeito que só existe em um dos braços é cobertura instável, nunca par", () => {
+    const p = pairedComparison([it0("D1", "encontrado")], [it0("D1", "encontrado"), it0("D9", "encontrado")]);
+    expect(p).toMatchObject({ eligible: 1, both: 1, unpaired: 1 });
+  });
+
+  it("com menos de 2 discordantes a prosa RECUSA decidir (não autoriza virar o padrão)", () => {
+    const nota = abNote({ eligible: 8, both: 3, neither: 4, only_baseline: 0, only_thinking: 1, discordant: 1, unpaired: 0 }, 0.375, 0.5);
+    expect(nota).toContain("NÃO decide nada");
+    expect(nota).not.toContain("vantagem aparente");
+  });
+
+  it("com discordância legível a prosa dá INDICAÇÃO com o lado, nunca veredicto", () => {
+    const nota = abNote({ eligible: 10, both: 2, neither: 4, only_baseline: 1, only_thinking: 3, discordant: 4, unpaired: 0 }, 0.3, 0.5);
+    expect(nota).toContain("vantagem aparente: com raciocínio");
+    expect(nota).toContain("INDICAÇÃO, não veredicto");
+    expect(nota).toContain(`RECALL_MIN_ELIGIBLE = ${RECALL_MIN_ELIGIBLE}`);
+  });
+
+  it("A/B vem DESLIGADO por padrão — medir dois braços dobra o custo do estágio B", () => {
+    const antes = process.env.SPEC_JUDGE_RECALL_THINKING_AB;
+    delete process.env.SPEC_JUDGE_RECALL_THINKING_AB;
+    expect(recallConfig().thinkingAb).toBe(false);
+    process.env.SPEC_JUDGE_RECALL_THINKING_AB = "on";
+    expect(recallConfig().thinkingAb).toBe(true);
+    if (antes === undefined) delete process.env.SPEC_JUDGE_RECALL_THINKING_AB;
+    else process.env.SPEC_JUDGE_RECALL_THINKING_AB = antes;
+  });
+});
+
+describe("GAP-149 — o instrumento ganha CHAMADOR (e não mede duas vezes a mesma spec)", () => {
+  type Q = { sql: string; params: unknown[] };
+
+  function fakeDb(handler: (sql: string, params: unknown[]) => unknown[]) {
+    const seen: Q[] = [];
+    return {
+      seen,
+      db: {
+        query: async (sql: string, params: unknown[] = []) => {
+          seen.push({ sql, params });
+          return { rows: handler(sql, params) as Record<string, unknown>[], rowCount: 0 };
+        },
+      },
+    };
+  }
+
+  const RUN = { id: "run-1", project_id: "proj-1", tenant_id: "tnt-1" };
+
+  it("desligado por padrão: não varre nada (medir é um estágio B pago)", async () => {
+    const antes = process.env.SPEC_JUDGE_RECALL;
+    delete process.env.SPEC_JUDGE_RECALL;
+    const { judgeRecallTick } = await import("./specJudgeRecall.js");
+    const { seen, db } = fakeDb(() => [RUN]);
+    expect(await judgeRecallTick(db as never)).toEqual({ scanned: 0, started: 0, skipped: 0, busy: false });
+    expect(seen).toHaveLength(0);
+    if (antes === undefined) delete process.env.SPEC_JUDGE_RECALL;
+    else process.env.SPEC_JUDGE_RECALL = antes;
+  });
+
+  it("só olha laços TERMINADOS — medir com o laço em voo mediria a disputa por orçamento", async () => {
+    process.env.SPEC_JUDGE_RECALL = "on";
+    const { judgeRecallTick } = await import("./specJudgeRecall.js");
+    const { seen, db } = fakeDb((sql) => (/spec_autonomy_runs/.test(sql) ? [RUN] : []));
+    const out = await judgeRecallTick(db as never);
+    expect(seen[0].sql).toContain("finished_at IS NOT NULL");
+    // spec ilegível (nenhum arquivo) ⇒ dispensada, e NADA é medido às cegas
+    expect(out).toMatchObject({ scanned: 1, started: 0, skipped: 1 });
+    delete process.env.SPEC_JUDGE_RECALL;
+  });
+
+  it("spec já medida encerra o assunto (GAP-95: outro gold set daria número incomparável)", async () => {
+    process.env.SPEC_JUDGE_RECALL = "on";
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const dir = await mkdtemp(join(tmpdir(), "recall-tick-"));
+    const arquivo = join(dir, "01-visao.md");
+    await writeFile(arquivo, ARQUIVO_A, "utf-8");
+    const { judgeRecallTick } = await import("./specJudgeRecall.js");
+    const { seen, db } = fakeDb((sql) => {
+      if (/spec_autonomy_runs/.test(sql)) return [RUN];
+      if (/project_spec_files/.test(sql)) return [{ filename: "01-visao.md", file_path: arquivo, rel_dir: "" }];
+      if (/spec_judge_recall_runs/.test(sql)) return [{ "1": 1 }];   // JÁ medida
+      return [];
+    });
+    const out = await judgeRecallTick(db as never);
+    expect(out).toMatchObject({ scanned: 1, started: 0, skipped: 1 });
+    // a checagem é por (projeto, spec_hash) — não por run, senão cada laço remediria a MESMA spec
+    const dedupe = seen.find((q) => /FROM spec_judge_recall_runs/.test(q.sql))!;
+    expect(dedupe.sql).toContain("project_id = $1 AND spec_hash = $2");
+    expect(dedupe.params[0]).toBe("proj-1");
+    delete process.env.SPEC_JUDGE_RECALL;
   });
 });

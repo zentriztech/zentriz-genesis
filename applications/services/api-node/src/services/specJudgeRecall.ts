@@ -201,6 +201,12 @@ export function recallConfig() {
     injectChars: num(process.env.SPEC_RECALL_INJECT_CHARS, 40_000),
     /** Minutos de espera pelo juiz. O estágio B real leva minutos; menos que isso mede o timeout. */
     judgeDeadlineMin: num(process.env.SPEC_RECALL_JUDGE_DEADLINE_MIN, 20),
+    /**
+     * 🔴 GAP-144: `on` roda o SEGUNDO braço (refutador com raciocínio estendido) sobre o MESMO gold
+     * set e o MESMO texto mutado. Nasce OFF porque DOBRA a medição — que já é caríssima — e o único
+     * jeito honesto de comparar é pareado, com os dois braços na mesma amostra.
+     */
+    thinkingAb: (process.env.SPEC_JUDGE_RECALL_THINKING_AB ?? "").trim().toLowerCase() === "on",
   };
 }
 
@@ -611,6 +617,82 @@ function pct(x: number): string {
   return `${Math.round(x * 100)}%`;
 }
 
+/** 🔴 GAP-144: o resultado do A/B, defeito a defeito. `discordant` é o único número que decide algo. */
+export interface PairedAb {
+  /** Defeitos elegíveis nos DOIS braços (o pareamento só existe onde os dois puderam ver). */
+  eligible: number;
+  both: number;
+  neither: number;
+  only_baseline: number;
+  only_thinking: number;
+  discordant: number;
+  /** Defeito elegível num braço e não no outro: cobertura instável, fora do pareamento. */
+  unpaired: number;
+}
+
+/**
+ * 🔴 GAP-144 — comparação PAREADA entre os dois braços, sobre o MESMO gold set.
+ *
+ * Por que pareada e não "dois recalls lado a lado": em prod, três medições sobre a MESMA spec com o
+ * MESMO juiz deram 14%..29%, 43%..57% e 14%..43%. Com ~10 defeitos, o intervalo de amostragem é mais
+ * largo que qualquer efeito que o raciocínio possa ter — comparar agregados mediria a amostra. Aqui
+ * cada defeito é seu próprio controle e o que se lê são os DISCORDANTES: quantos só o braço com
+ * raciocínio achou (`only_thinking`) contra quantos só o braço histórico achou (`only_baseline`).
+ *
+ * "Achou" é o MESMO critério do piso (`recall_min`): `encontrado`, com citação conferida verbatim.
+ * `parcial`/`indecidivel` não contam para nenhum dos lados — a direção do erro segue para baixo nos
+ * dois braços, então a DIFERENÇA continua legível.
+ */
+export function pairedComparison(baseline: RecallItem[], thinkingItems: RecallItem[]): PairedAb {
+  const byId = new Map(thinkingItems.map((i) => [i.defectId, i]));
+  const out: PairedAb = {
+    eligible: 0, both: 0, neither: 0, only_baseline: 0, only_thinking: 0, discordant: 0, unpaired: 0,
+  };
+  const achou = (i: RecallItem): boolean => i.verdict === "encontrado";
+  for (const a of baseline) {
+    const b = byId.get(a.defectId);
+    if (!b) { out.unpaired += 1; continue; }
+    // GAP-97 aplicado aos dois lados: se o arquivo não chegou integral em UM dos braços, o defeito não
+    // foi perdido pelo juiz daquele braço — e um par onde só um lado podia ver não é um par.
+    if (!a.covered || !b.covered) { out.unpaired += 1; continue; }
+    out.eligible += 1;
+    const va = achou(a);
+    const vb = achou(b);
+    if (va && vb) out.both += 1;
+    else if (va) out.only_baseline += 1;
+    else if (vb) out.only_thinking += 1;
+    else out.neither += 1;
+  }
+  // Defeito que só o braço B enxergou como elegível também é cobertura instável, não par.
+  for (const b of thinkingItems) if (!baseline.some((a) => a.defectId === b.defectId)) out.unpaired += 1;
+  out.discordant = out.only_baseline + out.only_thinking;
+  return out;
+}
+
+/**
+ * A leitura do A/B em prosa — e a recusa explícita de concluir quando a amostra não permite.
+ *
+ * `RECALL_MIN_ELIGIBLE` (20) já é o piso de DECLARAÇÃO do recall; para uma DIFERENÇA o que manda é o
+ * número de discordantes. Com 0 ou 1 discordante não há o que ler: qualquer frase sobre "melhorou"
+ * seria a moeda do GAP-100 outra vez.
+ */
+export function abNote(p: PairedAb, baselineRecallMin: number, thinkingRecallMin: number): string {
+  const base = `A/B pareado (GAP-144) em ${p.eligible} defeito(s) elegível(is) nos dois braços: `
+    + `ambos ${p.both}, nenhum ${p.neither}, só sem-raciocínio ${p.only_baseline}, `
+    + `só com-raciocínio ${p.only_thinking}`
+    + (p.unpaired ? `, ${p.unpaired} fora do pareamento (cobertura diferente entre os braços)` : "")
+    + `. Piso de recall: ${pct(baselineRecallMin)} sem raciocínio × ${pct(thinkingRecallMin)} com.`;
+  if (p.discordant < 2) {
+    return `${base} DISCORDANTES = ${p.discordant}: a medição NÃO decide nada — não autoriza mudar o `
+      + `padrão em nenhuma direção.`;
+  }
+  const lado = p.only_thinking > p.only_baseline ? "com raciocínio"
+    : p.only_baseline > p.only_thinking ? "sem raciocínio" : "nenhum dos dois";
+  return `${base} ${p.discordant} discordante(s), vantagem aparente: ${lado}. `
+    + `INDICAÇÃO, não veredicto: com esta amostra o intervalo ainda é largo (ver `
+    + `RECALL_MIN_ELIGIBLE = ${RECALL_MIN_ELIGIBLE}) — repetir em outro gold set antes de virar padrão.`;
+}
+
 /**
  * As limitações que a própria medição descobriu sobre si — DECLARADAS, nunca escondidas.
  *
@@ -854,6 +936,12 @@ export async function judgeMutatedSpec(args: {
   projectId: string;
   llm?: Record<string, unknown> | null;
   cfg?: ReturnType<typeof recallConfig>;
+  /**
+   * 🔴 GAP-144: braço com raciocínio estendido no refutador. Vai por REQUISIÇÃO de propósito — os dois
+   * braços têm de julgar o MESMO gold set em minutos, e trocar env exige recriar o container `agents`
+   * (o que corta a chamada do LLM em voo e faria o A/B medir o corte).
+   */
+  thinking?: boolean;
 }): Promise<{ findings: ValidationFinding[]; error?: string; jobId: string }> {
   const cfg = args.cfg ?? recallConfig();
   const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
@@ -864,6 +952,9 @@ export async function judgeMutatedSpec(args: {
     spec_text: args.specText,
     originProjectId: args.projectId,
     ...(args.llm ?? {}),
+    // GAP-98 outra vez: o pedido EXPLÍCITO vem depois do espalhamento de `llm`, senão a config do
+    // tenant escolheria o braço e o relatório afirmaria um braço que não rodou.
+    ...(args.thinking === undefined ? {} : { thinking: !!args.thinking }),
   }, 30_000).catch((e) => ({ status: 0, data: { error: String(e) } as Record<string, unknown> }));
   const jobId = String(start.data.jobId ?? "");
   if (start.status !== 200 || !jobId) {
@@ -910,6 +1001,17 @@ export interface JudgeRecallResult {
   matcherNoOpinion: number | null;
   limitations: string[];
   note: string;
+  /**
+   * 🔴 GAP-144: qual braço produziu ESTA linha. Vai explícito porque a api-node não consegue ler o env
+   * do container `agents` — só o que ela PEDIU por requisição é verificável aqui.
+   */
+  judgeThinking: boolean;
+  /** O braço com raciocínio, quando `SPEC_JUDGE_RECALL_THINKING_AB=on`. Ausente = o A/B não rodou. */
+  thinkingArm?: JudgeRecallResult;
+  /** A comparação pareada entre os dois braços. Ausente = não há dois braços para comparar. */
+  abPaired?: PairedAb;
+  /** A leitura em prosa do A/B, com a recusa explícita de concluir quando a amostra não permite. */
+  abNote?: string;
 }
 
 function emptyTally(): RecallTally {
@@ -940,7 +1042,7 @@ export async function runJudgeRecall(db: Db, args: {
     ran: false, reason, goldSetVersion: "", defects: [], rejectedInjections: [], items: [],
     tally: emptyTally(), findingsCount: 0, judgedFiles: [], judgeModel: "", matchModel: cfg.matchModel,
     auditModel: "", sameFamily: false, matcherSample: 0, matcherDisagreement: null,
-    matcherNoOpinion: null, limitations: [], note: reason,
+    matcherNoOpinion: null, limitations: [], note: reason, judgeThinking: false,
     ...extra,
   });
   if (!judgeRecallEnabled()) return empty("SPEC_JUDGE_RECALL != on");
@@ -978,62 +1080,79 @@ export async function runJudgeRecall(db: Db, args: {
   if (usados.length === 0) return empty("nenhuma mutação pôde ser aplicada ao corpus", { rejectedInjections: recusados });
   const version = goldSetVersion(alvo, usados);
 
-  // 2. O JUIZ REAL sobre o texto mutado.
+  // 2..5 UMA VEZ POR BRAÇO (GAP-144). O gold set, o texto mutado e o corpus são os MESMOS nos dois
+  // braços — é exatamente isso que autoriza a comparação pareada: a única diferença entre as duas
+  // linhas é o raciocínio estendido do refutador. Injetar duas vezes daria dois gold sets diferentes e
+  // a "comparação" mediria a injeção.
   const { buildValidationInput } = await import("./specValidationInput.js");
   const input = buildValidationInput(aplicado.files.map((f) => ({ path: f.path, content: f.content })));
-  const juiz = await judgeMutatedSpec({ specText: input.text, projectId: args.projectId, llm: args.llm, cfg });
-  if (juiz.error && juiz.findings.length === 0) {
-    return empty(`o juiz não produziu parecer: ${juiz.error}`, { goldSetVersion: version, defects: usados, rejectedInjections: recusados });
-  }
-
-  // 3. O CASADOR (outra família) e a estimativa do erro dele.
   const judgeModel = String((args.llm?.model_id ?? args.llm?.modelId ?? "") || "").trim();
-  const cas = await callPolicyAgent({
-    system: MATCH_SYSTEM, user: matchUserMessage(usados, juiz.findings),
-    maxTokens: cfg.matchTokens, modelId: cfg.matchModel, llm: args.llm,
-  });
-  // GAP-98: a família sai do modelo que RESPONDEU, nunca do que foi pedido. A primeira medição em prod
-  // pediu Nova Pro, rodou opus-5 (o modelo do juiz) e publicou `same_family = false` — a única coisa
-  // que a frente inteira precisa garantir, negada pelos próprios bytes e afirmada pelo relatório.
-  const matchModel = cas.ok ? (cas.modelUsedRaw || cfg.matchModel) : cfg.matchModel;
-  const familia = sameFamily(judgeModel, matchModel);
-  const rawMatches = cas.ok ? (parseListResponse(cas.text, "matches") ?? []) : [];
-  const items = normalizeMatches(rawMatches, usados, juiz.findings, input.full);
-  const tally = recallTally(items);
-  const auditoria = await auditMatches({
-    items, defects: usados, findings: juiz.findings, judgedFiles: input.full,
-    model: cfg.auditModel, llm: args.llm, cfg,
-  }).catch((e) => ({ sample: 0, disagreement: null as number | null, noOpinion: null as number | null, why: String(e).slice(0, 200), modelUsed: "" }));
 
-  const limitations = recallLimitations({
-    tally, sameFamily: familia, judgeModel, matchModel,
-    matcherDisagreement: auditoria.disagreement, matcherNoOpinion: auditoria.noOpinion,
-    auditSample: auditoria.sample, auditModel: auditoria.modelUsed, matcherWhy: auditoria.why,
-    rejected: recusados.length,
-    priorClaim: items.filter((i) => i.reason === "finding já casado com outro defeito").length,
-  });
-  if (!cas.ok) limitations.unshift(`casador indisponível (${cas.why}) — todos os defeitos ficaram sem casamento conferido, o que DEPRIME o recall`);
+  const medirBraco = async (thinking: boolean): Promise<JudgeRecallResult> => {
+    const sufixo = thinking ? " [braço COM raciocínio]" : "";
+    // 2. O JUIZ REAL sobre o texto mutado. O braço vai EXPLÍCITO na requisição, nunca por env: a
+    // api-node não consegue ler o env do container `agents`, então o único valor que ela pode gravar
+    // em `judge_thinking` sem inventar é o que ela mesma PEDIU.
+    const juiz = await judgeMutatedSpec({
+      specText: input.text, projectId: args.projectId, llm: args.llm, cfg, thinking,
+    });
+    if (juiz.error && juiz.findings.length === 0) {
+      return empty(`o juiz não produziu parecer${sufixo}: ${juiz.error}`,
+        { goldSetVersion: version, defects: usados, rejectedInjections: recusados, judgeThinking: thinking });
+    }
 
-  const res: JudgeRecallResult = {
-    ran: true, goldSetVersion: version, defects: usados, rejectedInjections: recusados, items, tally,
-    findingsCount: juiz.findings.length, judgedFiles: input.full,
-    judgeModel: judgeModel || "modelo do tenant", matchModel: cas.ok ? cas.model : cfg.matchModel,
-    auditModel: auditoria.modelUsed,
-    sameFamily: familia, matcherSample: auditoria.sample, matcherDisagreement: auditoria.disagreement,
-    matcherNoOpinion: auditoria.noOpinion,
-    limitations, note: "",
+    // 3. O CASADOR (outra família) e a estimativa do erro dele.
+    const cas = await callPolicyAgent({
+      system: MATCH_SYSTEM, user: matchUserMessage(usados, juiz.findings),
+      maxTokens: cfg.matchTokens, modelId: cfg.matchModel, llm: args.llm,
+    });
+    // GAP-98: a família sai do modelo que RESPONDEU, nunca do que foi pedido. A primeira medição em prod
+    // pediu Nova Pro, rodou opus-5 (o modelo do juiz) e publicou `same_family = false` — a única coisa
+    // que a frente inteira precisa garantir, negada pelos próprios bytes e afirmada pelo relatório.
+    const matchModel = cas.ok ? (cas.modelUsedRaw || cfg.matchModel) : cfg.matchModel;
+    const familia = sameFamily(judgeModel, matchModel);
+    const rawMatches = cas.ok ? (parseListResponse(cas.text, "matches") ?? []) : [];
+    const items = normalizeMatches(rawMatches, usados, juiz.findings, input.full);
+    const tally = recallTally(items);
+    const auditoria = await auditMatches({
+      items, defects: usados, findings: juiz.findings, judgedFiles: input.full,
+      model: cfg.auditModel, llm: args.llm, cfg,
+    }).catch((e) => ({ sample: 0, disagreement: null as number | null, noOpinion: null as number | null, why: String(e).slice(0, 200), modelUsed: "" }));
+
+    const limitations = recallLimitations({
+      tally, sameFamily: familia, judgeModel, matchModel,
+      matcherDisagreement: auditoria.disagreement, matcherNoOpinion: auditoria.noOpinion,
+      auditSample: auditoria.sample, auditModel: auditoria.modelUsed, matcherWhy: auditoria.why,
+      rejected: recusados.length,
+      priorClaim: items.filter((i) => i.reason === "finding já casado com outro defeito").length,
+    });
+    if (!cas.ok) limitations.unshift(`casador indisponível (${cas.why}) — todos os defeitos ficaram sem casamento conferido, o que DEPRIME o recall`);
+    if (thinking) limitations.push("braço com RACIOCÍNIO ADAPTATIVO no refutador (GAP-144): o teto de saída foi dobrado para o raciocínio não comer o JSON, e triagem/consolidação seguiram sem raciocínio — a diferença medida é do refutador, não do estágio inteiro");
+
+    const res: JudgeRecallResult = {
+      ran: true, goldSetVersion: version, defects: usados, rejectedInjections: recusados, items, tally,
+      findingsCount: juiz.findings.length, judgedFiles: input.full,
+      judgeModel: judgeModel || "modelo do tenant", matchModel: cas.ok ? cas.model : cfg.matchModel,
+      auditModel: auditoria.modelUsed,
+      sameFamily: familia, matcherSample: auditoria.sample, matcherDisagreement: auditoria.disagreement,
+      matcherNoOpinion: auditoria.noOpinion,
+      limitations, note: "", judgeThinking: thinking,
+    };
+    res.note = recallNote(tally, limitations);
+    return res;
   };
-  res.note = recallNote(tally, limitations);
 
-  if (!args.evaluateOnly) {
+  const gravar = async (res: JudgeRecallResult, paired?: PairedAb): Promise<void> => {
+    const t = res.tally;
     await db.query(
       `INSERT INTO spec_judge_recall_runs
          (project_id, spec_hash, gold_set_version, judge_model, match_model, same_family,
           injected, eligible, found, partial_matches, missed, undecided, uncovered,
           recall_min, recall_max, findings_count, matcher_sample, matcher_disagreement,
-          note, limitations, defects, items, strata, autonomy_run_id, audit_model, matcher_no_opinion)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23::jsonb,$24,$25,$26)
-       ON CONFLICT (project_id, spec_hash, gold_set_version, judge_model) DO UPDATE SET
+          note, limitations, defects, items, strata, autonomy_run_id, audit_model, matcher_no_opinion,
+          judge_thinking, ab_paired)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23::jsonb,$24,$25,$26,$27,$28::jsonb)
+       ON CONFLICT (project_id, spec_hash, gold_set_version, judge_model, judge_thinking) DO UPDATE SET
          match_model = EXCLUDED.match_model, same_family = EXCLUDED.same_family,
          audit_model = EXCLUDED.audit_model, matcher_no_opinion = EXCLUDED.matcher_no_opinion,
          injected = EXCLUDED.injected, eligible = EXCLUDED.eligible, found = EXCLUDED.found,
@@ -1043,21 +1162,156 @@ export async function runJudgeRecall(db: Db, args: {
          findings_count = EXCLUDED.findings_count, matcher_sample = EXCLUDED.matcher_sample,
          matcher_disagreement = EXCLUDED.matcher_disagreement, note = EXCLUDED.note,
          limitations = EXCLUDED.limitations, defects = EXCLUDED.defects, items = EXCLUDED.items,
-         strata = EXCLUDED.strata, created_at = now()`,
-      [args.projectId, args.specHash, version, res.judgeModel, res.matchModel, familia,
-       tally.injected, tally.eligible, tally.found, tally.partial, tally.missed, tally.undecided,
-       tally.uncovered, tally.recallMin, tally.recallMax, juiz.findings.length,
-       auditoria.sample, auditoria.disagreement, res.note, JSON.stringify(limitations),
-       JSON.stringify(usados), JSON.stringify(items),
+         strata = EXCLUDED.strata, ab_paired = EXCLUDED.ab_paired, created_at = now()`,
+      [args.projectId, args.specHash, version, res.judgeModel, res.matchModel, res.sameFamily,
+       t.injected, t.eligible, t.found, t.partial, t.missed, t.undecided,
+       t.uncovered, t.recallMin, t.recallMax, res.findingsCount,
+       res.matcherSample, res.matcherDisagreement, res.note, JSON.stringify(res.limitations),
+       JSON.stringify(res.defects), JSON.stringify(res.items),
        JSON.stringify({
-         byClass: tally.byClass, byDifficulty: tally.byDifficulty, byPosition: tally.byPosition,
-         byScope: tally.byScope, byVocabulary: tally.byVocabulary,
+         byClass: t.byClass, byDifficulty: t.byDifficulty, byPosition: t.byPosition,
+         byScope: t.byScope, byVocabulary: t.byVocabulary,
        }),
-       args.autonomyRunId ?? null, res.auditModel, auditoria.noOpinion],
+       args.autonomyRunId ?? null, res.auditModel, res.matcherNoOpinion,
+       res.judgeThinking, JSON.stringify(paired ?? {})],
     ).catch((err) => {
       // Gravar é ACESSÓRIO à medição: nunca derruba o número que acabou de ser produzido.
       console.warn(`[specJudgeRecall] persistência falhou: ${String(err).slice(0, 300)}`);
     });
+  };
+
+  const res = await medirBraco(false);
+  if (!res.ran) return res;
+
+  // 6. O BRAÇO B, só quando pedido. Roda DEPOIS (não em paralelo) de propósito: dois estágios B
+  // simultâneos sobre a mesma spec disputariam o mesmo orçamento de tokens e o mesmo lease, e o A/B
+  // mediria a disputa.
+  if (cfg.thinkingAb) {
+    const braco = await medirBraco(true);
+    if (braco.ran) {
+      const paired = pairedComparison(res.items, braco.items);
+      const prosa = abNote(paired, res.tally.recallMin, braco.tally.recallMin);
+      res.thinkingArm = braco;
+      res.abPaired = paired;
+      res.abNote = prosa;
+      braco.abPaired = paired;
+      braco.abNote = prosa;
+      // O pareado mora na linha do braço B: é ela que só existe quando o A/B rodou.
+      if (!args.evaluateOnly) await gravar(braco, paired);
+    } else {
+      res.limitations.push(`braço com raciocínio (GAP-144) NÃO mediu: ${braco.reason ?? "motivo não informado"} — o A/B não rodou, e nada aqui autoriza mudar o padrão`);
+      res.note = recallNote(res.tally, res.limitations);
+    }
   }
+
+  if (!args.evaluateOnly) await gravar(res, undefined);
   return res;
+}
+
+// ── 🔴 GAP-149: o instrumento que NINGUÉM chamava ─────────────────────────────
+//
+// `runJudgeRecall` não tinha um único chamador em todo o repositório: nem rota, nem worker, nem laço.
+// A medição só existia quando alguém a importava À MÃO dentro do container. Isso é a mesma família do
+// GAP-141 (fato medido que ninguém consome), com um agravante: o recall é o número que torna
+// "0 GAPs ATIVOS" interpretável. Sem ele, "zeramos os GAPs" e "o juiz está cego" são a MESMA
+// observação — e a Bancada não tinha como distinguir as duas.
+//
+// O que este tick NÃO faz, de propósito:
+//   * não roda com o laço em voo — só sobre runs TERMINADAS (mesma disciplina do GAP-133), porque uma
+//     medição é um estágio B COMPLETO pago e disputaria o orçamento e o lease do laço de verdade;
+//   * não vem ligado: `SPEC_JUDGE_RECALL=on` é obrigatório. Ligar por padrão dobraria o custo de todo
+//     laço que termina, e o Jean tem de escolher quando pagar por saber;
+//   * não mede duas vezes a mesma spec: uma linha já gravada para `(project_id, spec_hash)` encerra o
+//     assunto. Repetir daria outro gold set (a injeção é do LLM) e dois números incomparáveis — o
+//     GAP-95 outra vez;
+//   * não roda duas medições ao mesmo tempo: uma por processo. Duas medições concorrentes brigariam
+//     pelo mesmo teto de tokens e o número mediria a briga.
+//
+// LIMITAÇÃO DECLARADA: o claim é EM PROCESSO (`emVoo`), não no banco. Se a api reiniciar no meio de
+// uma medição, o próximo tick mede de novo (paga duas vezes) — nunca grava duas vezes, porque a chave
+// única resolve por `ON CONFLICT`. Um claim persistido exigiria coluna nova em `spec_autonomy_runs`;
+// enquanto a medição é opt-in e rara, pagar um retry raro é mais honesto que uma coluna que promete
+// coordenação que não existe (só há um container de api).
+
+/** Quantas runs terminadas o tick olha por vez. Alto não adianta: a medição é serializada. */
+const RECALL_TICK_SCAN = 5;
+/** Uma medição por processo. `null` = livre. */
+let recallEmVoo: string | null = null;
+
+export interface JudgeRecallTickResult {
+  scanned: number;
+  started: number;
+  skipped: number;
+  busy: boolean;
+}
+
+/**
+ * Um tick: se a medição de recall está ligada e nenhuma está em voo, mede o juiz sobre a spec do
+ * último laço TERMINADO que ainda não tem medição para o `spec_hash` atual.
+ *
+ * Nunca lança — é acessório ao worker da Bancada, como o aprendizado e a declaração Connect. A
+ * medição roda FORA do await do tick (leva minutos): o tick é de 20 s e tem guarda de reentrância.
+ */
+export async function judgeRecallTick(db: Db): Promise<JudgeRecallTickResult> {
+  const out: JudgeRecallTickResult = { scanned: 0, started: 0, skipped: 0, busy: false };
+  if (!judgeRecallEnabled()) return out;
+  if (recallEmVoo) { out.busy = true; return out; }
+
+  let runs: Array<Record<string, unknown>> = [];
+  try {
+    runs = (await db.query(
+      `SELECT r.id, r.project_id, r.tenant_id
+         FROM spec_autonomy_runs r JOIN projects p ON p.id = r.project_id
+        WHERE r.finished_at IS NOT NULL
+        ORDER BY r.finished_at DESC LIMIT $1`,
+      [RECALL_TICK_SCAN],
+    )).rows as Array<Record<string, unknown>>;
+  } catch (e) {
+    console.warn(`[specJudgeRecall] varredura falhou: ${String(e).slice(0, 200)}`);
+    return out;
+  }
+  out.scanned = runs.length;
+  if (runs.length === 0) return out;
+
+  const { computeCurrentSpecHash } = await import("./specValidation.js");
+  const { buildValidationInput } = await import("./specValidationInput.js");
+  const { resolveWorkbenchLlm, agentsLlmFields } = await import("./tenantLlmConfig.js");
+
+  for (const row of runs) {
+    const runId = String(row.id);
+    const projectId = String(row.project_id);
+    const tenantId = row.tenant_id == null ? null : String(row.tenant_id);
+    const atual = await computeCurrentSpecHash(db, projectId).catch(() => null);
+    if (!atual || atual.files.length === 0) { out.skipped += 1; continue; }
+
+    const jaTem = (await db.query(
+      "SELECT 1 FROM spec_judge_recall_runs WHERE project_id = $1 AND spec_hash = $2 LIMIT 1",
+      [projectId, atual.specHash],
+    ).catch(() => ({ rows: [] }))).rows;
+    if (jaTem.length) { out.skipped += 1; continue; }
+
+    const files = atual.files.map((f) => ({
+      path: `${f.rel_dir ? f.rel_dir + "/" : ""}${f.filename}`, content: f.content,
+    }));
+    // O MESMO recorte que o estágio B recebeu: sem isto o injetor poderia plantar defeito em arquivo
+    // que o juiz nunca leu, e o "recall" mediria cobertura (GAP-97).
+    const hint = buildValidationInput(files).full;
+    const llm = agentsLlmFields(await resolveWorkbenchLlm({ projectId, tenantId }).catch(() => ({} as never)));
+
+    recallEmVoo = `${projectId}:${atual.specHash}`;
+    out.started += 1;
+    console.info(`[specJudgeRecall] medindo o recall do juiz — projeto=${projectId} run=${runId} spec=${atual.specHash.slice(0, 12)} (${hint.length} arquivo(s) integrais).`);
+    void runJudgeRecall(db, {
+      projectId, specHash: atual.specHash, files, judgedFilesHint: hint, llm,
+      autonomyRunId: runId,
+    })
+      .then((r) => {
+        if (!r.ran) console.warn(`[specJudgeRecall] projeto=${projectId}: medição não rodou — ${r.reason ?? "motivo não informado"}`);
+        else console.info(`[specJudgeRecall] projeto=${projectId}: ${r.note}`);
+      })
+      .catch((e) => console.warn(`[specJudgeRecall] projeto=${projectId}: medição falhou — ${String(e).slice(0, 300)}`))
+      .finally(() => { recallEmVoo = null; });
+    return out;   // uma por tick, em série
+  }
+  return out;
 }
