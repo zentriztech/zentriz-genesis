@@ -459,7 +459,27 @@ export function knownFindingsForJudge(
  * pode estar vivo no agents) — quem chama tem de preservar `stage_b_collected_at` NULL e parar de
  * despachar lotes novos, senão o `collectStageBResults` nunca volta para buscá-lo (GAP-11).
  */
-interface StageBOutcome { findings: ValidationFinding[]; error?: string; pending?: true; /** GAP-129: achados que o teto de ingestão descartou neste lote. */ dropped?: number }
+interface StageBOutcome {
+  findings: ValidationFinding[]; error?: string; pending?: true;
+  /** GAP-129: achados que o teto de ingestão descartou neste lote. */ dropped?: number;
+  /** GAP-140: quantas vezes o prazo da run foi empurrado por PROVA DE VIDA do job deste lote. */
+  renewals?: number;
+}
+
+/**
+ * 🔴 GAP-140 — o prazo só era renovado por lote DESPACHADO, e o 1º lote não despacha nada depois de si.
+ *
+ * Medido ao vivo 2026-09-09 (run `82d02c1c`, NVX LastMile em 4 lotes): a run nasceu às 09:28 com
+ * `deadline_at` 09:48 e o lote 1 seguia em leitura às 09:40 — a primeira renovação do GAP-136 só
+ * aconteceria quando o lote 2 fosse despachado, isto é, DEPOIS de o lote 1 terminar. Um único lote
+ * mais longo que `SPEC_VALIDATION_DEADLINE_MIN` continuava sendo morto pelo watchdog no meio de uma
+ * leitura que este processo estava provando estar viva a cada 8 s (`stage_b_polled_at`).
+ *
+ * O fato já existia e não era usado: um poll 200 do agents diz que o job está de pé do outro lado.
+ * Prazo existe para cortar PARALISIA — job vivo não é paralisia. Então prova de vida também renova,
+ * com folga entre renovações (não a cada 8 s) e sempre sob o teto duro `VALIDATION_MAX_MIN`.
+ */
+const RENEW_ON_ALIVE_MS = 120_000;
 
 async function runStageB(pool: Pool, runId: string, projectId: string, specText: string, knownFindings: unknown[] = []): Promise<StageBOutcome> {
   const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
@@ -488,6 +508,9 @@ async function runStageB(pool: Pool, runId: string, projectId: string, specText:
   await pool.query("UPDATE spec_validation_runs SET agents_job_id = $2 WHERE id = $1", [runId, jobId])
     .catch((e) => console.warn(`[spec-validation] run ${runId}: agents_job_id não gravado (${e instanceof Error ? e.message : String(e)}) — resultado NÃO será recuperável se a espera estourar.`));
   const deadline = Date.now() + VALIDATION_DEADLINE_MIN * 60_000;
+  // GAP-140: renovações desta espera, para o chamador somar e DECLARAR na cobertura.
+  let renewals = 0;
+  let ultimaRenovacao = Date.now();
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 8_000));
     // GAP-66 (migração 104): sinal de vida ANTES do poll. É o único jeito de o coletor distinguir
@@ -514,16 +537,23 @@ async function runStageB(pool: Pool, runId: string, projectId: string, specText:
         // GAP-129: o juiz devolveu mais do que o teto de ingestão aceita. Isso NÃO é "menos GAP".
         console.warn(`[spec-validation] run ${runId}: o juiz devolveu ${parsed.findings.length + parsed.dropped} achados e o teto de ingestão é ${STAGE_B_MAX_FINDINGS} — ${parsed.dropped} DESCARTADO(S). A contagem desta validação está INCOMPLETA por corte de entrada.`);
       }
-      return { findings: parsed.findings, dropped: parsed.dropped };
+      return { findings: parsed.findings, dropped: parsed.dropped, ...(renewals ? { renewals } : {}) };
     }
     if (st === "error") {
-      return { findings: [], error: String(poll.data.error ?? "spec_validator error").slice(0, 300) };
+      return { findings: [], error: String(poll.data.error ?? "spec_validator error").slice(0, 300), ...(renewals ? { renewals } : {}) };
+    }
+    // 🔴 GAP-140: o job respondeu e NÃO terminou ⇒ está de pé do outro lado. Isso é prova de vida do
+    // trabalho em curso, e é o que falta para o prazo da run acompanhar um lote longo. Espaçado por
+    // `RENEW_ON_ALIVE_MS` (não a cada poll) e sempre limitado pelo teto duro contado do início.
+    if (Date.now() - ultimaRenovacao >= RENEW_ON_ALIVE_MS) {
+      ultimaRenovacao = Date.now();
+      if (await renewValidationDeadline(pool, runId, `job ${jobId.slice(0, 8)} vivo no poll (status '${st || "?"}')`)) renewals += 1;
     }
   }
   // Único caminho que deixa `stage_b_collected_at` NULL de propósito: o job pode estar VIVO no
   // agents e o `collectStageBResults` (tick do worker) volta para buscá-lo.
   console.log(`[spec-validation] run ${runId}: espera do estágio B expirou (${VALIDATION_DEADLINE_MIN} min) — job ${jobId} fica PENDENTE de coleta (GAP-11).`);
-  return { findings: [], error: "timeout do estágio adversarial (resultado pendente de coleta)", pending: true };
+  return { findings: [], error: "timeout do estágio adversarial (resultado pendente de coleta)", pending: true, ...(renewals ? { renewals } : {}) };
 }
 
 // ── ciclo de vida da run ──────────────────────────────────────────────────────
@@ -996,6 +1026,7 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
       // (VALIDATION_MAX_MIN desde o início) é o que impede isso de virar "sem prazo".
       if (i > 0 && await renewValidationDeadline(pool, runId, `lote ${i + 1}/${lotes.length} despachado`)) renovacoes += 1;
       const b = await runStageB(pool, runId, projectId, lote.text, known);
+      renovacoes += b.renewals ?? 0; // GAP-140: renovação por prova de vida conta como as outras
       if (b.error) {
         primeiroErro ??= b.error;
         // C7: a falha é do LOTE, e ela nomeia os arquivos que ficaram sem medição neste conteúdo.

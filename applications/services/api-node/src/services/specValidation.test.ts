@@ -4,10 +4,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { runStageA, parseStageBFindings, STAGE_B_MAX_FINDINGS, titleFromRationale, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge, startValidation, renewValidationDeadline, writeValidationResult, type ValidationFinding } from "./specValidation.js";
 import type { Pool } from "pg";
-import { mkdtempSync, writeFileSync } from "fs";
+import { mkdtempSync, writeFileSync, readFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function file(filename: string, content: string, relDir = "") {
   return { filename, file_path: `/x/${filename}`, rel_dir: relDir, content };
@@ -782,6 +785,41 @@ describe("GAP-137 — resultado do dono legítimo não é descartado, e nunca em
       expect(dito).toMatch(/1 finding\(s\) desta execução foram DESCARTADOS/);
       expect(dito).toMatch(/já está em 'failed' com 40 finding\(s\)/);
     } finally { warn.mockRestore(); }
+  });
+});
+
+/**
+ * 🔴 GAP-140 — o prazo renovava por lote DESPACHADO, e o 1º lote não despacha nada depois de si.
+ *
+ * Medido ao vivo (run `82d02c1c`, 2026-09-09): nasceu 09:28 com prazo 09:48 e o lote 1 seguia lendo
+ * às 09:40 — a 1ª renovação do GAP-136 só viria quando o lote 2 fosse despachado, ou seja, depois de
+ * o lote 1 TERMINAR. Um lote sozinho maior que o prazo morria no watchdog enquanto o poll de 8 s
+ * provava, do outro lado, que o job estava vivo.
+ *
+ * `runStageB` não é exportada (é o laço de espera de um lote, não uma unidade pública), então o
+ * invariante é verificado na FONTE — mesmo padrão de `archetypeCatalog.test.ts`. O que precisa valer:
+ * a renovação está DENTRO do laço de poll, é ESPAÇADA (não a cada 8 s) e o número de renovações
+ * chega ao chamador para ser declarado na cobertura.
+ */
+describe("GAP-140 — prova de vida do job também renova o prazo", () => {
+  const src = readFileSync(join(__dirname, "specValidation.ts"), "utf-8");
+  const laco = src.slice(src.indexOf("async function runStageB("), src.indexOf("// ── ciclo de vida da run"));
+
+  it("a espera de UM lote renova por poll vivo, com folga entre renovações e sob o teto duro", () => {
+    expect(src).toMatch(/const RENEW_ON_ALIVE_MS = 120_000;/);
+    // A renovação é condicionada ao tempo desde a última — renovar a cada poll seria 1 UPDATE/8 s.
+    expect(laco).toMatch(/if \(Date\.now\(\) - ultimaRenovacao >= RENEW_ON_ALIVE_MS\)/);
+    expect(laco).toContain("renewValidationDeadline(pool, runId,");
+    expect(laco).toMatch(/vivo no poll/);
+    // O teto duro não é reimplementado aqui: quem o aplica é `renewValidationDeadline` (GAP-136).
+    expect(laco).not.toMatch(/VALIDATION_MAX_MIN/);
+  });
+
+  it("a renovação por prova de vida sai do lote e é SOMADA às do laço (cobertura não mente)", () => {
+    expect(laco).toMatch(/renewals \+= 1/);
+    // Os três desfechos do lote (done, error, timeout) devolvem a contagem — nenhum a engole.
+    expect(laco.match(/\.\.\.\(renewals \? \{ renewals \} : \{\}\)/g)).toHaveLength(3);
+    expect(src).toMatch(/renovacoes \+= b\.renewals \?\? 0;/);
   });
 });
 
