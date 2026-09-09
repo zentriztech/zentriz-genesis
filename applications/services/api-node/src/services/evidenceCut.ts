@@ -47,3 +47,18 @@ export function cutEvidence(text: string | null | undefined, max: number): strin
 export function wouldCut(text: string | null | undefined, max: number): boolean {
   return String(text ?? "").length > max;
 }
+
+/**
+ * 🔴 GAP-129/GAP-130 — a mesma lei um nível acima: **LISTA** cortada em silêncio faz a contagem
+ * mentir. `cutList` mantém o teto e devolve quantos ficaram de fora, para quem chama DECLARAR.
+ */
+export function cutList<T>(items: readonly T[] | null | undefined, max: number): { kept: T[]; dropped: number } {
+  const arr = Array.isArray(items) ? items : [];
+  const kept = arr.slice(0, Math.max(0, max));
+  return { kept, dropped: Math.max(0, arr.length - kept.length) };
+}
+
+/** Marca de corte de lista, no mesmo formato visual do corte de texto. */
+export function listCutMarker(kept: number, total: number): string {
+  return `…⟨CORTADO: ${kept} de ${total} itens — o resto CONTINUA⟩`;
+}

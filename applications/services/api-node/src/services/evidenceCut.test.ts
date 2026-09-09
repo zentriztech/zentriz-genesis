@@ -5,7 +5,7 @@
  * texto diz que mordeu e quanto ficou de fora; (3) quando não morde, não suja o prompt com aviso.
  */
 import { describe, it, expect } from "vitest";
-import { cutEvidence, wouldCut } from "./evidenceCut.js";
+import { cutEvidence, cutList, listCutMarker, wouldCut } from "./evidenceCut.js";
 import { parseStageBFindings, parseStageBFindingsWithDrop, STAGE_B_RATIONALE_MAX, STAGE_B_MAX_FINDINGS } from "./specValidation.js";
 import { readStageBCoverage } from "./specAutonomy.js";
 
@@ -124,5 +124,69 @@ describe("🔴 GAP-129 — o laço LÊ o descarte na cobertura", () => {
   it("descarte zero ou inválido não vira descarte (não invento medição)", () => {
     expect(readStageBCoverage({ full: ["a.md"], outlineOnly: [], droppedFindings: 0 })?.droppedFindings).toBeUndefined();
     expect(readStageBCoverage({ full: ["a.md"], outlineOnly: [], droppedFindings: "muitos" })?.droppedFindings).toBeUndefined();
+  });
+});
+
+/**
+ * 🔴 GAP-130 — o mesmo defeito em mais 4 sítios, MEDIDOS em prod (2026-09-09):
+ *  - casador do gold set: 1 defeito com `mutated` de 407 chars cortado em 400 (justo na cauda, onde o
+ *    defeito injetado mora) e **60,5% (1.462 de 2.417)** dos `rationale` acima de 600 chars ⇒ o recall
+ *    MEDIDO do juiz saía deprimido por corte, não por cegueira do juiz;
+ *  - oráculo: "Prova (verbatim da saída)" cortada em 800 (nenhum finding `oracle` em prod ainda ⇒
+ *    conserto por lei, sem dano medido);
+ *  - gate semântico: lista `missing` cortada em 8;
+ *  - triagem em lote: excedente de 200 fingerprints descartado com resposta 200 OK.
+ */
+describe("🔴 GAP-130 — corte de LISTA declarado (cutList/listCutMarker)", () => {
+  it("lista dentro do teto: nada cortado e nada a declarar", () => {
+    const { kept, dropped } = cutList(["a", "b", "c"], 8);
+    expect(kept).toEqual(["a", "b", "c"]);
+    expect(dropped).toBe(0);
+  });
+
+  it("lista acima do teto: mantém o teto e CONTA o excedente", () => {
+    const itens = Array.from({ length: 12 }, (_, i) => i);
+    const { kept, dropped } = cutList(itens, 8);
+    expect(kept.length).toBe(8);
+    expect(kept).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(dropped).toBe(4);
+  });
+
+  it("entrada nula/não-lista não inventa itens nem corte", () => {
+    expect(cutList(null, 5)).toEqual({ kept: [], dropped: 0 });
+    expect(cutList(undefined, 5)).toEqual({ kept: [], dropped: 0 });
+  });
+
+  it("teto zero/negativo não devolve item algum (mas conta tudo como cortado)", () => {
+    expect(cutList(["a", "b"], 0)).toEqual({ kept: [], dropped: 2 });
+    expect(cutList(["a", "b"], -3)).toEqual({ kept: [], dropped: 2 });
+  });
+
+  it("a marca de lista diz quantos ficaram e quantos eram", () => {
+    const m = listCutMarker(8, 12);
+    expect(m).toContain("8");
+    expect(m).toContain("12");
+    expect(m).toContain("CORTADO");
+    expect(m).toContain("itens");
+  });
+});
+
+describe("🔴 GAP-130 — casador do gold set não recebe corte mudo", () => {
+  it("defeito injetado e justificativa do juiz declaram o corte quando ele morde", async () => {
+    const { matchUserMessage, GOLD_TEXT_MAX, MATCH_RATIONALE_MAX } = await import("./specJudgeRecall.js");
+    // O teto do texto do defeito subiu para 1.200: 407 chars (o caso medido em prod) passa INTEIRO.
+    const medidoEmProd = "m".repeat(407);
+    const enorme = "M".repeat(GOLD_TEXT_MAX + 500);
+    const msg = matchUserMessage(
+      [
+        { id: "d1", file: "a.md", anchor: "§1", defectClass: "contradicao", description: "x", original: "o".repeat(50), mutated: medidoEmProd, scope: "local" },
+        { id: "d2", file: "b.md", anchor: "§2", defectClass: "omissao", description: "y", original: "o", mutated: enorme, scope: "local" },
+      ] as never,
+      [{ file: "a.md", line: null, severity: "blocker", title: "t", rationale: "r".repeat(MATCH_RATIONALE_MAX + 300), source: "judge" }] as never,
+    );
+    expect(msg).toContain(medidoEmProd);                       // 407 chars: intacto
+    expect(msg).toContain(`de ${GOLD_TEXT_MAX + 500} chars`);  // defeito grande: corte DECLARADO
+    expect(msg).toContain(`de ${MATCH_RATIONALE_MAX + 300} chars`); // rationale: corte DECLARADO
+    expect(msg).toContain("o fato CONTINUA");
   });
 });

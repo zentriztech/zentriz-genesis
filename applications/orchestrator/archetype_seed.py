@@ -267,7 +267,10 @@ ARCHETYPES: list[dict[str, Any]] = [
             "600. Um GAP cuja exceção ('exceto quando…') vive na cauda virava regra absoluta, e o "
             "roteador podia não ver o arquivo citado no fim e mandar o GAP para o arquivo errado. "
             "A LISTA tinha o mesmo defeito (GAP-129): o teto de ingestão descartava achados do juiz sem "
-            "dizer, então a contagem caía sem ninguém ter consertado nada."
+            "dizer, então a contagem caía sem ninguém ter consertado nada. E atingia a própria MEDIÇÃO "
+            "(GAP-130): 60,5% (1.462 de 2.417) das justificativas chegavam cortadas ao casador do gold "
+            "set, que decide se o revisor achou o defeito injetado — o recall medido saía deprimido por "
+            "corte, não por cegueira do revisor."
         ),
     },
 ]

@@ -99,6 +99,27 @@ describe("checkSpecIsMinimallyValid — veredito", () => {
    * defeito não aparecia em lugar nenhum — TODA submissão passava sem juiz. Um gate que não julga é
    * pior que gate nenhum: dá a impressão de proteção.
    */
+  /**
+   * 🔴 GAP-130: a lista "o que falta" era cortada em 8 itens em SILÊNCIO. Quem lê a mensagem resolvia
+   * os 8 e o gate barrava de novo pelo 9º, sem nunca dizer que havia mais.
+   */
+  it("lista `missing` acima do teto DECLARA o corte (e abaixo dele não suja a lista)", async () => {
+    const missing = Array.from({ length: 12 }, (_, i) => `falta item ${i + 1}`);
+    mockVerdictOnce(JSON.stringify({ is_spec: false, confidence: 0.95, reason: "vago", missing }));
+    const r = await checkSpecIsMinimallyValid({ title: "X", projectType: "backend_api", content: "texto vago" });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.block.missing.length).toBe(9); // 8 itens + a marca
+    expect(r.block.missing[8]).toContain("CORTADO");
+    expect(r.block.missing[8]).toContain("12");
+
+    mockVerdictOnce(JSON.stringify({ is_spec: false, confidence: 0.95, reason: "vago", missing: missing.slice(0, 3) }));
+    const r2 = await checkSpecIsMinimallyValid({ title: "X", projectType: "backend_api", content: "texto vago" });
+    expect(r2.ok).toBe(false);
+    if (r2.ok) return;
+    expect(r2.block.missing).toEqual(missing.slice(0, 3));
+  });
+
   it("o modelo default do gate é um inference profile COM VERSÃO (não o apelido)", async () => {
     delete process.env.SPEC_GATE_MODEL;
     mockVerdictOnce('{"is_spec": true, "confidence": 0.9, "reason": "ok"}');

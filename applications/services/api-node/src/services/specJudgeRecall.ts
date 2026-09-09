@@ -133,6 +133,7 @@
  *    ⇒ o motivo vai na limitação.
  */
 import { evidenceIsVerbatim } from "./crossFamilyAudit.js";
+import { cutEvidence } from "./evidenceCut.js";
 import { FINDING_CATEGORIES, type Db } from "./findingTriage.js";
 import { parseListResponse } from "./gapPromotionVerdict.js";
 import { callPolicyAgent, sha256Hex } from "./specPolicyGate.js";
@@ -162,6 +163,21 @@ export const AUDIT_MIN_SAMPLE = 3;
  * de DECLARAÇÃO: abaixo dele o número vai com o intervalo de amostragem colado.
  */
 export const RECALL_MIN_ELIGIBLE = 20;
+
+/**
+ * 🔴 GAP-130: tetos do prompt do CASADOR, agora DECLARADOS (`cutEvidence`) — e o do defeito subiu.
+ *
+ * Medido em prod (2026-09-09): 1 defeito do gold set tinha `mutated` com **407 chars** e era cortado
+ * em 400 — justo na cauda, onde o defeito injetado costuma morar — e essa rodada fechou com 1
+ * `undecided`. Pior: **60,5% (1.462 de 2.417)** dos findings têm `rationale` acima de 600 chars, então
+ * na maioria dos casos o casador decidia "o revisor achou este defeito?" lendo justificativa cortada
+ * em silêncio. Isso deprime o recall MEDIDO do juiz — e é esse número que decide se confiamos nele.
+ *
+ * O texto do defeito é o fato primário da medição e são ~7 por rodada: cabe folga (1.200). O
+ * `rationale` multiplica por finding (até `STAGE_B_MAX_FINDINGS`), então sobe pouco e vai declarado.
+ */
+export const GOLD_TEXT_MAX = 1200;
+export const MATCH_RATIONALE_MAX = 900;
 
 export function recallConfig() {
   return {
@@ -791,16 +807,16 @@ export function matchUserMessage(defects: GoldDefect[], findings: ValidationFind
     ...defects.map((d) => [
       `- ${d.id} | arquivo: ${d.file} | âncora: ${d.anchor} | classe declarada: ${d.defectClass}`,
       `  o que é: ${d.description}`,
-      `  texto ANTES (verbatim): ${d.original.slice(0, 400)}`,
-      `  texto DEPOIS (com o defeito): ${d.mutated.slice(0, 400)}`,
+      `  texto ANTES (verbatim): ${cutEvidence(d.original, GOLD_TEXT_MAX)}`,
+      `  texto DEPOIS (com o defeito): ${cutEvidence(d.mutated, GOLD_TEXT_MAX)}`,
       d.scope === "distribuido" && d.file2
-        ? `  contradição no segundo arquivo ${d.file2}: ${String(d.mutated2 ?? "").slice(0, 300)}`
+        ? `  contradição no segundo arquivo ${d.file2}: ${cutEvidence(d.mutated2 ?? "", GOLD_TEXT_MAX)}`
         : "",
     ].filter(Boolean).join("\n")),
     "",
     `FINDINGS QUE O REVISOR REPORTOU (${findings.length}):`,
     ...(findings.length
-      ? findings.map((f, i) => `- #${i + 1} | ${f.file} | ${f.anchor ?? "(sem âncora)"} | ${f.severity} | ${f.category ?? "?"}\n  ${f.title}\n  ${f.rationale.slice(0, 600)}`)
+      ? findings.map((f, i) => `- #${i + 1} | ${f.file} | ${f.anchor ?? "(sem âncora)"} | ${f.severity} | ${f.category ?? "?"}\n  ${f.title}\n  ${cutEvidence(f.rationale, MATCH_RATIONALE_MAX)}`)
       : ["(nenhum finding — o revisor não reportou nada)"]),
     "",
     "Decida, para CADA defect_id, se algum finding o encontrou.",

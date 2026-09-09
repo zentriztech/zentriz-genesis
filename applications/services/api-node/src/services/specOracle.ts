@@ -34,6 +34,7 @@
  * indisponível, JSON ilegível ou juiz ausente ⇒ nada muda, com o motivo dito.
  */
 import { evidenceIsVerbatim } from "./crossFamilyAudit.js";
+import { cutEvidence } from "./evidenceCut.js";
 import type { Db } from "./findingTriage.js";
 import { parseListResponse } from "./gapPromotionVerdict.js";
 import {
@@ -290,7 +291,7 @@ export function normalizeOracleVerdicts(
     if (!r) return base;
     const status = String(r.status ?? "").trim().toLowerCase();
     const evidence = String(r.evidence ?? "").trim();
-    const reason = String(r.reason ?? "").trim().slice(0, 500);
+    const reason = cutEvidence(String(r.reason ?? "").trim(), 500);
     const verbatim = evidence.length > 0 && evidenceIsVerbatim(evidence, evidencia);
     judged++;
     if (status === "satisfied") {
@@ -353,7 +354,7 @@ export function oracleFindings(
         `Trecho da spec: ${c.sourceAnchor}`,
         `A execução real contradiz isso. Comando: \`${run.cmd}\` — exit_code ${run.exitCode}, `
         + `${run.passed} passando, ${run.failed} falhando.`,
-        `Prova (verbatim da saída): ${v.evidence.slice(0, 800)}`,
+        `Prova (verbatim da saída): ${cutEvidence(v.evidence, 800)}`,
         v.reason ? `Parecer do oráculo: ${v.reason}` : "",
       ].filter(Boolean).join("\n"),
       source: "oracle",

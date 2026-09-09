@@ -18,6 +18,7 @@
  */
 
 import { httpPost } from "../routes/specs.js";
+import { cutEvidence, cutList, listCutMarker } from "./evidenceCut.js";
 
 export interface SemanticBlock {
   code: "SPEC_NOT_A_SPEC";
@@ -33,6 +34,8 @@ export type SemanticResult = { ok: true; skipped?: boolean } | { ok: false; bloc
 
 /** Confiança mínima para BLOQUEAR — abaixo disso, deixa passar (fail-open). */
 const MIN_CONFIDENCE = Number(process.env.SPEC_GATE_MIN_CONFIDENCE ?? "0.75");
+/** 🔴 GAP-130: teto de itens da lista "o que falta" — legítimo, mas DECLARADO quando morde. */
+const MISSING_MAX = 8;
 /** Timeout curto: é um check de intake, não pode segurar o request. */
 const TIMEOUT_MS = Number(process.env.SPEC_GATE_TIMEOUT_MS ?? "45000");
 /**
@@ -151,10 +154,16 @@ export async function checkSpecIsMinimallyValid(input: {
     typeof verdict.confidence === "number"
       ? verdict.confidence
       : (verdict.is_spec === false ? MIN_CONFIDENCE : 0);
-  const reason = typeof verdict.reason === "string" ? verdict.reason.slice(0, 300) : "";
-  const missing = Array.isArray(verdict.missing)
-    ? verdict.missing.filter((m): m is string => typeof m === "string").slice(0, 8)
+  const reason = typeof verdict.reason === "string" ? cutEvidence(verdict.reason, 300) : "";
+  // 🔴 GAP-130: a lista do que FALTA também era cortada em silêncio (8 itens). Quem lê a mensagem
+  // precisa saber que existem mais — senão resolve 8 pontos e o gate barra de novo pelo 9º.
+  const missingRaw = Array.isArray(verdict.missing)
+    ? verdict.missing.filter((m): m is string => typeof m === "string")
     : [];
+  const cut = cutList(missingRaw, MISSING_MAX);
+  const missing = cut.dropped > 0
+    ? [...cut.kept, listCutMarker(cut.kept.length, missingRaw.length)]
+    : cut.kept;
 
   // Bloqueia SOMENTE com veredito confiante de "não é spec".
   if (!isSpec && confidence >= MIN_CONFIDENCE) {

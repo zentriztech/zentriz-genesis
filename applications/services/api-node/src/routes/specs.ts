@@ -34,6 +34,8 @@ const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
 // com o enum de status em db/migrations/001_initial_schema.sql.
 const SPEC_LISTING_STATUSES = ["draft", "spec_submitted", "pending_conversion"];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** 🔴 GAP-130: teto da triagem em lote. Existe (anti-abuso), mas o excedente é RECUSADO, não sumido. */
+const TRIAGE_BULK_MAX = 200;
 
 // Nota (Onda 4): os extratores de texto (extractDocxText, extractPdfTextBestEffort,
 // buildGateContent, extractZip) e as constantes de allowlist de ZIP foram movidos para
@@ -1178,8 +1180,19 @@ export async function specRoutes(app: FastifyInstance) {
         const user = getUser(request);
         const proj = await loadAccessibleProject(request.params.id, user);
         if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-        const fps = Array.isArray(request.body?.fingerprints) ? request.body!.fingerprints!.filter((x) => typeof x === "string").slice(0, 200) : [];
-        if (!fps.length) return reply.status(400).send({ code: "BAD_REQUEST", message: "fingerprints[] obrigatório" });
+        const fpsRaw = Array.isArray(request.body?.fingerprints) ? request.body!.fingerprints!.filter((x) => typeof x === "string") : [];
+        if (!fpsRaw.length) return reply.status(400).send({ code: "BAD_REQUEST", message: "fingerprints[] obrigatório" });
+        // 🔴 GAP-130: antes o excedente do teto era descartado em silêncio e a resposta era 200 —
+        // o chamador acreditava ter triado tudo. Teto continua; o corte passa a ser RECUSA declarada.
+        if (fpsRaw.length > TRIAGE_BULK_MAX) {
+          return reply.status(400).send({
+            code: "TRIAGE_BULK_TOO_LARGE",
+            message: `Triagem em lote aceita no máximo ${TRIAGE_BULK_MAX} fingerprints por chamada e você enviou ${fpsRaw.length}. Nada foi triado — divida em lotes (o corte silencioso daria 200 OK sobre uma triagem parcial).`,
+            max: TRIAGE_BULK_MAX,
+            received: fpsRaw.length,
+          });
+        }
+        const fps = fpsRaw;
         return doTriage(user, proj.id, fps, request.body ?? {}, reply);
       },
     );
