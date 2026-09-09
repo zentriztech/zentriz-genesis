@@ -870,9 +870,11 @@ def _maybe_apply_cag_prefix(
         if _orch_dir not in _sys.path:
             _sys.path.insert(0, _orch_dir)
         try:
-            from orchestrator.context_loader import get_context_loader  # type: ignore
+            # 🔴 GAP-146: `prefix_census` vem do MESMO módulo que renderiza o prefixo — o censo fatia o
+            # texto entregue pelos cabeçalhos que aquele renderizador escreveu.
+            from orchestrator.context_loader import get_context_loader, prefix_census  # type: ignore
         except Exception:
-            from context_loader import get_context_loader  # type: ignore
+            from context_loader import get_context_loader, prefix_census  # type: ignore
 
         loader = get_context_loader()
         pkg = loader.load(role=(role or "").lower(), stack_key=stack_key,
@@ -897,6 +899,24 @@ def _maybe_apply_cag_prefix(
             "[CAG/live] role=%s stack=%s project=%s lessons=%d — prefixando %d chars (tokens~=%d)",
             role, stack_key, project_id, len(pkg.lessons_hot), len(prefix), pkg.payload_tokens,
         )
+        # 🔴 GAP-146: o prefixo do CAG é 16% do prompt do CTO (30.4k chars / ~6.420 tokens MEDIDOS em
+        # prod, o MESMO tamanho em toda chamada porque `lessons=20` é o LIMITE da recuperação, sem piso
+        # de similaridade). Duas medidas que faltavam para decidir um piso sem chutar: ONDE estão os
+        # chars (censo por seção) e QUÃO perto do pedido está o que se pagou (score do cosseno, do
+        # melhor ao pior). Cortar lição é regredir o G7 — então mede-se antes.
+        try:
+            _censo = prefix_census(prefix)
+            _scores = [float(l.get("score") or 0.0) for l in pkg.lessons_hot if l.get("score") is not None]
+            logger.info(
+                "[prompt-census] origem=cag-prefix role=%s total=%dc %s scores=%s",
+                (role or "?").upper(), len(prefix),
+                " ".join(f"{k}={v}c" for k, v in _censo.items()),
+                # `melhor→pior` (não a média): o que decide o piso é a CAUDA — a lição do fim da lista
+                # é a que se paga por último e a primeira candidata a não valer o token.
+                (f"{max(_scores):.3f}→{min(_scores):.3f}" if _scores else "nao_medido"),
+            )
+        except Exception as _censo_exc:  # pragma: no cover — instrumento NUNCA derruba a chamada
+            logger.warning("[prompt-census] censo do CAG falhou (segue sem medição): %s", _censo_exc)
         return prefix + "\n" + base_prompt
     except Exception as exc:
         logger.debug("[CAG] no-op por exceção (%s) — prompt original mantido", exc)

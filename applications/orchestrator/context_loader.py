@@ -144,6 +144,43 @@ class ContextPackage:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 🔴 GAP-146 — CENSO do prefixo do CAG
+# ─────────────────────────────────────────────────────────────────────────────
+# MEDIDO em prod: o prefixo do CAG custa ~30.400 chars (~6.420 tokens) em CADA chamada do CTO da
+# Bancada — 16% do prompt mais caro do produto, e o mesmo tamanho em todas as chamadas (`lessons=20`
+# é o LIMITE da recuperação, não uma medida de relevância: `semantic_search` devolve o top-20 sem
+# piso de similaridade). Antes de cortar lição — e cortar lição é regredir o G7, o laço aprendendo —
+# é preciso saber ONDE os 30k estão e QUÃO relevante é o que se pagou.
+#
+# O censo fatia o texto ENTREGUE pelos cabeçalhos que `to_prompt_prefix` escreveu (não recalcula a
+# renderização): duas contas independentes divergiriam, e um instrumento que mede outra coisa que a
+# enviada é pior que nenhum. Por construção `soma(seções) == len(prefix)`.
+
+_CAG_SECTIONS: tuple[tuple[str, str], ...] = (
+    ("connect", "### Contratos Connect aplicáveis"),
+    ("bugs", "### Bugs conhecidos — checklist obrigatório"),
+    ("lessons", "### Lições relevantes (corpus RAG)"),
+)
+
+
+def prefix_census(prefix: str) -> dict[str, int]:
+    """Tamanho de cada seção do prefixo JÁ RENDERIZADO. `cabecalho` = o que vem antes da 1ª seção."""
+    if not prefix:
+        return {}
+    marcos: list[tuple[str, int]] = [("cabecalho", 0)]
+    for nome, header in _CAG_SECTIONS:
+        i = prefix.find(header)
+        if i >= 0:
+            marcos.append((nome, i))
+    marcos.sort(key=lambda kv: kv[1])
+    censo: dict[str, int] = {}
+    for pos, (nome, ini) in enumerate(marcos):
+        fim = marcos[pos + 1][1] if pos + 1 < len(marcos) else len(prefix)
+        censo[nome] = fim - ini
+    return censo
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DB helpers (psycopg2 opcional; fallback gracioso)
 # ─────────────────────────────────────────────────────────────────────────────
 
