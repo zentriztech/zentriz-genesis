@@ -154,6 +154,54 @@ export interface EnrichedFinding extends ValidationFinding {
 export interface ResolvedFinding {
   fingerprint: string; file: string; title: string; severity: string; source: string; category: string | null;
   lastSeenRunId: string; lastSeenAt: string; absentRuns: number; fileRemoved: boolean;
+  /**
+   * 🔴 GAP-169 — COMO este GAP saiu do conjunto ativo. Antes, todo fechamento era o mesmo carimbo e
+   * ninguém distinguia um fato de uma inferência:
+   *
+   *  • `removal` — o arquivo saiu da spec. **Fato verificável.**
+   *  • `deterministic` — finding de `stage_a`, que é código e lê a spec inteira em toda run: a ausência
+   *    dele é a saída de um programa, não o silêncio de um juiz. Reauditar isso com LLM seria pagar
+   *    para reconfirmar aritmética.
+   *  • `proof` — um auditor de OUTRA família leu o texto ATUAL e disse `ausente` citando verbatim o
+   *    trecho que prova a conformidade. É fechamento COM prova.
+   *  • `silence` — o juiz LLM simplesmente parou de relatar. **Não é prova de nada**: medido em prod
+   *    2026-09-09 que 30% (piso) dos fechamentos por silêncio RESSUSCITARAM. Só aparece quando o
+   *    chamador não passou `proven` (comportamento legado, declarado).
+   */
+  closedBy: "removal" | "deterministic" | "proof" | "silence";
+  /** O finding cru, para que o auditor de fechamento (GAP-169) possa montar o dossiê dele. */
+  finding: ValidationFinding;
+}
+/**
+ * 🔴 GAP-169 — candidato a fechamento: ausente há `absentRuns` runs que OLHARAM o alvo, sem prova.
+ *
+ * Este é o estado que não existia. Antes, o finding pulava de "ativo" direto para "resolvido" por
+ * contagem de silêncio; agora a contagem apenas o ELEGE, e quem fecha é o auditor cross-family.
+ * Enquanto não houver veredicto, ele conta como **ATIVO** — fail-CLOSED.
+ */
+export interface ClosureCandidate {
+  fingerprint: string;
+  finding: ValidationFinding;
+  absentRuns: number;
+  lastSeenRunId: string;
+  lastSeenAt: string;
+}
+
+/**
+ * 🔴 GAP-169 — este finding pode ser levado a um auditor cross-family?
+ *
+ * Duas condições, e as duas vêm do `crossFamilyAudit` (é ele quem monta o dossiê ancorado):
+ *   • **tem âncora** — sem endereço não há trecho a recortar, e sem trecho não há o que verificar;
+ *   • **não é `info`** — não conta na contagem nem trava promoção, então auditá-lo gastaria LLM sem
+ *     mudar decisão nenhuma.
+ *
+ * ⚠️ O predicado vive AQUI, na camada de baixo, e o `crossFamilyAudit` o importa — não o contrário.
+ * A razão é o GAP-169 propriamente: se o survey exigisse prova de um finding que o auditor DESCARTA,
+ * ele ficaria ATIVO para sempre, sem nenhum caminho possível para fechar. Esse é o estado eterno da
+ * família do GAP-84, e criá-lo aqui seria trocar um erro por outro pior. Uma régua só, dois usuários.
+ */
+export function isAuditableFinding(f: ValidationFinding): boolean {
+  return !!(f.anchor ?? "").trim() && f.severity !== "info";
 }
 export interface FindingsCounts { active: number; ignored: number; refuted: number; resolved: number; blockersActive: number; byCategory: Record<string, number> }
 export interface ProjectFindingsState {
@@ -161,6 +209,13 @@ export interface ProjectFindingsState {
   findings: EnrichedFinding[];
   resolved: ResolvedFinding[];
   counts: FindingsCounts;
+  /**
+   * 🔴 GAP-169: findings que o juiz PAROU de relatar mas que ainda não têm prova de correção. Eles
+   * estão DENTRO de `findings` (seguem ativos — fail-CLOSED); esta lista existe para que o laço saiba
+   * quais mandar auditar. Fora do laço, ninguém precisa olhar: para todo consumidor de contagem eles
+   * são GAP aberto igual aos outros, e é exatamente esse o ponto.
+   */
+  closureCandidates: ClosureCandidate[];
 }
 
 /**
@@ -310,13 +365,30 @@ export interface FindingsSurvey {
   /** GAPs em aberto: união do julgamento MAIS RECENTE de cada arquivo (não os da última run). */
   active: ValidationFinding[];
   resolved: ResolvedFinding[];
+  /**
+   * 🔴 GAP-169 — ausentes o bastante para fechar, mas SEM prova. Estão contados em `active` (é o
+   * fail-CLOSED), e aparecem aqui para que o laço saiba exatamente o que mandar auditar.
+   */
+  closureCandidates: ClosureCandidate[];
+}
+
+/**
+ * 🔴 GAP-169 — opções de prova de fechamento.
+ *
+ * `proven` é o conjunto de fingerprints com veredicto `ausente` de um auditor de outra família sobre o
+ * conteúdo ATUAL do arquivo (ver `loadClosureProofs`). `null`/ausente = **comportamento legado**: o
+ * silêncio volta a fechar. Mantido explicitamente para que nenhum chamador antigo mude de
+ * comportamento sem alguém decidir — e para que os testes que descrevem o legado continuem válidos.
+ */
+export interface SurveyOpts {
+  proven?: Set<string> | null;
 }
 
 /**
  * Classifica os findings da janela em ATIVOS × RESOLVIDOS contando só as runs que são evidência.
  * `runs` vem da mais recente para a mais antiga, só com status passed|failed.
  */
-export function surveyFindings(runs: RunForSurvey[], currentFiles: Set<string> | null): FindingsSurvey {
+export function surveyFindings(runs: RunForSurvey[], currentFiles: Set<string> | null, opts: SurveyOpts = {}): FindingsSurvey {
   const present = new Map<string, number>(); // fingerprint → índice da run mais recente onde aparece
   const meta = new Map<string, { f: ValidationFinding; runId: string; at: string }>();
   runs.forEach((r, idx) => {
@@ -330,6 +402,8 @@ export function surveyFindings(runs: RunForSurvey[], currentFiles: Set<string> |
   const bases = currentFiles ? new Set([...currentFiles].map(baseName)) : null;
   const active: ValidationFinding[] = [];
   const resolved: ResolvedFinding[] = [];
+  const closureCandidates: ClosureCandidate[] = [];
+  const proven = opts.proven ?? null;
   for (const [fp, idx] of present) {
     const m = meta.get(fp)!;
     // Arquivo que saiu da spec: o GAP morreu com ele — e nenhuma rotação vai julgá-lo de novo, então
@@ -339,16 +413,92 @@ export function surveyFindings(runs: RunForSurvey[], currentFiles: Set<string> |
     // Quantas runs MAIS RECENTES que a última aparição olharam este alvo e não o encontraram.
     const absentRuns = runs.slice(0, idx).filter((r) => isEvidenceFor(r, m.f, covTracked)).length;
     const needed = m.f.source === "stage_a" ? 1 : RESOLVED_AFTER_RUNS;
-    if (removed || absentRuns >= needed) {
+    const close = (closedBy: ResolvedFinding["closedBy"]) => {
       resolved.push({ fingerprint: fp, file: m.f.file, title: m.f.title, severity: m.f.severity, source: m.f.source,
-        category: normalizeCategory(m.f.category), lastSeenRunId: m.runId, lastSeenAt: m.at, absentRuns, fileRemoved: removed });
+        category: normalizeCategory(m.f.category), lastSeenRunId: m.runId, lastSeenAt: m.at, absentRuns,
+        fileRemoved: removed, closedBy, finding: m.f });
+    };
+    // Arquivo removido é FATO, não inferência: fecha sozinho, sem auditor.
+    if (removed) { close("removal"); continue; }
+    if (absentRuns >= needed) {
+      // 🔴 GAP-169 — aqui era `resolved` direto, e era esse salto que fabricava 30% de fechamento falso.
+      //
+      // `stage_a` continua fechando por ausência de propósito: é DETERMINÍSTICO e lê a spec inteira em
+      // toda run (é o `needed = 1` acima). Ausência ali é a saída de um programa, não o silêncio de um
+      // juiz — e reauditar um programa determinístico com LLM seria pagar para reconfirmar aritmética.
+      //
+      // `stage_b` é o juiz LLM, cujo recall medido na literatura é ~47%. A ausência dele ELEGE o
+      // candidato, e só o veredicto `ausente` de outra família sobre o texto ATUAL fecha. Sem
+      // veredicto, o GAP volta a ATIVO: fail-CLOSED, porque um fechamento não provado é uma pergunta
+      // aberta — e pergunta aberta é exatamente o que o laço e o veredicto de promovibilidade já sabem
+      // resolver (inclusive concluindo "não impeditivo"). Nenhum estado eterno novo.
+      if (m.f.source === "stage_a") { close("deterministic"); continue; }
+      if (!proven) { close("silence"); continue; }
+      if (proven.has(fp)) { close("proof"); continue; }
+      // 🔴 O finding que o auditor NÃO PODE examinar (sem âncora, ou `info`) não pode ficar de hostage:
+      // exigir dele uma prova impossível o deixaria ATIVO para sempre. Ele volta ao legado — mas
+      // rotulado `silence`, para que ninguém o confunda depois com um fechamento provado.
+      if (!isAuditableFinding(m.f)) { close("silence"); continue; }
+      closureCandidates.push({ fingerprint: fp, finding: m.f, absentRuns, lastSeenRunId: m.runId, lastSeenAt: m.at });
+      active.push(m.f);
       continue;
     }
     // Nenhum juiz competente disse que sumiu → segue em aberto. `absentRuns` entre 1 e `needed`-1 é o
     // limbo anti-flapping do RFC-0005: nem ativo, nem resolvido (preservado).
     if (absentRuns === 0) active.push(m.f);
   }
-  return { active, resolved };
+  return { active, resolved, closureCandidates };
+}
+
+/**
+ * 🔴 GAP-169 — as PROVAS de fechamento válidas AGORA.
+ *
+ * Uma prova é uma linha de `spec_finding_audits` que cumpre as quatro condições, todas necessárias:
+ *  1. `purpose = 'fechamento'` — foi a pergunta do fechamento, não a de acusação (migração 123);
+ *  2. `verdict = 'ausente'` — o auditor afirmou que o defeito não está no texto;
+ *  3. `evidence_verbatim` — a citação dele foi encontrada LITERALMENTE no trecho enviado. Sem isso o
+ *     "ausente" é indistinguível de opinião, e opinião não fecha GAP;
+ *  4. `file_sha_at` = sha ATUAL do arquivo. É esta linha que faz a prova **expirar sozinha**: se o CTO
+ *     reescreveu o arquivo depois, ninguém verificou o texto novo e o fechamento volta a não ter prova.
+ *
+ * `indecidivel` não aparece de propósito: ele é ausência de prova, e ausência de prova mantém o GAP
+ * ativo. Falha de leitura devolve conjunto VAZIO — fail-CLOSED (nada fecha), nunca o contrário.
+ *
+ * ⚠️ A chave é o fingerprint PRIMÁRIO (`findingFingerprint`), que é o que a auditoria grava. Para os
+ * findings que colidem e caem no degrau de título (`effectiveFingerprints`, medido em 0–6% deles) a
+ * prova simplesmente não casa e o GAP fica ATIVO. É o lado seguro do erro, e está dito aqui porque
+ * senão parece bug de "auditei e não fechou".
+ *
+ * ⚠️ Devolve `null` quando o AUDITOR não existe no ambiente (`SPEC_CROSS_AUDIT != on`) — e aí vale o
+ * comportamento legado (silêncio fecha). Não é frouxidão: exigir prova onde ninguém pode produzi-la
+ * deixaria todo finding de `stage_b` ativo para sempre, e o laço nunca mais poderia baixar a contagem.
+ * A escolha honesta é ligar o rigor exatamente onde existe quem prove — em prod a flag está `on`.
+ */
+export async function loadClosureProofs(db: Db, projectId: string): Promise<Set<string> | null> {
+  // Mesma chave que `crossFamilyAudit` consulta: se ela mudar de nome, os dois lados mudam juntos ou o
+  // laço passa a exigir prova de um auditor desligado.
+  if ((process.env.SPEC_CROSS_AUDIT ?? "").trim().toLowerCase() !== "on") return null;
+  try {
+    const rows = (await db.query(
+      `SELECT DISTINCT a.fingerprint
+         FROM spec_finding_audits a
+         JOIN project_spec_files f
+           ON f.project_id = a.project_id
+          AND f.content_sha256 = a.file_sha_at
+          AND lower(CASE WHEN coalesce(f.rel_dir, '') = '' THEN f.filename
+                         ELSE trim(both '/' from f.rel_dir) || '/' || f.filename END) = lower(a.file_path)
+        WHERE a.project_id = $1
+          AND a.purpose = 'fechamento'
+          AND a.verdict = 'ausente'
+          AND a.evidence_verbatim = true`,
+      [projectId],
+    )).rows as unknown as Array<{ fingerprint: string }>;
+    return new Set(rows.map((r) => String(r.fingerprint)));
+  } catch (e) {
+    // Sem leitura das provas o certo é NÃO fechar nada: um erro de banco não pode virar absolvição.
+    console.warn(`[findingTriage] GAP-169: provas de fechamento indisponíveis (${e instanceof Error ? e.message : String(e)}) — nenhum fechamento por prova nesta leitura.`);
+    return new Set();
+  }
 }
 
 /**
@@ -545,15 +695,20 @@ export interface GapDelta {
   severityFlippedOnUnchangedText: number;
 }
 
-export function gapDelta(runs: RunForSurvey[], currentFiles: Set<string> | null, window = RESOLVED_WINDOW_RUNS): GapDelta {
+export function gapDelta(
+  runs: RunForSurvey[], currentFiles: Set<string> | null, window = RESOLVED_WINDOW_RUNS, opts: SurveyOpts = {},
+): GapDelta {
   if (runs.length < 2) {
     return {
       closed: [], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0, closedOnUnchangedText: 0,
       severityFlips: [], severityFlippedOnUnchangedText: 0,
     };
   }
-  const now = surveyFindings(runs.slice(0, window), currentFiles);
-  const before = surveyFindings(runs.slice(1, window + 1), currentFiles);
+  // 🔴 GAP-169: as DUAS janelas leem as MESMAS provas. Se o delta usasse outra régua que o conjunto
+  // ativo, um candidato sem prova apareceria como "fechado" aqui e "aberto" no badge — a divergência
+  // entre quem MEDE e quem DECIDE que o GAP-72 proibiu.
+  const now = surveyFindings(runs.slice(0, window), currentFiles, opts);
+  const before = surveyFindings(runs.slice(1, window + 1), currentFiles, opts);
   const fpOf = (fs: ValidationFinding[]) => {
     const fps = effectiveFingerprints(fs);
     return new Map(fs.map((f, i) => [fps[i], f]));
@@ -669,9 +824,12 @@ export async function gapDeltaSinceLastRun(db: Db, projectId: string, currentFil
     [projectId, RESOLVED_WINDOW_RUNS + 1],
   )).rows as unknown as Array<{ id: string; created_at: string; findings: ValidationFinding[]; stage_b_coverage?: unknown }>;
   const files = currentFiles ? new Set(currentFiles.map((p) => p.toLowerCase())) : null;
+  const proven = await loadClosureProofs(db, projectId);
   return gapDelta(
     rows.map((r) => ({ id: r.id, created_at: r.created_at, coverage: r.stage_b_coverage, findings: Array.isArray(r.findings) ? r.findings : [] })),
     files,
+    RESOLVED_WINDOW_RUNS,
+    { proven },
   );
 }
 
@@ -761,12 +919,29 @@ export async function projectFindingsState(db: Db, projectId: string, opts: { cu
   const latest = runs[0] ?? null;
   const triages = await loadLiveTriages(db, projectId);
   const files = opts.currentFiles ? new Set(opts.currentFiles.map((p) => p.toLowerCase())) : null;
+  // 🔴 GAP-169: este é O ponto onde o sistema decide o que está aberto. Ler as provas AQUI faz o
+  // fechamento por silêncio desaparecer de todos os consumidores (badge, gate, laço, PDF) de uma vez —
+  // uma régua só, que é a lição do GAP-72 (quem MEDE e quem DECIDE não podem divergir).
+  const proven = await loadClosureProofs(db, projectId);
   const survey = surveyFindings(
     runs.map((r) => ({ id: r.id, created_at: r.created_at, coverage: r.stage_b_coverage, findings: Array.isArray(r.findings) ? r.findings : [] })),
     files,
+    { proven },
   );
   const findings = enrichFindings(survey.active, triages);
-  return { latestRunId: latest?.id ?? null, findings, resolved: survey.resolved, counts: countFindings(findings, survey.resolved) };
+  // 🔴 GAP-169: candidato JÁ TRIADO pelo humano não vale um passe de auditoria — `ignorar`/`refutar`
+  // é decisão registrada, e mais forte que o veredicto de qualquer modelo (ele já sai da contagem
+  // `active` em `countFindings`). O casamento é por IDENTIDADE do objeto, alinhada por índice, porque
+  // o fingerprint EFETIVO é calculado em escopos diferentes (por run no `surveyFindings`, sobre o
+  // conjunto ativo aqui) e pode degradar para o título em um e não no outro — casar por string
+  // descartaria candidato em silêncio, que é o oposto do que esta onda faz.
+  const triado = new Set<ValidationFinding>();
+  survey.active.forEach((f, i) => { if (findings[i]?.triage) triado.add(f); });
+  return {
+    latestRunId: latest?.id ?? null, findings, resolved: survey.resolved,
+    counts: countFindings(findings, survey.resolved),
+    closureCandidates: survey.closureCandidates.filter((c) => !triado.has(c.finding)),
+  };
 }
 
 /** Só o que o gate/contagens precisam (barato): findings da run dada enriquecidos com triagens vivas. */

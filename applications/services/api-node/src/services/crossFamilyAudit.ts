@@ -31,9 +31,14 @@
  *      mesma disciplina do limite (a) do Jean no GAP-77.
  *   2. **não promove e não triaga.** `spec_finding_triage` continua sendo só do humano; promover à
  *      Fábrica continua sendo ato humano com confirmação por digitação.
- *   3. **não decide nada nesta primeira versão** (`SPEC_CROSS_AUDIT=on` só REGISTRA). Medir antes de
- *      gatear: liberar com base em número que ainda não existe seria exatamente a anistia que o
- *      Jean proibiu.
+ *   3. **não decide sobre ACUSAÇÃO** (`purpose = 'acusacao'` só REGISTRA). Medir antes de gatear:
+ *      liberar um finding porque um segundo modelo não o viu seria exatamente a anistia que o Jean
+ *      proibiu.
+ *      🔴 GAP-169 abriu a ÚNICA exceção, e por assimetria: com `purpose = 'fechamento'` o veredicto
+ *      DECIDE, porque ali o finding **já era tratado como fechado** pelo silêncio do juiz (medido em
+ *      prod: 30% desses fechamentos ressuscitaram). Neste papel `presente` só APERTA (reabre) e
+ *      `ausente` apenas confirma COM PROVA o que já era feito às cegas — é monotonicamente mais
+ *      estrito que o status quo, nunca mais frouxo. Ver `gapClosureAudit.ts`.
  *   4. **sem fallback burro.** Falha de LLM, JSON inválido ou trecho vazio ⇒ nenhuma linha (ou
  *      `indecidivel`), e a crítica original continua de pé — `feedback-genesis-100-llm-nunca-automacao-fixa`.
  */
@@ -41,7 +46,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import { httpPost } from "../routes/specs.js";
-import { findingFingerprint, type Db } from "./findingTriage.js";
+import { findingFingerprint, isAuditableFinding, type Db } from "./findingTriage.js";
 import { buildFileDigest } from "./specFileDigest.js";
 import { loadSpecFiles, resolveFindingPath, type SpecFileRef } from "./specGapScope.js";
 import { buildSiblingContext } from "./specSiblingContext.js";
@@ -84,6 +89,21 @@ function num(raw: string | undefined, fallback: number): number {
 
 export type AuditVerdict = "presente" | "ausente" | "indecidivel";
 export type AuditGravity = "grave" | "moderada" | "cosmetica" | "";
+/**
+ * 🔴 GAP-169 — a MESMA máquina responde duas perguntas diferentes, e elas não podem se sobrescrever.
+ *
+ *  • `acusacao` (2026-09-07) — "o defeito que o juiz Claude ACUSA existe no trecho?". Mede o
+ *    falso-positivo do nosso juiz e, por desenho, **não libera nada**: absolver um finding presente
+ *    seria a anistia que o Jean proibiu.
+ *  • `fechamento` (GAP-169) — "este defeito, que o juiz PAROU de relatar, ainda existe no texto
+ *    ATUAL?". Aqui o veredicto DECIDE, e pode: para um finding que o sistema já tratava como fechado
+ *    por silêncio, `presente` só APERTA (reabre) e `ausente` apenas confirma COM PROVA o que era feito
+ *    às cegas. É monotonicamente mais estrito que o status quo.
+ *
+ * Precisa entrar na chave única porque o caso "mesmo finding, mesmo sha, duas perguntas" é comum, não
+ * exótico: 67% das aberturas medidas acontecem em arquivo de sha IDÊNTICO (GAP-126).
+ */
+export type AuditPurpose = "acusacao" | "fechamento";
 
 export interface FindingAudit {
   fingerprint: string;
@@ -100,6 +120,8 @@ export interface FindingAudit {
   model: string;
   sectionChars: number;
   fileShaAt: string;
+  /** GAP-169: qual das duas perguntas esta linha responde. */
+  purpose: AuditPurpose;
 }
 
 export interface CrossFamilyAuditResult {
@@ -266,9 +288,23 @@ export async function buildAuditDossier(
   return { text: parts.join("\n"), cuts };
 }
 
-/** Monta a mensagem do auditor. Trecho primeiro, acusação depois — a ordem que o gold set validou. */
-export function buildAuditMessage(f: ValidationFinding, section: string): string {
+/**
+ * Monta a mensagem do auditor. Trecho primeiro, acusação depois — a ordem que o gold set validou.
+ *
+ * 🔴 GAP-169: no propósito `fechamento` a pergunta factual é a MESMA (o defeito existe neste texto?),
+ * mas o auditor precisa saber que a acusação é ANTIGA e que o trecho é o texto de AGORA. Sem esta
+ * linha ele lê a divergência como má-fé do acusador ("acusou o que não existe") em vez do que ela de
+ * fato é ("o defeito foi corrigido depois da acusação") — e o veredicto sai certo pelo motivo errado,
+ * o que corrompe a leitura de `why` e a medição de falso-positivo do juiz.
+ */
+export function buildAuditMessage(f: ValidationFinding, section: string, purpose: AuditPurpose = "acusacao"): string {
   return [
+    ...(purpose === "fechamento"
+      ? ["CONTEXTO: a acusação abaixo foi feita numa versão ANTERIOR deste arquivo e o revisor original",
+         "PAROU de repeti-la. O TRECHO abaixo é o texto ATUAL. A pergunta é se o defeito acusado ainda",
+         "existe neste texto — divergência entre a acusação e o trecho pode significar que o defeito foi",
+         "CORRIGIDO, não que o acusador tenha inventado.", ""]
+      : []),
     `TRECHO (verbatim, âncora ${f.anchor ?? "(sem âncora)"} do arquivo ${f.file}):`,
     "<<<INICIO>>>",
     section,
@@ -297,7 +333,13 @@ export async function auditFindings(db: Db, args: {
   validationRunId?: string | null;
   autonomyRunId?: string | null;
   llm?: Record<string, unknown> | null;
+  /** GAP-169: `fechamento` audita candidatos a fechamento; default é a auditoria de acusação. */
+  purpose?: AuditPurpose;
+  /** Teto de itens nesta chamada. Default `SPEC_CROSS_AUDIT_MAX`. */
+  max?: number;
 }): Promise<CrossFamilyAuditResult> {
+  const purpose: AuditPurpose = args.purpose ?? "acusacao";
+  const max = args.max && args.max > 0 ? args.max : AUDIT_MAX_PER_RUN;
   const empty = (reason: string): CrossFamilyAuditResult =>
     ({ ran: false, audits: [], reason, skipped: 0, failed: 0, model: AUDIT_MODEL });
 
@@ -309,7 +351,9 @@ export async function auditFindings(db: Db, args: {
 
   // Só o que tem âncora E severidade importante: `info` não conta na contagem nem trava promoção,
   // então auditar `info` gastaria LLM sem mudar decisão nenhuma.
-  const alvo = args.findings.filter((f) => (f.anchor ?? "").trim() && f.severity !== "info");
+  // 🔴 GAP-169: o predicado mora em `findingTriage.isAuditableFinding` porque o survey precisa da MESMA
+  // régua — se ele exigisse prova de um finding que este filtro descarta, o GAP ficaria ativo eterno.
+  const alvo = args.findings.filter(isAuditableFinding);
   const skipped = args.findings.length - alvo.length;
   if (alvo.length === 0) return { ...empty("nenhum finding ancorado importante"), skipped };
 
@@ -332,7 +376,7 @@ export async function auditFindings(db: Db, args: {
   let failed = 0;
   let extraSkipped = 0;
 
-  for (const f of alvo.slice(0, AUDIT_MAX_PER_RUN)) {
+  for (const f of alvo.slice(0, max)) {
     const canon = resolveFindingPath(f.file ?? "", refs.map((r) => r.path));
     const file = canon ? await loadFile(canon.toLowerCase()) : null;
     if (!canon || !file) { extraSkipped++; continue; }
@@ -347,7 +391,7 @@ export async function auditFindings(db: Db, args: {
     try {
       const body = await httpPost(`${agentsUrl}/invoke/raw`, JSON.stringify({
         prompt_override: AUDIT_SYSTEM,
-        user_message: buildAuditMessage(f, section),
+        user_message: buildAuditMessage(f, section, purpose),
         max_tokens: AUDIT_MAX_TOKENS,
         temperature: 0,
         model_id: AUDIT_MODEL,
@@ -383,6 +427,7 @@ export async function auditFindings(db: Db, args: {
       model: AUDIT_MODEL,
       sectionChars: section.length,
       fileShaAt: file.sha,
+      purpose,
     });
   }
 
@@ -402,16 +447,16 @@ export async function persistAudits(
         `INSERT INTO spec_finding_audits
            (project_id, validation_run_id, autonomy_run_id, fingerprint, file_path, anchor,
             severity_claude, category_claude, title, verdict, gravity, evidence, evidence_verbatim,
-            why, model, section_chars, file_sha_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-         ON CONFLICT (project_id, fingerprint, file_sha_at, model) DO UPDATE SET
+            why, model, section_chars, file_sha_at, purpose)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+         ON CONFLICT (project_id, fingerprint, file_sha_at, model, purpose) DO UPDATE SET
            verdict = EXCLUDED.verdict, gravity = EXCLUDED.gravity, evidence = EXCLUDED.evidence,
            evidence_verbatim = EXCLUDED.evidence_verbatim, why = EXCLUDED.why,
            section_chars = EXCLUDED.section_chars, validation_run_id = EXCLUDED.validation_run_id,
            autonomy_run_id = EXCLUDED.autonomy_run_id, created_at = now()`,
         [projectId, validationRunId, autonomyRunId, a.fingerprint, a.file, a.anchor,
          a.severityClaude, a.categoryClaude, a.title, a.verdict, a.gravity, a.evidence,
-         a.evidenceVerbatim, a.why, a.model, a.sectionChars, a.fileShaAt],
+         a.evidenceVerbatim, a.why, a.model, a.sectionChars, a.fileShaAt, a.purpose ?? "acusacao"],
       );
       n++;
     } catch (err) {

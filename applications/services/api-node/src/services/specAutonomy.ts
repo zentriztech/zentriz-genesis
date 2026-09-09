@@ -65,6 +65,9 @@ import type {
   CandidateGate, VerdictRound, PromotabilityReport, WorkProof, LoopWork,
 } from "./gapPromotionVerdict.js";
 import { reconcileGapDelta, buildPersistentRefs, type PersistentGapRef } from "./gapContinuity.js";
+// 🔴 GAP-169: fechar GAP de stage_b passa a exigir prova de outra família, não o silêncio do juiz.
+// Import estático porque roda em TODA validação do laço (é o caminho comum, não a exceção).
+import { auditClosureCandidates, describeClosureAudit, type ClosureAuditResult } from "./gapClosureAudit.js";
 // 🔴 A1: o desfecho que o agente declarou por GAP — lido do job anterior deste arquivo e devolvido a
 // ele no despacho, e registrado no log da rodada para ser auditável fora do banco de jobs.
 import {
@@ -660,6 +663,38 @@ async function currentGaps(db: Db, projectId: string): Promise<GapTally> {
   const currentFiles = await specFilePaths(db, projectId).catch(() => null); // GAP-46
   const state = await projectFindingsState(db, projectId, { currentFiles });
   return tallyGaps(state.findings);
+}
+
+/**
+ * 🔴 GAP-169 — manda auditar os fechamentos que até aqui eram inferidos do SILÊNCIO do juiz.
+ *
+ * Medido em prod (NVX LastMile, 39 validações): 56 ressurreições em 46 âncoras ⇒ **≥30% dos
+ * fechamentos por silêncio eram defeito vivo**, e ~24% dos "GAPs novos" de cada validação eram
+ * REDESCOBERTA paga a preço de passe inteiro de Opus. Agora a ausência só ELEGE o candidato; quem
+ * fecha é o veredicto `ausente`, com citação verbatim, de um auditor de OUTRA família sobre o texto
+ * ATUAL. Sem veredicto o GAP segue ATIVO (fail-CLOSED) — nenhum fechamento novo é criado por esta
+ * mudança, ela só passa a exigir prova do que já era fechado às cegas.
+ *
+ * ⚠️ Best-effort por desenho, mas com o erro para o lado SEGURO: se a auditoria não roda (flag off,
+ * modelo fora do ar, teto da rodada), o candidato **continua contado como GAP aberto**. O laço fica
+ * mais conservador, nunca mais frouxo. Por isso um `catch` aqui não pode derrubar o passe.
+ */
+async function auditClosuresFor(db: Db, run: AutonomyRun): Promise<ClosureAuditResult | null> {
+  try {
+    const currentFiles = await specFilePaths(db, run.projectId).catch(() => null);
+    const state = await projectFindingsState(db, run.projectId, { currentFiles });
+    const cands = state.closureCandidates;
+    if (cands.length === 0) return null;
+    const res = await auditClosureCandidates(db, {
+      projectId: run.projectId, candidates: cands,
+      validationRunId: run.validationRunId, autonomyRunId: run.id,
+    });
+    console.log(`[SpecAutonomy] run=${run.id} GAP-169 verificação de fechamento: ${cands.length} candidato(s) — ${describeClosureAudit(res)}`);
+    return res;
+  } catch (e) {
+    console.warn(`[SpecAutonomy] run=${run.id} GAP-169 verificação de fechamento falhou (não crítico; candidatos seguem ATIVOS): ${msg(e)}`);
+    return null;
+  }
 }
 
 // ── leitura/escrita da spec primária (espelha PATCH /api/projects/:id/spec-content) ──
@@ -3834,6 +3869,12 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     return true;
   }
 
+  // 🔴 GAP-169 — ANTES de contar: os findings que o juiz PAROU de relatar vão ser auditados por outra
+  // família sobre o texto ATUAL. Aqui é o único lugar certo do laço: depois de a validação terminar
+  // (é ela que elege os candidatos, ao calar sobre eles) e antes de `currentGaps`, para que a prova
+  // obtida agora já entre na contagem desta rodada em vez de só na próxima.
+  const fechamento = await auditClosuresFor(db, run);
+
   const gaps = await currentGaps(db, run.projectId);
   const before = run.gapsCurrent ?? gaps.important;
   // 🔴 GAP-41: o total pode ficar PARADO com o laço fechando e abrindo a mesma quantidade — medido em
@@ -4083,7 +4124,18 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     // GAP-67: o chat é onde o Jean lê o resultado do passe — a parcela rebatizada tem de aparecer AQUI,
     // não só no detalhe da rodada, senão "11 fechados" segue passando por progresso.
     (persisted > 0 ? ` ⚠️ **${persisted} defeito(s) apenas REBATIZADO(s)** pela edição (seção renumerada/movida): continuam abertos e não entram em nenhuma das duas contagens.` : "") +
-    (delta && cont && !cont.reconciled ? ` ⚠️ Estes dois números **não foram reconciliados** (${cont.reason ?? "reconciliador indisponível"}) — parte pode ser o mesmo defeito com âncora nova.` : ""));
+    (delta && cont && !cont.reconciled ? ` ⚠️ Estes dois números **não foram reconciliados** (${cont.reason ?? "reconciliador indisponível"}) — parte pode ser o mesmo defeito com âncora nova.` : "") +
+    // 🔴 GAP-169: a linha mais importante desta nota quando ela aparece. O número acima SOBE quando o
+    // laço deixa de fechar por silêncio, e essa subida é REVELAÇÃO, não regressão — foi assim no C3
+    // (21→44, quando o juiz passou a julgar 12 arquivos em vez de 2). Se este fato ficasse só no log do
+    // servidor, o Jean leria a subida como piora do produto justamente na rodada em que ele melhorou.
+    (fechamento?.ran
+      ? ` 🔎 **Fechamento verificado** (GAP-169): ${describeClosureAudit(fechamento)} ` +
+        `Ausência de relato do juiz não fecha mais nada por si — em prod, 30% dos fechamentos por silêncio eram defeito VIVO que voltava depois. ` +
+        (fechamento.reabertos > 0 || fechamento.indecidiveis > 0 || fechamento.sobraram > 0
+          ? `Se a contagem SUBIU, é revelação e não regressão: o defeito já estava na spec, só não estava sendo contado.`
+          : "")
+      : ""));
 
   if (gaps.important === 0) {
     // 🔴 GAP-19: "zero GAPs" só é sucesso se o juiz LEU a spec inteira. Medido em prod 2026-09-06

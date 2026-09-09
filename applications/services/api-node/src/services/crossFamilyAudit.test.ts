@@ -233,7 +233,8 @@ describe("tally", () => {
   const a = (over: Partial<FindingAudit>): FindingAudit => ({
     fingerprint: "fp", file: "a.md", anchor: "§1", severityClaude: "blocker", categoryClaude: "c",
     title: "t", verdict: "presente", gravity: "grave", evidence: "e", evidenceVerbatim: true,
-    why: "w", model: "amazon.nova-pro-v1:0", sectionChars: 100, fileShaAt: "sha", ...over,
+    why: "w", model: "amazon.nova-pro-v1:0", sectionChars: 100, fileShaAt: "sha",
+    purpose: "acusacao", ...over,
   });
 
   it("conta veredictos e gravidades separadamente", () => {
