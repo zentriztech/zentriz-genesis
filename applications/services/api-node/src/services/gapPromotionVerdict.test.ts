@@ -35,6 +35,7 @@ const {
   verdictConfig, selectVerdictCandidates, runVerdictRound, parseListResponse, anchoredSection,
   focusRoundsByFile, focusRoundsByAnchor, saveVerdicts, livePromotionVerdicts, promotabilityReport,
   proveWork, anchorHistories, focusKey, attackedRoundsByAnchor, parseCountField, anchorShaAt,
+  sameBytesSilences,
 } = await import("./gapPromotionVerdict.js");
 const { anchorSearchKey } = await import("./gapPersistence.js");
 
@@ -410,6 +411,111 @@ describe("selectVerdictCandidates — limite (c): as guardas de qualidade", () =
     expect(gate.candidates).toHaveLength(8);
     expect(gate.candidates[0].times).toBeGreaterThanOrEqual(gate.candidates[7].times);
     expect(gate.candidates.map((c) => c.anchor)).not.toContain("## 0 Seção");
+  });
+});
+
+/**
+ * 🔴 GAP-165 — o juiz sabia "reapareceu N vezes" e não sabia quantas leituras dos MESMOS BYTES ficaram
+ * CALADAS. Irmão do GAP-158 (severidade oscila sobre texto invariante), só que na DETECÇÃO.
+ *
+ * MEDIDO em prod 2026-09-09 (projeto `e2a1988c`, 8 validações, 13/13 arquivos julgados por inteiro):
+ * 7 de 67 GAPs importantes com endereço têm silêncio competente sobre bytes idênticos, e um deles
+ * (`README.md CI-GATE-01`, 🔴 blocker, `times = 4`) já é candidato hoje.
+ */
+describe("sameBytesSilences (GAP-165) — silêncio competente sobre bytes idênticos", () => {
+  /** Validação com sha por arquivo — é o `fullShas` que a cobertura do estágio B grava. */
+  const VS = (full: string[], findings: EnrichedFinding[], shas: Record<string, string>): PastValidation =>
+    ({ findings, coverage: { full, fullShas: shas } }) as unknown as PastValidation;
+  const fp = findingFingerprint(F());
+
+  it("sem sha registrado NÃO afirma nada — `null`, nunca 'zero silêncio'", () => {
+    const medir = sameBytesSilences([V(["modelo-dados.md"], [F()]), V(["modelo-dados.md"], [])]);
+    expect(medir(fp, "modelo-dados.md")).toBeNull();
+  });
+
+  it("mede 1 de 2 quando uma leitura competente dos MESMOS bytes não acusou", () => {
+    const medir = sameBytesSilences([
+      VS(["modelo-dados.md"], [F()], { "modelo-dados.md": "sha-A" }),
+      VS(["modelo-dados.md"], [], { "modelo-dados.md": "sha-A" }),
+    ]);
+    expect(medir(fp, "modelo-dados.md")).toEqual({ observations: 2, silent: 1 });
+  });
+
+  it("leitura de bytes DIFERENTES não entra na conta: ali o silêncio não significa nada", () => {
+    const medir = sameBytesSilences([
+      VS(["modelo-dados.md"], [F()], { "modelo-dados.md": "sha-A" }),
+      VS(["modelo-dados.md"], [], { "modelo-dados.md": "sha-VELHO" }),
+      VS(["modelo-dados.md"], [], { "modelo-dados.md": "sha-VELHO" }),
+    ]);
+    expect(medir(fp, "modelo-dados.md")).toEqual({ observations: 1, silent: 0 });
+  });
+
+  it("validação que viu o arquivo só por SUMÁRIO não é observação (GAP-20: ausência só é prova se alguém olhou)", () => {
+    const medir = sameBytesSilences([
+      VS(["modelo-dados.md"], [F()], { "modelo-dados.md": "sha-A" }),
+      VS(["outro.md"], [], { "outro.md": "sha-B" }),
+    ]);
+    expect(medir(fp, "modelo-dados.md")).toEqual({ observations: 1, silent: 0 });
+  });
+
+  it("o portão carrega o fato no candidato e o declara na recusa por reincidência", () => {
+    const runs = [
+      VS(["modelo-dados.md"], [F()], { "modelo-dados.md": "sha-A" }),
+      VS(["modelo-dados.md"], [], { "modelo-dados.md": "sha-A" }),
+      VS(["modelo-dados.md"], [], { "modelo-dados.md": "sha-A" }),
+    ];
+    const gate = selectVerdictCandidates(base({ runs }));
+    // times = 1 (só a mais nova acusou) ⇒ recusado por reincidência, mas o motivo agora DIZ o silêncio:
+    // sem isso o log não distingue defeito recém-nascido de detecção instável.
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected[0].why).toMatch(/reincidência insuficiente/);
+    expect(gate.rejected[0].why).toMatch(/2 de 3 leitura\(s\) competente\(s\) dos MESMOS bytes NÃO acusou/);
+
+    // Já elegível (reincidente) ⇒ o fato viaja no candidato, para o juiz calibrar.
+    const reincidente = selectVerdictCandidates(base({
+      runs: [...runs.slice(0, 1), VS(["modelo-dados.md"], [F()], { "modelo-dados.md": "sha-A" }),
+        VS(["modelo-dados.md"], [F()], { "modelo-dados.md": "sha-A" }), runs[1]],
+    }));
+    expect(reincidente.candidates).toHaveLength(1);
+    expect(reincidente.candidates[0].sameBytesSilence).toEqual({ observations: 4, silent: 1 });
+  });
+
+  it("sem silêncio o candidato não ganha campo inventado (o fato é medido, não suposto)", () => {
+    const gate = selectVerdictCandidates(base({
+      runs: [
+        VS(["modelo-dados.md"], [F()], { "modelo-dados.md": "sha-A" }),
+        VS(["modelo-dados.md"], [F()], { "modelo-dados.md": "sha-A" }),
+        VS(["modelo-dados.md"], [F()], { "modelo-dados.md": "sha-A" }),
+      ],
+    }));
+    expect(gate.candidates[0].sameBytesSilence).toEqual({ observations: 3, silent: 0 });
+  });
+
+  it("🔴 o fato vai ao JUIZ e NÃO ao promotor — defesa por procedimento seria liberação sem olhar o trecho", async () => {
+    const claim = { id: "g1", artifact: "POST /shipments", harm: "eu criaria status como enum de 4 valores e §7 exige 6 valores distintos" };
+    httpPost
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [claim] }) }))
+      .mockResolvedValueOnce(JSON.stringify({
+        response: JSON.stringify({ verdicts: [{ id: "g1", impact: "impeditivo", reason: "a fábrica escolheria o enum errado porque o trecho declara dois conjuntos" }] }),
+        model_used: "m1",
+      }));
+    await runVerdictRound([C({ sameBytesSilence: { observations: 4, silent: 2 } })], { maxRelease: 3 });
+    const promotor = JSON.parse(httpPost.mock.calls[0][1]) as { user_message: string };
+    const juiz = JSON.parse(httpPost.mock.calls[1][1]) as { user_message: string };
+    expect(promotor.user_message).not.toContain("DETECÇÃO INSTÁVEL");
+    expect(juiz.user_message).toContain("DETECÇÃO INSTÁVEL: 2 de 4");
+    // Nunca lido como inocência, e o limite da medição vai junto — o juiz decide pelo TRECHO.
+    expect(juiz.user_message).toContain("NÃO é prova de que o defeito não existe");
+    expect(juiz.user_message).toMatch(/SUPERESTIMAR o silêncio/);
+  });
+
+  it("silêncio ZERO não gasta token: nenhuma linha entra no prompt do juiz", async () => {
+    httpPost
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [{ id: "g1", artifact: "POST /x", harm: "eu criaria a rota com o verbo errado porque §2 e §9 divergem no método" }] }) }))
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ verdicts: [{ id: "g1", impact: "impeditivo", reason: "a fábrica escolheria o verbo errado, e a divergência está no trecho" }] }), model_used: "m1" }));
+    await runVerdictRound([C({ sameBytesSilence: { observations: 3, silent: 0 } })], { maxRelease: 3 });
+    const juiz = JSON.parse(httpPost.mock.calls[1][1]) as { user_message: string };
+    expect(juiz.user_message).not.toContain("DETECÇÃO INSTÁVEL");
   });
 });
 

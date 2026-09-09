@@ -60,7 +60,9 @@ import { sha256Hex } from "../lib/specTreeHash.js";
 import {
   splitSections, clipSection, buildAnchorIndex, locateSectionIndex, sectionSubtree, anchorSearchKey,
 } from "../lib/markdownSections.js";
-import { findingFingerprint, effectiveFingerprints, judgedFilesOf, fileJudgedIn } from "./findingTriage.js";
+import {
+  findingFingerprint, effectiveFingerprints, judgedFilesOf, fileJudgedIn, judgedShasOf, shaJudgedIn,
+} from "./findingTriage.js";
 import type { Db, EnrichedFinding } from "./findingTriage.js";
 import type { PastValidation } from "./gapPersistence.js";
 import type { ValidationFinding } from "./specValidation.js";
@@ -261,6 +263,70 @@ export interface Candidate {
    * dado que não se sustenta. O código não reclassifica nada; ele DECLARA a oscilação.
    */
   severityHistory?: string[];
+  /**
+   * 🔴 GAP-165 — quantas validações COMPETENTES leram os MESMOS BYTES deste arquivo e NÃO acusaram este
+   * defeito. `null` = não medido (sem sha registrado numa das pontas), nunca "zero silêncio".
+   */
+  sameBytesSilence?: { observations: number; silent: number } | null;
+}
+
+/**
+ * 🔴 GAP-165 — o juiz recebe "reapareceu em N validações competentes" e nada sobre as validações
+ * competentes que leram **os mesmos bytes** e ficaram CALADAS.
+ *
+ * O irmão deste fato é o GAP-158 (a severidade do MESMO defeito oscila sobre texto invariante). Aqui a
+ * oscilação é da própria DETECÇÃO: `times` só sabe contar aparições, então um defeito relatado em 4 de
+ * 5 leituras do mesmo texto chega ao juiz indistinguível de um relatado em 4 de 4. E é o juiz que
+ * calibra "na dúvida é IMPEDITIVO" — calibrar por reincidência sem saber a taxa de silêncio é decidir
+ * com metade do instrumento.
+ *
+ * MEDIDO em prod 2026-09-09 (projeto `e2a1988c`, NVX LastMile, 8 validações, 13/13 arquivos julgados
+ * por inteiro em todas): dos 67 GAPs importantes com endereço e sha, **7 (10,4%) têm silêncio
+ * competente sobre bytes idênticos** — e um deles, `README.md CI-GATE-01` (🔴 blocker), tem
+ * `times = 4`, isto é, JÁ É candidato hoje e o juiz o julga sem este fato.
+ *
+ * Régua (a mesma dos GAP-126/154/158, e a mesma da medição): o sha de referência é o da leitura
+ * competente MAIS RECENTE do arquivo; contam como observação as validações competentes cujo sha do
+ * arquivo é IGUAL a ele; identidade é o fingerprint EFETIVO (`effectiveFingerprints`), que já absorve o
+ * rebatismo de âncora reconciliado do GAP-67.
+ *
+ * ⚠️ Limite DECLARADO ao juiz junto do número: se uma validação relatou o MESMO defeito com outra
+ * âncora e a reconciliação não ligou as duas, isto SUPERESTIMA o silêncio. Por isso o fato é dito como
+ * instabilidade de detecção ("julgue pelo TRECHO"), nunca como evidência de inocência — e o código não
+ * muda nenhuma guarda por causa dele: o que muda é o que o juiz sabe.
+ *
+ * Devolve uma função (não um mapa) porque o custo por candidato tem de ser O(runs): o pré-cálculo por
+ * validação — cobertura, shas e fingerprints efetivos — acontece UMA vez.
+ */
+export function sameBytesSilences(
+  runs: PastValidation[],
+): (fingerprint: string, file: string) => { observations: number; silent: number } | null {
+  const pre = runs.map((r) => ({
+    judged: judgedFilesOf(r.coverage),
+    shas: judgedShasOf(r.coverage),
+    fps: new Set(effectiveFingerprints(r.findings ?? [])),
+  }));
+  return (fingerprint: string, file: string) => {
+    const f = String(file ?? "").trim().toLowerCase();
+    if (!fingerprint || !f) return null;
+    // O sha de REFERÊNCIA é o da leitura competente mais recente: é o texto sobre o qual o juiz vai
+    // decidir. Sem ele nada pode ser afirmado (cobertura legada sem `fullShas`).
+    let ref: string | null = null;
+    for (const p of pre) {
+      if (!p.judged || !fileJudgedIn(f, p.judged)) continue;
+      const sha = shaJudgedIn(f, p.shas);
+      if (sha) { ref = sha; break; }
+    }
+    if (!ref) return null;
+    let observations = 0, silent = 0;
+    for (const p of pre) {
+      if (!p.judged || !fileJudgedIn(f, p.judged)) continue;
+      if (shaJudgedIn(f, p.shas) !== ref) continue;
+      observations++;
+      if (!p.fps.has(fingerprint)) silent++;
+    }
+    return { observations, silent };
+  };
 }
 
 export interface CandidateGate {
@@ -586,6 +652,9 @@ export function selectVerdictCandidates(args: {
     }
   }
 
+  // 🔴 GAP-165: pré-cálculo único (cobertura + shas + fingerprints efetivos por validação).
+  const silenceOf = sameBytesSilences(args.runs);
+
   const candidates: Candidate[] = [];
   for (const f of args.findings) {
     if (f.triage) continue;
@@ -607,8 +676,15 @@ export function selectVerdictCandidates(args: {
       continue;
     }
     const times = competentCount.get(fp) ?? 0;
+    // 🔴 GAP-165: medido ANTES da recusa por reincidência, porque é justamente na recusa que o número
+    // "reapareceu em 1 validação" precisa vir acompanhado de "e 1 leitura dos MESMOS bytes ficou calada":
+    // sem isso o log de auditoria não distingue defeito recém-nascido de detecção instável.
+    const silence = silenceOf(fp, file);
+    const silenceNote = silence && silence.silent > 0
+      ? `; ${silence.silent} de ${silence.observations} leitura(s) competente(s) dos MESMOS bytes NÃO acusou este defeito`
+      : "";
     if (times < cfg.minRecurrence) {
-      rejected.push({ file, anchor, why: `reincidência insuficiente: reapareceu em ${times} validação(ões) competente(s), mínimo ${cfg.minRecurrence}` });
+      rejected.push({ file, anchor, why: `reincidência insuficiente: reapareceu em ${times} validação(ões) competente(s), mínimo ${cfg.minRecurrence}${silenceNote}` });
       continue;
     }
     // 🔴 GAP-81: a conta é de rodadas DEDICADAS a este defeito (`focusLevel = 2`), não de rodadas do
@@ -632,7 +708,7 @@ export function selectVerdictCandidates(args: {
       rejected.push({ file, anchor, why: "âncora não localizável no arquivo: sem o trecho verbatim o juiz decidiria sobre um resumo" });
       continue;
     }
-    candidates.push({ finding: f, fingerprint: fp, file, anchor, times, focusRounds: focus, attackedRounds: attacked, fileRounds: focusFile, section, severityHistory: severityTrail.get(fp) });
+    candidates.push({ finding: f, fingerprint: fp, file, anchor, times, focusRounds: focus, attackedRounds: attacked, fileRounds: focusFile, section, severityHistory: severityTrail.get(fp), sameBytesSilence: silence });
   }
   // Mais reincidente primeiro: se algo cair pelo teto, cai o menos insistente. Empate desce para o
   // trabalho medido — primeiro a rodada dedicada, depois o trecho reescrito (GAP-114).
@@ -701,7 +777,16 @@ const JUDGE_SYSTEM = [
   '{"verdicts":[{"id":"g1","impact":"impeditivo","reason":"a fábrica escolheria bcrypt e §4 exige Argon2id"}]}',
 ].join(" ");
 
-function describeCandidate(id: string, c: Candidate): string {
+/**
+ * O candidato em texto. `forJudge` acrescenta os fatos que só o JUIZ deve pesar.
+ *
+ * 🔴 GAP-165 — a taxa de silêncio (`sameBytesSilence`) é fato para o juiz, **não** para o promotor. O
+ * promotor responde uma pergunta de engenharia ("o que eu construiria errado?") em que a estabilidade da
+ * detecção não entra; e como a defesa dele só vale se CITAR o trecho, dar-lhe "outras validações não
+ * acusaram" só abriria caminho para uma defesa que não olha o texto — risco de liberação por argumento
+ * de procedimento. O juiz, que decide contra o trecho verbatim, é quem precisa da calibração.
+ */
+function describeCandidate(id: string, c: Candidate, forJudge = false): string {
   const rationale = String((c.finding as { rationale?: string }).rationale ?? "").replace(/\s+/g, " ").slice(0, RATIONALE_SLICE);
   return [
     `### ${id} [${c.finding.severity}] arquivo=${c.file} âncora=${c.anchor}`,
@@ -713,6 +798,16 @@ function describeCandidate(id: string, c: Candidate): string {
     ...((c.severityHistory?.length ?? 0) > 1
       ? [`⚠️ severidade INSTÁVEL para este MESMO defeito nas validações competentes: ${c.severityHistory!.join(" ← ")}`
         + " (a mais recente primeiro). O rótulo acima é o último relato, não um fato estável: julgue pelo TRECHO."]
+      : []),
+    // 🔴 GAP-165: a DETECÇÃO também oscila, e sobre os MESMOS bytes. Dito com o denominador (senão "1
+    // ficou calada" não tem tamanho), com o limite da medição, e com a instrução de não ler isto como
+    // inocência — a decisão continua sendo contra o trecho.
+    ...(forJudge && (c.sameBytesSilence?.silent ?? 0) > 0
+      ? [`⚠️ DETECÇÃO INSTÁVEL: ${c.sameBytesSilence!.silent} de ${c.sameBytesSilence!.observations} validação(ões)`
+        + " competente(s) que leram ESTES MESMOS BYTES por inteiro NÃO acusaram este defeito."
+        + " Isto NÃO é prova de que o defeito não existe (pode ser recall do validador), e pode"
+        + " SUPERESTIMAR o silêncio se outra validação relatou o mesmo defeito com outra âncora sem"
+        + " reconciliação. Use como calibração da confiança no relato e julgue pelo TRECHO."]
       : []),
     "trecho da spec, VERBATIM:",
     "```",
@@ -936,7 +1031,8 @@ export async function runVerdictRound(
       const peca = p.stance === "acusacao"
         ? `ACUSAÇÃO de quem vai construir: artefato=${p.artifact} :: ${p.harm}`
         : `DEFESA de quem vai construir (ele afirma que NÃO há dano — verifique contra o trecho): ${p.defense}`;
-      return `${describeCandidate(id, c)}\n${peca}`;
+      // 🔴 GAP-165: `forJudge` — só aqui entram os fatos de calibração do julgamento.
+      return `${describeCandidate(id, c, true)}\n${peca}`;
     }).join("\n\n");
 
     let decisions: Array<Record<string, unknown>> | null = null;
