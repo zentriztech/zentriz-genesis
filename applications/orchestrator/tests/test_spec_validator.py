@@ -393,3 +393,45 @@ def test_refuter_system_forbids_non_finding_as_blocker():
     # A regra tem de viver no MESMO bloco que cria o risco (continuidade), não perdida no fim.
     corte = REFUTER_SYSTEM.index("CONTINUIDADE ENTRE VALIDAÇÕES")
     assert REFUTER_SYSTEM.index("PROIBIDO devolver um item") > corte
+
+
+# ── 🔴 GAP-142 — cache de prompt: marcado SÓ onde o prefixo repete byte a byte ──
+
+
+def _kw_calls(votes_env, monkeypatch):
+    monkeypatch.setenv("SPEC_VALIDATOR_VOTES", str(votes_env))
+    monkeypatch.delenv("SPEC_VALIDATOR_TRIAGE_MODEL", raising=False)
+    vistos = []
+
+    def llm(system, user, model_id, **kw):
+        vistos.append(kw)
+        if system == CONSOLIDATE_SYSTEM:
+            return json.dumps({"findings": []})
+        return json.dumps({"findings": [
+            {"file": "s.md", "line": None, "severity": "warning", "anchor": "FR-01",
+             "title": "t", "rationale": "r"},
+        ]})
+
+    validate_spec("spec substantiva", llm_fn=llm)
+    return vistos
+
+
+def test_cache_marcado_no_refutador_quando_ha_multi_voto(monkeypatch):
+    """Com 3 votos o refutador recebe o MESMO system e o MESMO user 3x em serie — e o unico prefixo
+    do cerebro que repete byte a byte dentro do TTL de 5 min do cache do Bedrock. Medido em prod:
+    `spec_validator` = 90.986.571 tokens de entrada em 3 dias, 80% a menos de 5 min da chamada
+    anterior. 3N de entrada passam a ~1,45N (1,25 escrita + 0,1 + 0,1 de leitura)."""
+    vistos = _kw_calls(3, monkeypatch)
+    refutadores = [k for k in vistos if k.get("usage_agent") == "spec_validator"]
+    assert len(refutadores) == 3
+    assert all(k.get("cache_prefix") is True for k in refutadores)
+    # A consolidacao recebe um payload DIFERENTE a cada rodada (as analises) → nao se marca cache.
+    consolid = [k for k in vistos if k.get("usage_agent") == "spec_validator_consolidate"]
+    assert consolid and all(not k.get("cache_prefix") for k in consolid)
+
+
+def test_sem_multi_voto_nao_se_paga_escrita_de_cache(monkeypatch):
+    """votes == 1 → nada repete → marcar cache seria so a multa de 1,25x na escrita (regressao)."""
+    vistos = _kw_calls(1, monkeypatch)
+    assert len(vistos) == 1
+    assert not vistos[0].get("cache_prefix")

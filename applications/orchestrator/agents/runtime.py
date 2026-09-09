@@ -2076,10 +2076,60 @@ def _sink_usage(input_tokens: int, output_tokens: int, model: str | None) -> Non
         pass
 
 
+def _prompt_cache_enabled() -> bool:
+    """Chave de desligamento do cache de prompt (GAP-142). Default LIGADO.
+
+    Existe porque a ESCRITA de cache custa 1,25× a entrada: se um chamador marcar um prefixo que
+    na prática não repete, o cache é REGRESSÃO de custo. `GENESIS_PROMPT_CACHE=0` reverte sem
+    deploy — o único quem-decide que continua sendo do chamador é *se* o prefixo repete.
+    """
+    return (os.environ.get("GENESIS_PROMPT_CACHE", "1").strip().lower()
+            not in ("0", "false", "no", "off"))
+
+
+def _is_cache_param_error(exc: object) -> bool:
+    """A rota/modelo recusou o parâmetro de cache? (mesma ideia do `_is_thinking_param_error`)."""
+    s = str(exc).lower()
+    if "cache_control" in s or "cachepoint" in s or "cache point" in s or "prompt caching" in s:
+        return True
+    return "cache" in s and any(t in s for t in ("not supported", "unsupported", "invalid", "not enabled"))
+
+
+def _cache_tokens(usage: object) -> dict:
+    """🔴 GAP-142 etapa 1 — tokens de cache de prompt, nos DOIS dialetos, sem inventar zero.
+
+    Medido em prod (3 dias, `project_agent_metrics`): 168 M de tokens de ENTRADA contra 8,5 M de
+    saída (razão 20:1) e 71% dessa entrada chegando dentro da janela de 5 min do TTL de cache do
+    Bedrock. Só que NADA no cérebro marcava ponto de cache — e, pior, o medidor não tinha onde
+    registrar leitura/escrita de cache. Sem instrumento, qualquer ganho de cache seria SUPOSIÇÃO.
+
+    Contrato honesto (mesma lei do `truncated[]`): campo AUSENTE do provedor → chave OMITIDA →
+    coluna NULL = "o provedor não reportou". Campo presente valendo 0 → 0 = "medido, sem cache".
+    Confundir os dois seria dizer que houve medição onde não houve.
+    """
+    if usage is None:
+        return {}
+    try:
+        if isinstance(usage, dict):  # Converse API (cross-family)
+            r, w = usage.get("cacheReadInputTokens"), usage.get("cacheWriteInputTokens")
+        else:                        # SDK AnthropicBedrock
+            r = getattr(usage, "cache_read_input_tokens", None)
+            w = getattr(usage, "cache_creation_input_tokens", None)
+        out: dict = {}
+        if r is not None:
+            out["cacheReadTokens"] = max(0, int(r or 0))
+        if w is not None:
+            out["cacheWriteTokens"] = max(0, int(w or 0))
+        return out
+    except Exception:
+        return {}
+
+
 # FT-18 (Cyborg V2): chamada Bedrock direta sem toda a pipeline de agentes.
 # Usada pelo Cyborg V2 para as 5 análises paralelas e consolidação.
 def _report_direct_usage(project_id: str | None, agent: str, model_id: str,
-                         input_tokens: int, output_tokens: int, duration_ms: int) -> None:
+                         input_tokens: int, output_tokens: int, duration_ms: int,
+                         cache: dict | None = None) -> None:
     """RFC-0004 F6/T2.1: reporta o usage das chamadas DIRETAS ao medidor de custo.
 
     Antes, call_bedrock_direct descartava o usage → splitter/cyborg V2/validações eram
@@ -2103,6 +2153,7 @@ def _report_direct_usage(project_id: str | None, agent: str, model_id: str,
                 "agent": agent, "model": model_id,
                 "inputTokens": int(input_tokens), "outputTokens": int(output_tokens),
                 "durationMs": int(duration_ms), "status": "direct",
+                **(cache or {}),  # GAP-142: só viaja o que o provedor REPORTOU
             }).encode()
             req = _rq.Request(
                 f"{base.rstrip('/')}/api/projects/{project_id}/agent-metrics",
@@ -2110,8 +2161,10 @@ def _report_direct_usage(project_id: str | None, agent: str, model_id: str,
                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
             )
             _rq.urlopen(req, timeout=10).read()
-            logger.info("[direct-usage] %s: %s in=%d out=%d (%s)",
-                        agent, project_id[:8], input_tokens, output_tokens, model_id)
+            _c = cache or {}
+            logger.info("[direct-usage] %s: %s in=%d out=%d cache(r=%s,w=%s) (%s)",
+                        agent, project_id[:8], input_tokens, output_tokens,
+                        _c.get("cacheReadTokens", "n/d"), _c.get("cacheWriteTokens", "n/d"), model_id)
         except Exception as exc:  # nunca derruba a chamada principal
             logger.warning("[direct-usage] falha ao reportar métricas (best-effort): %s", exc)
 
@@ -2307,7 +2360,7 @@ def _aws_creds_for(llm_cfg: dict | None) -> tuple[str, str, str, str]:
 
 def _call_converse(system: str, user: str, model_id: str, max_tokens: int, temperature: float,
                    usage_project_id: str | None, usage_agent: str, llm_cfg: dict | None,
-                   t0: float) -> str:
+                   t0: float, cache_prefix: bool = False) -> str:
     """Chamada Bedrock pela **Converse API** (boto3) — caminho dos modelos NÃO-Claude.
 
     Por que uma função separada em vez de generalizar a de cima: o caminho Claude carrega
@@ -2333,12 +2386,34 @@ def _call_converse(system: str, user: str, model_id: str, max_tokens: int, tempe
             kwargs["aws_session_token"] = token
     client = boto3.client("bedrock-runtime", **kwargs)
 
-    resp = client.converse(
-        modelId=model_id,
-        system=[{"text": system}],
-        messages=[{"role": "user", "content": [{"text": user}]}],
-        inferenceConfig={"maxTokens": int(max_tokens), "temperature": float(temperature)},
-    )
+    # 🔴 GAP-142: na Converse o ponto de cache é um BLOCO (`cachePoint`), não um atributo. Nem todo
+    # provedor não-Claude suporta — se recusar, reenvia sem os blocos (a chamada não pode morrer por
+    # uma otimização de custo; o revisor cross-family é a testemunha do juiz, ver GAP-106).
+    def _converse(com_cache: bool) -> dict:
+        sys_blocks: list = [{"text": system}]
+        msg_blocks: list = [{"text": user}]
+        if com_cache:
+            sys_blocks.append({"cachePoint": {"type": "default"}})
+            msg_blocks.append({"cachePoint": {"type": "default"}})
+        return client.converse(
+            modelId=model_id,
+            system=sys_blocks,
+            messages=[{"role": "user", "content": msg_blocks}],
+            inferenceConfig={"maxTokens": int(max_tokens), "temperature": float(temperature)},
+        )
+
+    _cache_on = bool(cache_prefix) and _prompt_cache_enabled()
+    try:
+        resp = _converse(_cache_on)
+    except Exception as exc:
+        # Só reenvia quando o erro é de FORMA do pedido (ValidationException / cache): repetir um
+        # throttle pagaria duas vezes pela mesma chamada.
+        if not _cache_on or not (_is_cache_param_error(exc)
+                                 or "validationexception" in str(exc).lower()):
+            raise
+        logger.warning("[_call_converse] %s recusou `cachePoint` — reenviando sem cache. Detalhe: %s",
+                       model_id, str(exc)[:200])
+        resp = _converse(False)
     blocks = ((resp.get("output") or {}).get("message") or {}).get("content") or []
     text = "".join(str(b.get("text") or "") for b in blocks if isinstance(b, dict))
     usage = resp.get("usage") or {}
@@ -2348,7 +2423,7 @@ def _call_converse(system: str, user: str, model_id: str, max_tokens: int, tempe
     logger.info("[_call_converse] %s agent=%s stop_reason=%s in=%d out=%d max_tokens=%d",
                 model_id, usage_agent, stop, in_tok, out_tok, max_tokens)
     _report_direct_usage(usage_project_id, usage_agent, model_id, in_tok, out_tok,
-                         int((time.time() - t0) * 1000))
+                         int((time.time() - t0) * 1000), cache=_cache_tokens(usage))
     _sink_usage(in_tok, out_tok, model_id)
     _record_call_outcome(in_tok, out_tok, stop)
     LAST_EFFECTIVE_MODEL.set(model_id)
@@ -2359,7 +2434,8 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                         max_tokens: int = 8000, temperature: float = 0.2,
                         usage_project_id: str | None = None,
                         usage_agent: str = "direct",
-                        llm_cfg: dict | None = None) -> str:
+                        llm_cfg: dict | None = None,
+                        cache_prefix: bool = False) -> str:
     """Chama Bedrock com system + user; retorna string bruta da resposta.
 
     `llm_cfg` (opcional, mesmo shape do envelope `llm_config` da fábrica): credenciais AWS
@@ -2376,12 +2452,20 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
 
     RFC-0004 F6/T2.1: quando `usage_project_id` é informado, o usage (tokens) é reportado
     ao POST /agent-metrics (fire-and-forget) — sem isso a chamada é invisível ao cost-cap.
+
+    🔴 GAP-142: `cache_prefix=True` marca system+user como ponto de cache de prompt. É OPT-IN por
+    desenho — quem chama é quem sabe se o MESMO prefixo vai repetir dentro do TTL de 5 min; marcar
+    um prefixo que não repete paga 1,25× e não lê nada de volta (regressão). Só o caminho Bedrock
+    (Claude e Converse) marca; no Foundry o parâmetro é ignorado (declarado em log).
     """
     _t0 = time.time()
     # Zera o resultado publicado: se ESTA chamada morrer antes de reportar, ninguém lê o
     # stop_reason/usage da chamada ANTERIOR deste contexto como se fosse desta.
     _record_call_outcome(0, 0, None)
     if os.environ.get("GENESIS_LLM_PROVIDER", "").strip().lower() == "foundry":
+        if cache_prefix:
+            logger.info("[call_bedrock_direct] cache_prefix pedido, mas o provider é foundry — "
+                        "IGNORADO (o ganho medido e o guard só existem no Bedrock).")
         client = _build_foundry_client()
         # temperature é depreciada nos modelos Claude 5 do Foundry — omitir.
         # STREAMING obrigatório p/ max_tokens alto: o Foundry rejeita chamadas não-streaming
@@ -2416,7 +2500,8 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                     _report_direct_usage(usage_project_id, usage_agent, model_id,
                                          getattr(_u, "input_tokens", 0) or 0,
                                          getattr(_u, "output_tokens", 0) or 0,
-                                         int((time.time() - _t0) * 1000))
+                                         int((time.time() - _t0) * 1000),
+                                         cache=_cache_tokens(_u))
                     _sink_usage(getattr(_u, "input_tokens", 0) or 0,
                                 getattr(_u, "output_tokens", 0) or 0, model_id)
                     _record_call_outcome(getattr(_u, "input_tokens", 0) or 0,
@@ -2435,7 +2520,7 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
         _report_direct_usage(usage_project_id, usage_agent, model_id,
                              getattr(_u, "input_tokens", 0) or 0,
                              getattr(_u, "output_tokens", 0) or 0,
-                             int((time.time() - _t0) * 1000))
+                             int((time.time() - _t0) * 1000), cache=_cache_tokens(_u))
         _sink_usage(getattr(_u, "input_tokens", 0) or 0,
                     getattr(_u, "output_tokens", 0) or 0, model_id)
         _record_call_outcome(getattr(_u, "input_tokens", 0) or 0,
@@ -2465,7 +2550,8 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     if not _looks_anthropic(model_id):
         return _call_converse(system=system, user=user, model_id=model_id, max_tokens=max_tokens,
                               temperature=temperature, usage_project_id=usage_project_id,
-                              usage_agent=usage_agent, llm_cfg=llm_cfg, t0=_t0)
+                              usage_agent=usage_agent, llm_cfg=llm_cfg, t0=_t0,
+                              cache_prefix=cache_prefix)
 
     try:
         from anthropic import AnthropicBedrock
@@ -2517,6 +2603,14 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
             _create_kw["temperature"] = temperature
     except Exception:
         pass
+    # 🔴 GAP-142 etapa 2: ponto de cache no prefixo (system + user). Dois breakpoints em vez de um
+    # porque o system é estável mesmo quando o user muda — se o lote virar, o system ainda acerta.
+    _cache_on = bool(cache_prefix) and _prompt_cache_enabled()
+    if _cache_on:
+        _create_kw["system"] = [{"type": "text", "text": system,
+                                 "cache_control": {"type": "ephemeral"}}]
+        _create_kw["messages"] = [{"role": "user", "content": [
+            {"type": "text", "text": user, "cache_control": {"type": "ephemeral"}}]}]
     # Cascata de modelo indisponível na conta (ex.: Bedrock sem acesso ao opus-4-8): cai UMA
     # vez para CLAUDE_MODEL_FALLBACK. Cobre splitter/spec_validator/lesson_extractor, que
     # passam model_id derivado de CLAUDE_MODEL e não tinham fallback próprio (o /invoke/raw
@@ -2532,20 +2626,34 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                     "usando '%s' sem tentar de novo (CLAUDE_MODEL_DENY_TTL_SEC).", model_id, _used_model)
         _create_kw["model"] = _used_model
 
-    def _create_with_thinking_guard() -> object:
-        """Chama o modelo; se a rota recusar o parâmetro `thinking`, reenvia UMA vez sem ele."""
-        try:
-            return client.messages.create(**_create_kw)
-        except Exception as exc:
-            if "thinking" in _create_kw and _is_thinking_param_error(exc):
-                logger.warning("[call_bedrock_direct] Modelo/rota recusou `thinking` — reenviando sem "
-                               "o parâmetro (raciocínio adaptativo). Detalhe: %s", str(exc)[:200])
-                _create_kw.pop("thinking", None)
+    def _create_with_param_guards() -> object:
+        """Chama o modelo; se a rota recusar `thinking` ou o ponto de cache, reenvia SEM o parâmetro.
+
+        GAP-142: cache de prompt é otimização — uma rota que não o suporta não pode derrubar a
+        validação. Cada guarda dispara no máximo uma vez (o `while` só volta depois de REMOVER
+        um parâmetro), então não há laço infinito.
+        """
+        nonlocal _cache_on
+        while True:
+            try:
                 return client.messages.create(**_create_kw)
-            raise
+            except Exception as exc:
+                if "thinking" in _create_kw and _is_thinking_param_error(exc):
+                    logger.warning("[call_bedrock_direct] Modelo/rota recusou `thinking` — reenviando sem "
+                                   "o parâmetro (raciocínio adaptativo). Detalhe: %s", str(exc)[:200])
+                    _create_kw.pop("thinking", None)
+                    continue
+                if _cache_on and _is_cache_param_error(exc):
+                    logger.warning("[call_bedrock_direct] Modelo/rota recusou o ponto de cache — reenviando "
+                                   "SEM cache (só perde a economia). Detalhe: %s", str(exc)[:200])
+                    _cache_on = False
+                    _create_kw["system"] = system
+                    _create_kw["messages"] = [{"role": "user", "content": user}]
+                    continue
+                raise
 
     try:
-        resp = _create_with_thinking_guard()
+        resp = _create_with_param_guards()
     except Exception as e:
         if is_model_unavailable_error(e) and _fallback_model and _fallback_model != _used_model:
             logger.error("[call_bedrock_direct] Modelo '%s' indisponível na conta — caindo para "
@@ -2553,7 +2661,7 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
             note_model_denied(_used_model, _deny_scope)
             _create_kw["model"] = _fallback_model
             _used_model = _fallback_model
-            resp = _create_with_thinking_guard()
+            resp = _create_with_param_guards()
         else:
             raise
     LAST_EFFECTIVE_MODEL.set(_used_model)
@@ -2571,7 +2679,7 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     _report_direct_usage(usage_project_id, usage_agent, _used_model,
                          getattr(_u, "input_tokens", 0) or 0,
                          getattr(_u, "output_tokens", 0) or 0,
-                         int((time.time() - _t0) * 1000))
+                         int((time.time() - _t0) * 1000), cache=_cache_tokens(_u))
     _sink_usage(getattr(_u, "input_tokens", 0) or 0,
                 getattr(_u, "output_tokens", 0) or 0, _used_model)
     _record_call_outcome(getattr(_u, "input_tokens", 0) or 0,

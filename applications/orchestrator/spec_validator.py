@@ -408,7 +408,8 @@ def validate_spec(
                                        max_tokens=kw.get("max_tokens", 4000), temperature=temp,
                                        usage_project_id=usage_project_id,
                                        usage_agent=kw.get("usage_agent", "spec_validator"),
-                                       llm_cfg=llm_cfg)
+                                       llm_cfg=llm_cfg,
+                                       cache_prefix=bool(kw.get("cache_prefix", False)))
 
     fenced = _fence(spec_text)
     # GAP-39: a continuidade acompanha SÓ a refutação. A triagem ("isto é uma spec?") não julga
@@ -448,9 +449,27 @@ def validate_spec(
         or "us.anthropic.claude-sonnet-4-6"
     model = (os.environ.get("SPEC_VALIDATOR_MODEL") or (model_id or "").strip() or default_model).strip()
 
+    # Estabilização por MULTI-VOTO (SPEC_VALIDATOR_VOTES, default 1 = comportamento clássico).
+    # O refutador é não-determinístico (temp alta nos modelos de raciocínio) → ~60% de churn entre
+    # validações da MESMA spec. Rodar N vezes e consolidar por MAIORIA extrai o núcleo estável e
+    # descarta o ruído de run único. Ver [[genesis-spec-rica-connect-compliant-epic-2026-09-04]].
+    try:
+        votes = max(1, int(os.environ.get("SPEC_VALIDATOR_VOTES", "1")))
+    except ValueError:
+        votes = 1
+
+    # 🔴 GAP-142 etapa 2 — o ÚNICO prefixo do cérebro que repete BYTE A BYTE: com votes > 1, os N
+    # refutadores recebem o MESMO system e o MESMO user, em série. Medido em prod: `spec_validator`
+    # gastou 90.986.571 tokens de entrada em 3 dias (54% de toda a entrada da Bancada), 80% deles em
+    # chamadas a menos de 5 min da anterior — dentro do TTL do cache do Bedrock. Com 3 votos, o custo
+    # de entrada cai de 3N para ~1,45N (1,25 de escrita + 0,1 + 0,1).
+    # Com votes == 1 NÃO se marca nada: sem repetição, cache é só a multa de 1,25×.
+    usar_cache = votes > 1
+
     def _run_refuter() -> list:
         budget = _refuter_max_tokens(model)
-        raw = llm_fn(REFUTER_SYSTEM, refuter_user, model, max_tokens=budget, usage_agent="spec_validator")
+        raw = llm_fn(REFUTER_SYSTEM, refuter_user, model, max_tokens=budget, usage_agent="spec_validator",
+                     cache_prefix=usar_cache)
         try:
             data = _extract_json(raw)
         except ValueError:
@@ -461,7 +480,7 @@ def validate_spec(
             retry_budget = min(budget * 2, 64000)
             try:
                 raw2 = llm_fn(REFUTER_SYSTEM, refuter_user, model, max_tokens=retry_budget,
-                              usage_agent="spec_validator")
+                              usage_agent="spec_validator", cache_prefix=usar_cache)
             except Exception:
                 # O RETRY pode falhar por si (quota, indisponibilidade, guard de streaming do SDK).
                 # Sem este resgate a exceção do retry APAGA os findings que a 1ª resposta já trouxe —
@@ -482,15 +501,6 @@ def validate_spec(
         if not isinstance(f, list):
             raise ValueError("contrato inválido: campo findings ausente/não-lista")
         return f
-
-    # Estabilização por MULTI-VOTO (SPEC_VALIDATOR_VOTES, default 1 = comportamento clássico).
-    # O refutador é não-determinístico (temp alta nos modelos de raciocínio) → ~60% de churn entre
-    # validações da MESMA spec. Rodar N vezes e consolidar por MAIORIA extrai o núcleo estável e
-    # descarta o ruído de run único. Ver [[genesis-spec-rica-connect-compliant-epic-2026-09-04]].
-    try:
-        votes = max(1, int(os.environ.get("SPEC_VALIDATOR_VOTES", "1")))
-    except ValueError:
-        votes = 1
 
     if votes <= 1:
         return {"findings": _normalize_findings(_run_refuter()), "triage": triage}

@@ -1741,7 +1741,7 @@ export async function projectRoutes(app: FastifyInstance) {
   // POST /api/projects/:id/agent-metrics — registra métricas de tokens/custo por chamada de agente
   app.post<{
     Params: { id: string };
-    Body: { agent: string; taskId?: string; round?: number; inputTokens: number; outputTokens: number; model?: string; durationMs?: number; status?: string };
+    Body: { agent: string; taskId?: string; round?: number; inputTokens: number; outputTokens: number; model?: string; durationMs?: number; status?: string; cacheReadTokens?: number; cacheWriteTokens?: number };
   }>("/api/projects/:id/agent-metrics", async (request, reply) => {
     const user = getUser(request);
     const { id } = request.params;
@@ -1762,10 +1762,16 @@ export async function projectRoutes(app: FastifyInstance) {
         const n = Number(v ?? 0);
         return Number.isFinite(n) ? Math.max(0, Math.min(Math.trunc(n), 10_000_000)) : 0;
       };
+      // 🔴 GAP-142 etapa 1: tokens de cache de prompt. AUSENTE → NULL ("o provedor não reportou"),
+      // nunca 0 — 0 significa "reportou e não houve cache". Sem essa distinção, um relatório de
+      // economia de cache não teria como separar "não medi" de "medi e não economizei".
+      const clampCache = (v: unknown): number | null =>
+        v === undefined || v === null ? null : clampTokens(v);
       await client.query(
         `INSERT INTO project_agent_metrics
-           (project_id, agent, task_id, round, input_tokens, output_tokens, model, duration_ms, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+           (project_id, agent, task_id, round, input_tokens, output_tokens, model, duration_ms, status,
+            cache_read_tokens, cache_write_tokens)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
         [
           id,
           String(body.agent ?? "unknown"),
@@ -1776,6 +1782,8 @@ export async function projectRoutes(app: FastifyInstance) {
           body.model ? String(body.model) : null,
           body.durationMs ? Math.max(0, Number(body.durationMs) || 0) : null,
           body.status ? String(body.status) : null,
+          clampCache(body.cacheReadTokens),
+          clampCache(body.cacheWriteTokens),
         ]
       );
       return reply.status(201).send({ ok: true });
