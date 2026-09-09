@@ -48,6 +48,14 @@ services:
       # Declarada aqui e não só no .env para que o default valha em instalação nova e o valor
       # apareça em `docker compose config` (lição do G7/A3.1: flag que só existe no .env é invisível).
       - SPEC_SPLIT=${SPEC_SPLIT:-off}
+      # 🔴 GAP-149 — medição do RECALL do juiz (injeção de defeitos no gold set). Cada medição é um
+      # estágio B COMPLETO pago; saber quanto o juiz enxerga custa, e a escolha de pagar é do Jean:
+      # nasce OFF. Com `on`, o tick do specChatWorker mede specs de laços TERMINADOS, uma por vez.
+      - SPEC_JUDGE_RECALL=${SPEC_JUDGE_RECALL:-off}
+      # 🔴 GAP-144 — braço B do A/B: repete a medição com raciocínio estendido no refutador. DOBRA o
+      # custo da medição (dois estágios B), então nasce OFF mesmo com a medição ligada. A comparação
+      # é PAREADA por defeito e se recusa a concluir com menos de 2 discordâncias.
+      - SPEC_JUDGE_RECALL_THINKING_AB=${SPEC_JUDGE_RECALL_THINKING_AB:-off}
       - UPLOAD_DIR=/shared/uploads
       - RUNNER_SERVICE_URL=http://runner:8001
       - GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/zentriz-autonomy.2026-04-24.private-key.pem
