@@ -17,6 +17,7 @@ import {
   findInFlightSpecChatJob,
   isTruncatedResult,
   recordCtoUsage,
+  recordRawUsage,
   TRUNCATED_WARNING,
   WORKBENCH_CTO_AGENT,
 } from "./specChatJobs.js";
@@ -228,6 +229,51 @@ describe("recordCtoUsage", () => {
   it("falha de banco NUNCA derruba a entrega da revisão", async () => {
     const db = { query: async () => { throw new Error("db down"); } } as never;
     expect(await recordCtoUsage(db, { id: "j", projectId: "p", kind: "chat" }, envelope)).toBe(false);
+  });
+
+  /**
+   * 🔴 GAP-148 — o instrumento de cache do GAP-142 só existia no `spec_validator`. O caminho do CTO
+   * (api→agents) grava na MESMA tabela, mas o envelope não carregava cache e o INSERT não tinha as
+   * colunas: marcar cache aqui repetiria o GAP-147 (`input_tokens ≈ 0`, cost cap cego) no maior
+   * consumidor unitário do sistema. Instrumento ANTES da marcação.
+   */
+  it("carrega os totais de cache do envelope para as colunas da migration 116", async () => {
+    let params: unknown[] = [];
+    const db = { query: async (_q: string, p: unknown[]) => { params = p; return { rows: [], rowCount: 1 }; } } as never;
+    await recordCtoUsage(db, { id: "j", projectId: "p", kind: "chat" },
+      { ...envelope, _cache_read_tokens_total: 163_941, _cache_write_tokens_total: 0 });
+    expect(params[8]).toBe(163_941);
+    expect(params[9]).toBe(0);
+  });
+
+  it("envelope SEM cache grava NULL (não medido), nunca 0", async () => {
+    let params: unknown[] = [];
+    const db = { query: async (_q: string, p: unknown[]) => { params = p; return { rows: [], rowCount: 1 }; } } as never;
+    await recordCtoUsage(db, { id: "j", projectId: "p", kind: "chat" }, envelope);
+    expect(params[8]).toBeNull();
+    expect(params[9]).toBeNull();
+  });
+});
+
+// ── GAP-148: o mesmo instrumento no caminho /invoke/raw (edição por arquivo) ──
+describe("recordRawUsage — cache de prompt", () => {
+  it("propaga cache_read/write do `usage` do /invoke/raw", async () => {
+    let params: unknown[] = [];
+    const db = { query: async (_q: string, p: unknown[]) => { params = p; return { rows: [], rowCount: 1 }; } } as never;
+    await recordRawUsage(db, { id: "j", projectId: "p" },
+      { usage: { input_tokens: 2, output_tokens: 900, cache_read_tokens: 51_200, cache_write_tokens: 0 }, model_used: "sonnet-5" });
+    expect(params[3]).toBe(2);
+    expect(params[8]).toBe(51_200);
+    expect(params[9]).toBe(0);
+  });
+
+  it("usage sem as chaves de cache → NULL (agents antigo, não medido)", async () => {
+    let params: unknown[] = [];
+    const db = { query: async (_q: string, p: unknown[]) => { params = p; return { rows: [], rowCount: 1 }; } } as never;
+    await recordRawUsage(db, { id: "j", projectId: "p" },
+      { usage: { input_tokens: 10, output_tokens: 20 }, model_used: null });
+    expect(params[8]).toBeNull();
+    expect(params[9]).toBeNull();
   });
 });
 

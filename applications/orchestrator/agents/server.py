@@ -956,6 +956,11 @@ def invoke_raw(body: dict):
             "usage": {
                 "input_tokens": int(u.get("input_tokens") or 0),
                 "output_tokens": int(u.get("output_tokens") or 0),
+                # GAP-148: cache de prompt SÓ quando o provedor reportou (ausente ⇒ NULL no medidor,
+                # "não medido"; 0 ⇒ "medi, não houve cache"). Sem isto, marcar cache aqui — este é o
+                # caminho da edição por arquivo da Bancada — repetiria o GAP-147 no maior consumidor.
+                **({"cache_read_tokens": int(u["cache_read_tokens"])} if "cache_read_tokens" in u else {}),
+                **({"cache_write_tokens": int(u["cache_write_tokens"])} if "cache_write_tokens" in u else {}),
             },
             "stop_reason": stop,
         }

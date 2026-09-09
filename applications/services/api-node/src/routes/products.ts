@@ -458,7 +458,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       // deploy anterior) → 404: aquele job morreu no restart, o portal deve refazer.
       if (!UUID_RE.test(jobId)) return reply.status(404).send({ code: "NOT_FOUND", message: "Job não encontrado ou expirado" });
       const row = (await pool.query(
-        "SELECT id, tenant_id, status, payload, warnings, error, origin_project_id, created_at, input_tokens, output_tokens, model_used, model_id, source FROM product_proposals WHERE id=$1",
+        "SELECT id, tenant_id, status, payload, warnings, error, origin_project_id, created_at, input_tokens, output_tokens, model_used, model_id, source, cache_read_tokens, cache_write_tokens FROM product_proposals WHERE id=$1",
         [jobId],
       )).rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Job não encontrado ou expirado" });
@@ -487,7 +487,9 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
           originProjectId: row.origin_project_id ?? null,
           source: row.source ?? "idea",
           usage: { input_tokens: inTok, output_tokens: outTok, model_used: modelEff },
-          costUsd: costUsd(modelEff, inTok, outTok),
+          // GAP-148: cache é entrada faturada; NULL (não medido) soma 0 e nada muda no histórico.
+          costUsd: costUsd(modelEff, inTok, outTok,
+                           Number(row.cache_read_tokens ?? 0), Number(row.cache_write_tokens ?? 0)),
         });
       }
       // 'interrupted' não existe no contrato do frontend (status desconhecido → poll infinito)
@@ -827,6 +829,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       const rows = (await pool.query(
         `SELECT id, status, source, created_at, updated_at, origin_project_id, consumed_at,
                 consumed_product_id, input_tokens, output_tokens, model_used, model_id, error,
+                cache_read_tokens, cache_write_tokens,   -- GAP-148: entrada faturada via cache
                 (SELECT p.title FROM projects p WHERE p.id = product_proposals.origin_project_id) AS origin_title
            FROM product_proposals
           WHERE ${where}
@@ -861,7 +864,9 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
           consumedProductId: r.consumed_product_id ?? null,
           error: r.error ?? null,
           usage: { input_tokens: inTok, output_tokens: outTok, model_used: modelEff },
-          costUsd: costUsd(modelEff, inTok, outTok),
+          // GAP-148: NULL (não medido) soma 0 ⇒ propostas antigas mantêm o custo de antes.
+          costUsd: costUsd(modelEff, inTok, outTok,
+                           Number(r.cache_read_tokens ?? 0), Number(r.cache_write_tokens ?? 0)),
         };
       });
       return reply.send({ items, etaSeconds, features });

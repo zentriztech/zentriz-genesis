@@ -737,11 +737,17 @@ export async function recordCtoUsage(
   const input = intOf(result._input_tokens_total) || intOf(result._input_tokens);
   const output = intOf(result._output_tokens_total) || intOf(result._output_tokens);
   if (!input && !output) return false;
+  // GAP-148: `_cache_*_tokens_total` só existe no envelope quando o provedor REPORTOU cache
+  // (`undefined` ⇒ coluna NULL = não medido). Ver `_mark_usage_totals` em agents/runtime.py.
+  const cacheOf = (v: unknown): number | null =>
+    v === undefined || v === null ? null : intOf(v);
   const inserted = await debitWorkbenchUsage(db, {
     projectId: job.projectId, taskId: `spec_chat:${job.id}`, input, output,
     model: modelOf(result), durationMs: intOf(result._duration_ms) || null,
     status: String((result as { status?: string }).status ?? "OK"),
     label: `usage do CTO debitado: job=${job.id} calls=${intOf(result._llm_calls) || 1}`,
+    cacheRead: cacheOf(result._cache_read_tokens_total),
+    cacheWrite: cacheOf(result._cache_write_tokens_total),
   });
   return inserted;
 }
@@ -759,39 +765,51 @@ export async function recordCtoUsage(
 export async function recordRawUsage(
   db: Db,
   job: { id: string; projectId: string | null },
-  raw: { usage?: { input_tokens?: unknown; output_tokens?: unknown } | null; model_used?: string | null; truncated?: boolean },
+  raw: { usage?: { input_tokens?: unknown; output_tokens?: unknown; cache_read_tokens?: unknown; cache_write_tokens?: unknown } | null; model_used?: string | null; truncated?: boolean },
 ): Promise<boolean> {
   if (!job.projectId) return false;
   const input = intOf(raw.usage?.input_tokens);
   const output = intOf(raw.usage?.output_tokens);
+  // GAP-148: chave ausente no `usage` do /invoke/raw ⇒ NULL (não medido), nunca 0.
+  const cacheOf = (v: unknown): number | null => v === undefined || v === null ? null : intOf(v);
   if (!input && !output) return false;
   return debitWorkbenchUsage(db, {
     projectId: job.projectId, taskId: `spec_chat:${job.id}`, input, output,
     model: raw.model_used ?? null, durationMs: null,
     status: raw.truncated ? "TRUNCATED" : "OK",
     label: `usage do /invoke/raw debitado: job=${job.id}`,
+    cacheRead: cacheOf(raw.usage?.cache_read_tokens),
+    cacheWrite: cacheOf(raw.usage?.cache_write_tokens),
   });
 }
 
 /** INSERT idempotente em `project_agent_metrics` (um por `task_id`). Nunca lança. */
 async function debitWorkbenchUsage(
   db: Db,
-  args: { projectId: string; taskId: string; input: number; output: number; model: string | null; durationMs: number | null; status: string; label: string },
+  args: { projectId: string; taskId: string; input: number; output: number; model: string | null; durationMs: number | null; status: string; label: string; cacheRead?: number | null; cacheWrite?: number | null },
 ): Promise<boolean> {
   try {
+    // 🔴 GAP-148: cache de prompt é entrada FATURADA (escrita 1,25x, leitura 0,1x — GAP-147). Aqui
+    // `null` significa NÃO MEDIDO (o provedor/rota não reportou), nunca "zero cache": é o que
+    // permite ligar o cache neste caminho — o do CTO, maior consumidor unitário — sem cegar o
+    // cost cap como aconteceu no `spec_validator`.
+    const cache = (v: number | null | undefined): number | null =>
+      v === undefined || v === null ? null : Math.max(0, Math.round(v));
     const r = await db.query(
       `INSERT INTO project_agent_metrics
-         (project_id, agent, task_id, round, input_tokens, output_tokens, model, duration_ms, status)
-         SELECT $1, $2, $3, 1, $4, $5, $6, $7, $8
+         (project_id, agent, task_id, round, input_tokens, output_tokens, model, duration_ms, status,
+          cache_read_tokens, cache_write_tokens)
+         SELECT $1, $2, $3, 1, $4, $5, $6, $7, $8, $9, $10
           WHERE NOT EXISTS (
             SELECT 1 FROM project_agent_metrics WHERE project_id = $1 AND agent = $2 AND task_id = $3
           )`,
       [args.projectId, WORKBENCH_CTO_AGENT, args.taskId, args.input, args.output,
-        args.model, args.durationMs, args.status.toUpperCase().slice(0, 32)],
+        args.model, args.durationMs, args.status.toUpperCase().slice(0, 32),
+        cache(args.cacheRead), cache(args.cacheWrite)],
     );
     const inserted = (r.rowCount ?? 0) > 0;
     if (inserted) {
-      console.info(`[SpecChatJobs] ${args.label} projeto=${args.projectId.slice(0, 8)} in=${args.input} out=${args.output}`);
+      console.info(`[SpecChatJobs] ${args.label} projeto=${args.projectId.slice(0, 8)} in=${args.input} out=${args.output} cache(r=${cache(args.cacheRead) ?? "n/d"},w=${cache(args.cacheWrite) ?? "n/d"})`);
     }
     return inserted;
   } catch (e) {

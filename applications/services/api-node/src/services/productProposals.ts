@@ -36,7 +36,8 @@ export const PROPOSAL_DEADLINE_MIN = 22;
 
 // Onda 4 (PR-2): o Product Architect passa a reportar o consumo de tokens agregado da
 // decomposição (soma de todas as chamadas ao LLM, inclusive as paralelas do PASSO 2).
-type ProposalUsage = { input_tokens?: number; output_tokens?: number; model?: string; calls?: number };
+// `cache_*_tokens` (GAP-148) são OPCIONAIS de propósito: ausente = o provedor não reportou cache.
+type ProposalUsage = { input_tokens?: number; output_tokens?: number; model?: string; calls?: number; cache_read_tokens?: number; cache_write_tokens?: number };
 type AgentsResult = { manifest?: ProductManifest; specs?: Record<string, string>; warnings?: string[]; usage?: ProposalUsage };
 
 /** Coleta origin_project_id não-nulos de um resultado de UPDATE ... RETURNING. */
@@ -118,11 +119,18 @@ async function finishProposal(pool: Pool, jobId: string, result: AgentsResult): 
     const inTok = Math.max(0, Math.trunc(Number(u.input_tokens ?? 0)) || 0);
     const outTok = Math.max(0, Math.trunc(Number(u.output_tokens ?? 0)) || 0);
     const modelUsed = typeof u.model === "string" && u.model.trim() ? u.model.trim().slice(0, 200) : null;
+    // 🔴 GAP-148 (migration 117) — cache de prompt da decomposição. Chave AUSENTE no envelope do
+    // agents ⇒ NULL ("não medido"), nunca 0: é o que impede o GAP-147 de se repetir aqui no dia em
+    // que o splitter marcar cache (escrita custa 1,25x a entrada; leitura, 0,1x).
+    const cacheTok = (v: unknown): number | null =>
+      v === undefined || v === null ? null : Math.max(0, Math.trunc(Number(v)) || 0);
+    const cacheRead = cacheTok(u.cache_read_tokens);
+    const cacheWrite = cacheTok(u.cache_write_tokens);
     // Onda 4 (PR-1): PRESERVA os avisos gravados na criação (ex.: decompose marcou .doc/PDF
     // sem texto como ignorados) — concatena com os do resultado em vez de sobrescrever.
     const r = await pool.query(
-      "UPDATE product_proposals SET status='done', payload=$2::jsonb, warnings=COALESCE(warnings, '[]'::jsonb) || $3::jsonb, error=NULL, deadline_at=NULL, input_tokens=$4, output_tokens=$5, model_used=COALESCE($6, model_used), updated_at=now() WHERE id=$1 AND status='running'",
-      [jobId, payloadJson, warningsJson, inTok, outTok, modelUsed],
+      "UPDATE product_proposals SET status='done', payload=$2::jsonb, warnings=COALESCE(warnings, '[]'::jsonb) || $3::jsonb, error=NULL, deadline_at=NULL, input_tokens=$4, output_tokens=$5, model_used=COALESCE($6, model_used), cache_read_tokens=$7, cache_write_tokens=$8, updated_at=now() WHERE id=$1 AND status='running'",
+      [jobId, payloadJson, warningsJson, inTok, outTok, modelUsed, cacheRead, cacheWrite],
     );
     if (r.rowCount) console.log(`[Propose] ✓ job=${jobId} DONE — ${projects.length} projetos, ${sketch.waves.length} ondas`);
   } catch (e) {

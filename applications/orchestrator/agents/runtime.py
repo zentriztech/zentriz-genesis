@@ -1244,16 +1244,26 @@ def materialize_spec_edits(
     return errors
 
 
-def _mark_usage_totals(out: dict, input_total: int, output_total: int, calls: int) -> None:
+def _mark_usage_totals(out: dict, input_total: int, output_total: int, calls: int,
+                       cache_read_total: int | None = None,
+                       cache_write_total: int | None = None) -> None:
     """Usage de TODAS as tentativas desta execução (original + repairs da LEI 5).
 
     `_input_tokens`/`_output_tokens` continuam sendo os da ÚLTIMA tentativa (contrato antigo, que
     o `runner.py` já reporta). Os totais existem porque o repair é pago: no incidente de
     2026-09-05 cada rodada truncada gastou 64.000 tokens de saída em Opus 5 e até 3 tentativas.
+
+    🔴 GAP-148: os totais de cache viajam no envelope SÓ quando medidos (`None` ⇒ chave ausente ⇒
+    coluna NULL). É o instrumento que falta para o CTO da Bancada — sem ele, marcar cache neste
+    caminho repetiria o GAP-147: `input_tokens ≈ 0` e o cost cap cego ao maior consumidor.
     """
     out["_input_tokens_total"] = int(input_total)
     out["_output_tokens_total"] = int(output_total)
     out["_llm_calls"] = int(calls)
+    if cache_read_total is not None:
+        out["_cache_read_tokens_total"] = int(cache_read_total)
+    if cache_write_total is not None:
+        out["_cache_write_tokens_total"] = int(cache_write_total)
 
 
 def log_agent_call(
@@ -1722,6 +1732,10 @@ def run_agent(
     _acc_input_tokens = 0
     _acc_output_tokens = 0
     _llm_calls = 0
+    # 🔴 GAP-148: cache de prompt do caminho api→agents (o CTO da Bancada). `None` até alguma
+    # tentativa REPORTAR — não medido ≠ zero, mesma lei do `truncated[]`.
+    _acc_cache_read: int | None = None
+    _acc_cache_write: int | None = None
 
     for repair_attempt in range(MAX_REPAIRS + 1):
         # LEI 3: token budget antes de cada chamada (incluindo após repair)
@@ -1864,6 +1878,11 @@ def run_agent(
         _acc_input_tokens += int(_input_tokens or 0)
         _acc_output_tokens += int(_output_tokens or 0)
         _llm_calls += 1
+        _cache_now = _cache_tokens(_usage)                      # GAP-148
+        if "cacheReadTokens" in _cache_now:
+            _acc_cache_read = (_acc_cache_read or 0) + int(_cache_now["cacheReadTokens"])
+        if "cacheWriteTokens" in _cache_now:
+            _acc_cache_write = (_acc_cache_write or 0) + int(_cache_now["cacheWriteTokens"])
         logger.info(
             "[%s] Resposta recebida (audit: role=%s model=%s request_id=%s tokens_in=%d tokens_out=%d).",
             agent_name, role, model, request_id, _input_tokens, _output_tokens,
@@ -1935,7 +1954,8 @@ def run_agent(
             out["_duration_ms"] = int(duration_ms)
             out["_model"] = model
             _mark_truncation(out, stop_reason, agent_name)
-            _mark_usage_totals(out, _acc_input_tokens, _acc_output_tokens, _llm_calls)
+            _mark_usage_totals(out, _acc_input_tokens, _acc_output_tokens, _llm_calls,
+                               _acc_cache_read, _acc_cache_write)
             log_agent_call(agent_name, mode, budget, out, duration_ms, request_id=request_id)
             return _normalize_response_envelope(out, request_id, raw_text)
 
@@ -1976,7 +1996,8 @@ def run_agent(
         out["_duration_ms"] = int((time.perf_counter() - t0_run) * 1000)
         out["_model"] = model
         _mark_truncation(out, stop_reason, agent_name)
-        _mark_usage_totals(out, _acc_input_tokens, _acc_output_tokens, _llm_calls)
+        _mark_usage_totals(out, _acc_input_tokens, _acc_output_tokens, _llm_calls,
+                           _acc_cache_read, _acc_cache_write)
         duration_ms = (time.perf_counter() - t0_run) * 1000
         log_agent_call(agent_name, mode, budget, out, duration_ms, request_id=request_id)
         return _normalize_response_envelope(out, request_id, raw_text)
@@ -2003,24 +2024,40 @@ class _UsageCollector:
         self.output_tokens = 0
         self.calls = 0
         self.model: str | None = None
+        # 🔴 GAP-148: `None` = NENHUMA chamada desta operação reportou cache ("não medido"), que é
+        # diferente de 0 ("medi, não houve cache"). Vira 0 na primeira chamada que reportar.
+        self.cache_read_tokens: int | None = None
+        self.cache_write_tokens: int | None = None
 
-    def add(self, input_tokens: int, output_tokens: int, model: str | None) -> None:
+    def add(self, input_tokens: int, output_tokens: int, model: str | None,
+            cache: dict | None = None) -> None:
         with self._lock:
             self.input_tokens += max(0, int(input_tokens or 0))
             self.output_tokens += max(0, int(output_tokens or 0))
             self.calls += 1
+            if cache:
+                if "cacheReadTokens" in cache:
+                    self.cache_read_tokens = (self.cache_read_tokens or 0) + max(0, int(cache["cacheReadTokens"] or 0))
+                if "cacheWriteTokens" in cache:
+                    self.cache_write_tokens = (self.cache_write_tokens or 0) + max(0, int(cache["cacheWriteTokens"] or 0))
             # Guarda o último modelo visto (as chamadas de uma decomposição usam o mesmo).
             if model:
                 self.model = model
 
     def totals(self) -> dict:
         with self._lock:
-            return {
+            out = {
                 "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens,
                 "calls": self.calls,
                 "model": self.model,
             }
+            # GAP-148: só viaja o que foi MEDIDO — chave ausente ⇒ coluna NULL no medidor.
+            if self.cache_read_tokens is not None:
+                out["cache_read_tokens"] = self.cache_read_tokens
+            if self.cache_write_tokens is not None:
+                out["cache_write_tokens"] = self.cache_write_tokens
+            return out
 
 
 # Modelo EFETIVO da última call_bedrock_direct neste contexto (após a cascata de indisponibilidade).
@@ -2043,11 +2080,24 @@ LAST_STOP_REASON: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
 LAST_USAGE: "contextvars.ContextVar[dict | None]" = contextvars.ContextVar("last_usage", default=None)
 
 
-def _record_call_outcome(input_tokens: int, output_tokens: int, stop_reason: str | None) -> None:
-    """Publica `stop_reason`/`usage` da chamada atual para o chamador HTTP ler. Nunca lança."""
+def _record_call_outcome(input_tokens: int, output_tokens: int, stop_reason: str | None,
+                         cache: dict | None = None) -> None:
+    """Publica `stop_reason`/`usage` da chamada atual para o chamador HTTP ler. Nunca lança.
+
+    🔴 GAP-148: o `usage` de /invoke/raw também carrega cache de prompt quando o provedor reporta.
+    Sem isto, no dia em que este caminho marcar cache (é o do CTO/edição por arquivo, o maior
+    consumidor unitário do sistema) o débito voltaria a ver `input_tokens ≈ 0` — exatamente o
+    GAP-147, que nasceu no `spec_validator`. Instrumento ANTES da marcação, sempre.
+    """
     try:
         LAST_STOP_REASON.set(str(stop_reason) if stop_reason else None)
-        LAST_USAGE.set({"input_tokens": int(input_tokens or 0), "output_tokens": int(output_tokens or 0)})
+        _u: dict = {"input_tokens": int(input_tokens or 0), "output_tokens": int(output_tokens or 0)}
+        _c = cache or {}
+        if "cacheReadTokens" in _c:
+            _u["cache_read_tokens"] = max(0, int(_c["cacheReadTokens"] or 0))
+        if "cacheWriteTokens" in _c:
+            _u["cache_write_tokens"] = max(0, int(_c["cacheWriteTokens"] or 0))
+        LAST_USAGE.set(_u)
     except Exception:
         pass
 
@@ -2066,12 +2116,13 @@ def collect_usage(collector: "_UsageCollector"):
         _usage_sink.reset(token)
 
 
-def _sink_usage(input_tokens: int, output_tokens: int, model: str | None) -> None:
-    """Soma o usage no coletor ativo (se houver). Nunca lança."""
+def _sink_usage(input_tokens: int, output_tokens: int, model: str | None,
+                cache: dict | None = None) -> None:
+    """Soma o usage no coletor ativo (se houver). Nunca lança. `cache`: GAP-148."""
     try:
         sink = _usage_sink.get()
         if sink is not None:
-            sink.add(input_tokens, output_tokens, model)
+            sink.add(input_tokens, output_tokens, model, cache)
     except Exception:
         pass
 
@@ -2424,8 +2475,8 @@ def _call_converse(system: str, user: str, model_id: str, max_tokens: int, tempe
                 model_id, usage_agent, stop, in_tok, out_tok, max_tokens)
     _report_direct_usage(usage_project_id, usage_agent, model_id, in_tok, out_tok,
                          int((time.time() - t0) * 1000), cache=_cache_tokens(usage))
-    _sink_usage(in_tok, out_tok, model_id)
-    _record_call_outcome(in_tok, out_tok, stop)
+    _sink_usage(in_tok, out_tok, model_id, _cache_tokens(usage))
+    _record_call_outcome(in_tok, out_tok, stop, _cache_tokens(usage))
     LAST_EFFECTIVE_MODEL.set(model_id)
     return text
 
@@ -2503,10 +2554,12 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                                          int((time.time() - _t0) * 1000),
                                          cache=_cache_tokens(_u))
                     _sink_usage(getattr(_u, "input_tokens", 0) or 0,
-                                getattr(_u, "output_tokens", 0) or 0, model_id)
+                                getattr(_u, "output_tokens", 0) or 0, model_id,
+                                _cache_tokens(_u))
                     _record_call_outcome(getattr(_u, "input_tokens", 0) or 0,
                                          getattr(_u, "output_tokens", 0) or 0,
-                                         getattr(_final, "stop_reason", None))
+                                         getattr(_final, "stop_reason", None),
+                                         _cache_tokens(_u))
                 except Exception:
                     pass
             LAST_EFFECTIVE_MODEL.set(model_id)
@@ -2522,10 +2575,10 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                              getattr(_u, "output_tokens", 0) or 0,
                              int((time.time() - _t0) * 1000), cache=_cache_tokens(_u))
         _sink_usage(getattr(_u, "input_tokens", 0) or 0,
-                    getattr(_u, "output_tokens", 0) or 0, model_id)
+                    getattr(_u, "output_tokens", 0) or 0, model_id, _cache_tokens(_u))
         _record_call_outcome(getattr(_u, "input_tokens", 0) or 0,
                              getattr(_u, "output_tokens", 0) or 0,
-                             getattr(resp, "stop_reason", None))
+                             getattr(resp, "stop_reason", None), _cache_tokens(_u))
         LAST_EFFECTIVE_MODEL.set(model_id)
         parts = []
         for block in getattr(resp, "content", []) or []:
@@ -2681,10 +2734,10 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                          getattr(_u, "output_tokens", 0) or 0,
                          int((time.time() - _t0) * 1000), cache=_cache_tokens(_u))
     _sink_usage(getattr(_u, "input_tokens", 0) or 0,
-                getattr(_u, "output_tokens", 0) or 0, _used_model)
+                getattr(_u, "output_tokens", 0) or 0, _used_model, _cache_tokens(_u))
     _record_call_outcome(getattr(_u, "input_tokens", 0) or 0,
                          getattr(_u, "output_tokens", 0) or 0,
-                         getattr(resp, "stop_reason", None))
+                         getattr(resp, "stop_reason", None), _cache_tokens(_u))
     # AnthropicBedrock retorna Message com .content = [TextBlock, ...]
     parts: list[str] = []
     for block in getattr(resp, "content", []) or []:
