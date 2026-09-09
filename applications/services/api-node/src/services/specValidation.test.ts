@@ -2,7 +2,7 @@
  * specValidation.test.ts — RFC-0004 Onda 3: estágio A, schema do B e regras do gate.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { runStageA, parseStageBFindings, STAGE_B_MAX_FINDINGS, titleFromRationale, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge, startValidation, renewValidationDeadline, writeValidationResult, triageNote, type ValidationFinding } from "./specValidation.js";
+import { runStageA, parseStageBFindings, STAGE_B_MAX_FINDINGS, titleFromRationale, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, scheduleBatches, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge, startValidation, renewValidationDeadline, writeValidationResult, triageNote, type ValidationFinding } from "./specValidation.js";
 import type { Pool } from "pg";
 import { mkdtempSync, writeFileSync, readFileSync } from "fs";
 import { tmpdir } from "os";
@@ -871,5 +871,230 @@ describe("GAP-138 — o lease do coletor vale para TODOS os status (um escritor 
     expect(scan.sql.match(/status IN/g)).toHaveLength(1);
     expect(scan.sql).toContain("AND COALESCE(stage_b_polled_at, started_at) < now() - ($1 || ' seconds')::interval");
     expect(scan.sql).not.toMatch(/\bOR\b/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// 🔴 GAP-145 — despacho de lotes em PARALELO (migração 119). O que pode regredir aqui é a ORDEM
+// (com concorrência, ordem de chegada é ruído de rede e a ordem da lista de findings decide
+// identidade mais adiante) e o C7 (um pendente em série não pode deixar outro lote sobrescrever o
+// `agents_job_id` da run e descartar leitura JÁ PAGA). Então é isto que os testes prendem.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("GAP-145 — scheduleBatches: ordem por índice, teto de concorrência e C7", () => {
+  /** Executor que registra ordem de início/fim e o pico de lotes em voo. */
+  function espiao(atrasos: number[], marcar: (r: { idx: number; pending?: boolean }) => void = () => undefined) {
+    const inicios: number[] = [];
+    let emVoo = 0;
+    let pico = 0;
+    const exec = async (idx: number) => {
+      inicios.push(idx);
+      emVoo += 1;
+      pico = Math.max(pico, emVoo);
+      await new Promise((r) => setTimeout(r, atrasos[idx] ?? 0));
+      emVoo -= 1;
+      const r = { idx, pending: undefined as true | undefined };
+      marcar(r);
+      return r;
+    };
+    return { exec, inicios, get pico() { return pico; } };
+  }
+
+  it("série (conc=1) → despacha na ordem dos índices, um por vez", async () => {
+    const e = espiao([30, 5, 1]); // o lote 0 é o MAIS LENTO: em série ele ainda termina primeiro
+    const out = await scheduleBatches(3, 1, e.exec);
+    expect(e.inicios).toEqual([0, 1, 2]);
+    expect(e.pico).toBe(1);
+    expect(out.map((r) => r?.idx)).toEqual([0, 1, 2]);
+  });
+
+  it("concorrência 4 → resultado sai por ÍNDICE mesmo com chegada fora de ordem", async () => {
+    // Atrasos decrescentes: quem chega primeiro é o ÚLTIMO lote. Se a remontagem usasse ordem de
+    // chegada, a lista viria [3,2,1,0] — e o colapso C2 escolheria outro sobrevivente.
+    const e = espiao([40, 30, 20, 1]);
+    const out = await scheduleBatches(4, 4, e.exec);
+    expect(e.pico).toBe(4);
+    expect(out.map((r) => r?.idx)).toEqual([0, 1, 2, 3]);
+  });
+
+  it("teto de concorrência é respeitado (6 lotes, conc 2 → nunca 3 em voo)", async () => {
+    const e = espiao([10, 10, 10, 10, 10, 10]);
+    await scheduleBatches(6, 2, e.exec);
+    expect(e.pico).toBe(2);
+    expect(e.inicios.slice(0, 2).sort()).toEqual([0, 1]); // começa pelos menores índices
+  });
+
+  it("C7 em SÉRIE: lote pendente INTERROMPE o despacho — os seguintes ficam `undefined`", async () => {
+    const e = espiao([1, 1, 1, 1], (r) => { if (r.idx === 1) r.pending = true; });
+    const out = await scheduleBatches(4, 1, e.exec, { abortOnPending: (r) => !!r.pending });
+    expect(e.inicios).toEqual([0, 1]); // 2 e 3 NUNCA foram despachados (nem pagos)
+    expect(out[2]).toBeUndefined();
+    expect(out[3]).toBeUndefined();
+    // `undefined` ≠ "devolveu vazio": é o que permite dizer `lote não despachado` em notMeasured.
+    expect(out[1]?.pending).toBe(true);
+  });
+
+  it("sem `abortOnPending` (concorrência), um pendente NÃO impede os demais de rodar", async () => {
+    const e = espiao([1, 1, 1, 1], (r) => { if (r.idx === 0) r.pending = true; });
+    const out = await scheduleBatches(4, 4, e.exec);
+    expect(out.every((r) => r !== undefined)).toBe(true);
+    expect(out[0]?.pending).toBe(true);
+  });
+
+  it("conc absurda ou inválida nunca passa do nº de lotes nem desce de 1", async () => {
+    const a = espiao([1, 1]);
+    await scheduleBatches(2, 99, a.exec);
+    expect(a.pico).toBe(2);
+    const b = espiao([1, 1]);
+    await scheduleBatches(2, 0, b.exec);
+    expect(b.pico).toBe(1); // 0/NaN cai para série, nunca para "nenhum trabalhador" (travaria a run)
+    expect(await scheduleBatches(0, 4, async () => 1)).toEqual([]);
+  });
+
+  it("o executor de um lote nunca é chamado duas vezes para o mesmo índice", async () => {
+    const vistos: number[] = [];
+    await scheduleBatches(20, 5, async (i) => { vistos.push(i); return i; });
+    expect(vistos.sort((x, y) => x - y)).toEqual(Array.from({ length: 20 }, (_, i) => i));
+  });
+});
+
+describe("GAP-145 — o coletor dá DESFECHO à linha do lote (a tabela não pode mentir)", () => {
+  function specOnDisk(content: string) {
+    const dir = mkdtempSync(join(tmpdir(), "gap145-"));
+    const p = join(dir, "README.md");
+    writeFileSync(p, content, "utf-8");
+    return [{ filename: "README.md", file_path: p, rel_dir: "" }];
+  }
+  function db(row: Record<string, unknown> | null, specFiles: Array<Record<string, unknown>> = []) {
+    const queries: { sql: string; params: unknown[] }[] = [];
+    const pool = {
+      query: async (sql: string, params: unknown[] = []) => {
+        queries.push({ sql, params });
+        if (sql.includes("FROM spec_validation_runs") && sql.includes("ORDER BY finished_at")) return { rows: row ? [row] : [] };
+        if (sql.includes("FROM project_spec_files")) return { rows: specFiles };
+        return { rows: [] };
+      },
+    } as unknown as Pool;
+    return { pool, queries };
+  }
+  const RICH = `---\narchetype: backend-service\n---\n\n## Escopo\n\n${"Requisito com critérios de aceite. ".repeat(20)}`;
+
+  async function runPendente() {
+    const files = specOnDisk(RICH);
+    const cur = await computeCurrentSpecHash(db(null, files).pool, "proj-1");
+    return {
+      files,
+      row: {
+        id: "11111111-1111-4111-8111-111111111111", project_id: "proj-1", spec_hash: cur!.specHash,
+        agents_job_id: "job-lote-2", findings: [], deadline_at: new Date(Date.now() - 60_000).toISOString(),
+        stage_b_coverage: null, status: "error",
+      },
+    };
+  }
+  const doLote = (queries: { sql: string; params: unknown[] }[]) =>
+    queries.filter((q) => q.sql.includes("UPDATE spec_validation_batches"));
+
+  it("resultado recuperado → o lote vira `done` com os findings DO LOTE (não os da run)", async () => {
+    const { row, files } = await runPendente();
+    const { pool, queries } = db(row, files);
+    await collectStageBResults(pool, async () => ({
+      status: "done",
+      result: { findings: [{ file: "README.md", line: 1, severity: "warning", rationale: "achado do lote recuperado" }] },
+    }));
+    const u = doLote(queries);
+    expect(u).toHaveLength(1);
+    expect(u[0].sql).toContain("status = 'dispatched'"); // idempotente: só fecha quem está aberto
+    expect(u[0].params[0]).toBe("job-lote-2");
+    expect(u[0].params[1]).toBe("done");
+    expect(JSON.parse(String(u[0].params[2]))).toHaveLength(1);
+  });
+
+  it("job perdido no agents → o lote vira `lost` e `findings` fica NULL (nunca `[]`)", async () => {
+    const { row, files } = await runPendente();
+    const { pool, queries } = db(row, files);
+    await collectStageBResults(pool, async () => "not_found");
+    const u = doLote(queries);
+    expect(u[0].params[1]).toBe("lost");
+    // NULL ≠ 0 do ecossistema: `[]` diria "o juiz leu e não achou nada", e isso seria uma mentira.
+    expect(u[0].params[2]).toBeNull();
+  });
+
+  it("job em erro no agents → `error`; job atrasado além da carência → `given_up`", async () => {
+    const a = await runPendente();
+    const dbA = db(a.row, a.files);
+    await collectStageBResults(dbA.pool, async () => ({ status: "error", error: "estourou o teto do provedor" }));
+    expect(doLote(dbA.queries)[0].params[1]).toBe("error");
+    expect(String(doLote(dbA.queries)[0].params[4])).toContain("estourou o teto");
+
+    const b = await runPendente();
+    b.row.deadline_at = new Date(Date.now() - 6 * 60 * 60_000).toISOString(); // muito além da carência
+    const dbB = db(b.row, b.files);
+    await collectStageBResults(dbB.pool, async () => ({ status: "running" }));
+    expect(doLote(dbB.queries)[0].params[1]).toBe("given_up");
+  });
+});
+
+describe("GAP-150 — resgate multi-lote não pode marcar como julgado o que nenhum juiz leu", () => {
+  function specOnDisk(files: Array<[string, string]>) {
+    const dir = mkdtempSync(join(tmpdir(), "gap150-"));
+    return files.map(([nome, conteudo]) => {
+      const p = join(dir, nome);
+      writeFileSync(p, conteudo, "utf-8");
+      return { filename: nome, file_path: p, rel_dir: "" };
+    });
+  }
+  /** Pool falso com uma run pendente e (opcionalmente) a linha do lote da migração 119. */
+  function db(row: Record<string, unknown>, specFiles: Array<Record<string, unknown>>, loteShas: Record<string, string> | null) {
+    const queries: { sql: string; params: unknown[] }[] = [];
+    const pool = {
+      query: async (sql: string, params: unknown[] = []) => {
+        queries.push({ sql, params });
+        if (sql.includes("FROM spec_validation_runs") && sql.includes("ORDER BY finished_at")) return { rows: [row] };
+        if (sql.includes("FROM project_spec_files")) return { rows: specFiles };
+        if (sql.includes("FROM spec_validation_batches")) {
+          if (loteShas === null) throw new Error('relation "spec_validation_batches" does not exist');
+          return { rows: [{ full_shas: loteShas }] };
+        }
+        return { rows: [] };
+      },
+    } as unknown as Pool;
+    return { pool, queries };
+  }
+  const CORPO = `---\narchetype: backend-service\n---\n\n## Escopo\n\n${"Requisito com critérios de aceite. ".repeat(20)}`;
+
+  async function cenario(loteShas: Record<string, string> | null) {
+    const files = specOnDisk([["README.md", CORPO], ["02-dados.md", CORPO], ["03-api.md", CORPO]]);
+    const cur = await computeCurrentSpecHash(db({}, files, null).pool, "proj-1");
+    // A cobertura PLANEJADA (gravada antes de gastar LLM) lista os 3 arquivos de TODOS os lotes.
+    const planejada = { batches: 2, full: cur!.files.map((f) => f.filename), fullShas: Object.fromEntries(cur!.files.map((f) => [f.filename, f.contentSha256])) };
+    const row = {
+      id: "22222222-2222-4222-8222-222222222222", project_id: "proj-1", spec_hash: cur!.specHash,
+      agents_job_id: "job-lote-1", findings: [], status: "running",
+      deadline_at: new Date(Date.now() + 60_000).toISOString(), stage_b_coverage: planejada,
+    };
+    const d = db(row, files, loteShas);
+    await collectStageBResults(d.pool, async () => ({ status: "done", result: { findings: [] } }));
+    return { ...d, cur };
+  }
+
+  const marcados = (queries: { sql: string; params: unknown[] }[]) =>
+    queries.filter((q) => q.sql.includes("UPDATE project_spec_files SET stage_b_full_sha")).map((q) => String(q.params[2]));
+
+  it("com a linha do lote, o resgate marca SÓ os arquivos daquele lote — não os planejados", async () => {
+    const c = await cenario({ "README.md": "sha-do-readme" });
+    expect(marcados(c.queries)).toEqual(["README.md"]);
+  });
+
+  it("sem a tabela (migração não aplicada), o comportamento anterior é preservado — nunca quebra", async () => {
+    const c = await cenario(null);
+    expect(marcados(c.queries).sort()).toEqual(["02-dados.md", "03-api.md", "README.md"]);
+  });
+
+  it("o recorte do lote é FUNDIDO na cobertura da run (senão a run diria que ninguém os leu)", async () => {
+    const c = await cenario({ "02-dados.md": "sha-dados" });
+    const merge = c.queries.filter((q) => q.sql.includes("SET stage_b_coverage = $2::jsonb")).pop()!;
+    const cov = JSON.parse(String(merge.params[1]));
+    expect(cov.full).toContain("02-dados.md");
+    expect(cov.fullShas["02-dados.md"]).toBe("sha-dados");
+    expect(cov.pendingFullShas).toBeUndefined();
   });
 });

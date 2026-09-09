@@ -455,6 +455,148 @@ export function knownFindingsForJudge(
 }
 
 /**
+ * 🔴 GAP-145 — o estágio B era ESTRITAMENTE sequencial por limitação de ESQUEMA, não de desenho.
+ *
+ * Medido em prod (2026-09-09, 7 dias, 130 runs terminadas): 26 de 130 (20%) são multi-lote e custam
+ * ~18 min de parede contra ~6 min de uma chamada só. São ~12 min por validação de spec grande —
+ * exatamente as specs de médio/grande porte da rodada de investimento. Não é custo de token: é
+ * produtividade.
+ *
+ * A causa era UMA coluna (`spec_validation_runs.agents_job_id`): como o resultado pago de um lote só é
+ * recuperável por esse id (GAP-11), sobrescrevê-la descartaria leitura adversarial JÁ PAGA — e o C7
+ * fez a coisa certa com o esquema que tinha: parar o despacho no primeiro lote pendente. A migração
+ * 119 (`spec_validation_batches`) dá um id POR LOTE, e só então concorrência deixa de ser risco.
+ *
+ * Nasce em **1**, que é byte-idêntico ao comportamento de hoje (mesma ordem, mesmo corte do C7). A
+ * tabela passa a ser escrita mesmo em série: instrumento ANTES da mudança de comportamento — é a
+ * lição que o GAP-147 cobrou em dinheiro.
+ */
+const BATCH_CONCURRENCY = Math.max(1, parseInt(process.env.SPEC_VALIDATION_BATCH_CONCURRENCY ?? "1", 10) || 1);
+
+/**
+ * 🔴 GAP-145 — o AGENDADOR dos lotes, isolado do que cada lote faz.
+ *
+ * Existe separado por dois motivos, os dois de prova: (1) a ordem de DESPACHO e o teto de concorrência
+ * são exatamente o que pode regredir, e aqui isso é testável sem banco nem LLM; (2) o resultado sai
+ * INDEXADO por `idx`, nunca em ordem de chegada — com concorrência a ordem de chegada é ruído de rede,
+ * e mais adiante a ordem da lista de findings DECIDE identidade (colapso C2, casador do GAP-102).
+ *
+ * `undefined` numa posição significa "este lote NUNCA foi despachado" — fato diferente de "despachado
+ * e não devolveu", e os dois viram razões distintas em `notMeasured`.
+ *
+ * `abortOnPending` é o C7: em SÉRIE (`conc === 1`), um lote que ficou pendente de coleta interrompe o
+ * despacho, porque `spec_validation_runs.agents_job_id` é uma coluna só e sobrescrevê-la descartaria
+ * leitura adversarial JÁ PAGA (GAP-11). Com concorrência cada lote tem id próprio (migração 119) e
+ * despachar os demais não descarta nada — então o chamador não passa a regra.
+ */
+export async function scheduleBatches<T>(
+  n: number,
+  conc: number,
+  exec: (idx: number) => Promise<T>,
+  opts: { abortOnPending?: (r: T) => boolean } = {},
+): Promise<Array<T | undefined>> {
+  const out: Array<T | undefined> = new Array(Math.max(0, n));
+  if (n <= 0) return out;
+  const teto = Math.max(1, Math.min(Math.floor(conc) || 1, n));
+  let proximo = 0;
+  let abortar = false;
+  const trabalhador = async (): Promise<void> => {
+    for (;;) {
+      if (abortar) return;
+      const i = proximo++;
+      if (i >= n) return;
+      const r = await exec(i);
+      out[i] = r;
+      if (opts.abortOnPending?.(r)) abortar = true;
+    }
+  };
+  await Promise.all(Array.from({ length: teto }, () => trabalhador()));
+  return out;
+}
+
+/** Uma linha de `spec_validation_batches` viva neste processo (GAP-145). */
+interface BatchRow {
+  id: string;
+  idx: number;
+  /**
+   * Se ESTE lote também grava seu job em `spec_validation_runs.agents_job_id`. Em série todos gravam
+   * (idêntico a hoje). Em paralelo só o lote 0 grava no despacho — a linha da run é reescrita depois
+   * da fase paralela para apontar ao lote PENDENTE de menor `idx`, que é a semântica de recuperação
+   * de hoje. Sem o lote 0 reivindicando, um crash no meio da fase paralela deixaria a run sem nenhum
+   * id recuperável, e aí o paralelismo teria comprado tempo pagando com trabalho perdido.
+   */
+  claimRun: boolean;
+}
+
+/**
+ * GAP-145: cria a linha do lote ANTES de gastar LLM. Best-effort: sem a linha, o comportamento
+ * degrada exatamente para o de antes da migração 119 (id só na run) — nunca para "sem id".
+ */
+async function criarLoteRow(
+  pool: Pool, runId: string, idx: number, total: number, files: string[], fullShas: Record<string, string>,
+): Promise<string | null> {
+  return await pool.query(
+    `INSERT INTO spec_validation_batches (run_id, idx, total, files, full_shas)
+     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+     ON CONFLICT (run_id, idx) DO UPDATE
+        SET files = EXCLUDED.files, full_shas = EXCLUDED.full_shas,
+            -- Reidratar é uma TENTATIVA NOVA: o desfecho da anterior não pode sobreviver, senão um
+            -- 'done' velho seria lido como resultado desta (achados de outro conteúdo contariam).
+            status = 'dispatched', agents_job_id = NULL, findings = NULL, dropped = NULL,
+            error = NULL, finished_at = NULL, polled_at = NULL, created_at = now()
+     RETURNING id`,
+    [runId, idx, total, JSON.stringify(files), JSON.stringify(fullShas)],
+  ).then((r) => (r.rows[0]?.id ? String(r.rows[0].id) : null))
+    .catch((e) => {
+      console.warn(`[spec-validation] run ${String(runId).slice(0, 8)}: linha do lote ${idx + 1}/${total} não criada (${e instanceof Error ? e.message : String(e)}) — este lote fica só com o id na run (comportamento pré-GAP-145).`);
+      return null;
+    });
+}
+
+/**
+ * GAP-145: fecha a linha do lote com o DESFECHO. `findings` NULL ≠ `[]`: NULL é "não devolveu",
+ * `[]` é "o juiz leu e não achou nada". Best-effort — a verdade da run continua na cobertura.
+ */
+async function fecharLoteRow(
+  pool: Pool, id: string, status: "done" | "error" | "lost" | "given_up",
+  dados: { findings?: ValidationFinding[]; dropped?: number; error?: string } = {},
+): Promise<void> {
+  await pool.query(
+    `UPDATE spec_validation_batches
+        SET status = $2, findings = $3::jsonb, dropped = $4, error = $5, finished_at = now()
+      WHERE id = $1`,
+    [
+      id, status,
+      dados.findings === undefined ? null : JSON.stringify(dados.findings),
+      dados.dropped ?? null,
+      dados.error ? dados.error.slice(0, 500) : null,
+    ],
+  ).catch((e) => console.warn(`[spec-validation] lote ${id.slice(0, 8)}: desfecho '${status}' não gravado (${e instanceof Error ? e.message : String(e)}).`));
+}
+
+/**
+ * GAP-145: fecha a linha do lote a partir do JOB, para o coletor (que só conhece `agents_job_id`).
+ * Sem isto, um lote recuperado pelo tick ficaria `dispatched` para sempre e a tabela mentiria sobre o
+ * desfecho. Best-effort e idempotente: só age em linha que ainda está `dispatched`.
+ */
+async function fecharLotePorJob(
+  pool: Pool, jobId: string, status: "done" | "error" | "lost" | "given_up",
+  dados: { findings?: ValidationFinding[]; dropped?: number; error?: string } = {},
+): Promise<void> {
+  await pool.query(
+    `UPDATE spec_validation_batches
+        SET status = $2, findings = $3::jsonb, dropped = $4, error = $5, finished_at = now()
+      WHERE agents_job_id = $1 AND status = 'dispatched'`,
+    [
+      jobId, status,
+      dados.findings === undefined ? null : JSON.stringify(dados.findings),
+      dados.dropped ?? null,
+      dados.error ? dados.error.slice(0, 500) : null,
+    ],
+  ).catch(() => undefined);
+}
+
+/**
  * Uma leitura adversarial. `pending: true` é o único desfecho que deixa trabalho PAGO para trás (o job
  * pode estar vivo no agents) — quem chama tem de preservar `stage_b_collected_at` NULL e parar de
  * despachar lotes novos, senão o `collectStageBResults` nunca volta para buscá-lo (GAP-11).
@@ -464,6 +606,12 @@ interface StageBOutcome {
   /** GAP-129: achados que o teto de ingestão descartou neste lote. */ dropped?: number;
   /** GAP-140: quantas vezes o prazo da run foi empurrado por PROVA DE VIDA do job deste lote. */
   renewals?: number;
+  /**
+   * GAP-145: o job que ESTE lote despachou. Ausente = nem chegou a despachar. Com concorrência, quem
+   * decide qual job fica em `spec_validation_runs.agents_job_id` é o chamador, DEPOIS da fase paralela
+   * (o menor `idx` pendente) — e para isso ele precisa saber o id de cada lote.
+   */
+  jobId?: string;
 }
 
 /**
@@ -517,7 +665,10 @@ function logTriage(runId: string, result: Record<string, unknown>): void {
   else console.log(msg);
 }
 
-async function runStageB(pool: Pool, runId: string, projectId: string, specText: string, knownFindings: unknown[] = []): Promise<StageBOutcome> {
+async function runStageB(
+  pool: Pool, runId: string, projectId: string, specText: string, knownFindings: unknown[] = [],
+  batch: BatchRow | null = null,
+): Promise<StageBOutcome> {
   const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
   if (!agentsUrl) return { findings: [], error: "agents indisponível (API_AGENTS_URL ausente)" };
   const base = agentsUrl.replace(/\/$/, "");
@@ -541,8 +692,19 @@ async function runStageB(pool: Pool, runId: string, projectId: string, specText:
   // nesta variável local, estourar o teto de espera custava uma leitura adversarial inteira já PAGA
   // (medido em prod: run 16e467cf, 20m40s de espera, 0 findings, resultado descartado pelo TTL em
   // memória dos agents). Prazo limita QUANTO SE ESPERA, nunca a validade do que já foi produzido.
-  await pool.query("UPDATE spec_validation_runs SET agents_job_id = $2 WHERE id = $1", [runId, jobId])
-    .catch((e) => console.warn(`[spec-validation] run ${runId}: agents_job_id não gravado (${e instanceof Error ? e.message : String(e)}) — resultado NÃO será recuperável se a espera estourar.`));
+  // 🔴 GAP-145: o id vai PRIMEIRO para a linha do LOTE (migração 119), que é o único lugar onde N
+  // lotes cabem. A coluna da run continua existindo e sendo a porta do coletor de hoje, mas em
+  // paralelo ela é reivindicada só pelo lote 0 no despacho e reescrita pelo chamador depois.
+  if (batch) {
+    await pool.query(
+      "UPDATE spec_validation_batches SET agents_job_id = $2, status = 'dispatched', polled_at = now() WHERE id = $1",
+      [batch.id, jobId],
+    ).catch((e) => console.warn(`[spec-validation] lote ${batch.id.slice(0, 8)}: agents_job_id não gravado na linha do lote (${e instanceof Error ? e.message : String(e)}).`));
+  }
+  if (!batch || batch.claimRun) {
+    await pool.query("UPDATE spec_validation_runs SET agents_job_id = $2 WHERE id = $1", [runId, jobId])
+      .catch((e) => console.warn(`[spec-validation] run ${runId}: agents_job_id não gravado (${e instanceof Error ? e.message : String(e)}) — resultado NÃO será recuperável se a espera estourar.`));
+  }
   const deadline = Date.now() + VALIDATION_DEADLINE_MIN * 60_000;
   // GAP-140: renovações desta espera, para o chamador somar e DECLARAR na cobertura.
   let renewals = 0;
@@ -553,8 +715,15 @@ async function runStageB(pool: Pool, runId: string, projectId: string, specText:
     // "esperador vivo" de "esperador morto por restart da api" sem virar um segundo escritor da linha.
     // Falha aqui é irrelevante para a validação: o pior efeito é a run ser adotada pelo coletor, que
     // faz exatamente o mesmo trabalho.
+    // GAP-145: o heartbeat da run continua (é a porta do coletor de hoje) e vale para QUALQUER lote —
+    // escrever `now()` não tem identidade para corromper, ao contrário de `agents_job_id`. A linha do
+    // lote também bate o seu, que é o sinal de vida POR LOTE de que a etapa 2 vai precisar.
     await pool.query("UPDATE spec_validation_runs SET stage_b_polled_at = now() WHERE id = $1", [runId])
       .catch(() => undefined);
+    if (batch) {
+      await pool.query("UPDATE spec_validation_batches SET polled_at = now() WHERE id = $1", [batch.id])
+        .catch(() => undefined);
+    }
     const poll = await httpJson(`${base}/invoke/spec_validator/status/${jobId}`, "GET", undefined, 30_000)
       .catch(() => ({ status: 0, data: {} as Record<string, unknown> }));
     // 404 = agents reiniciou e perdeu o job em memória → interrupted (NUNCA insistir 11min).
@@ -562,7 +731,7 @@ async function runStageB(pool: Pool, runId: string, projectId: string, specText:
       // Nada a recuperar: o job não existe mais. Quem marca `stage_b_collected_at` é o chamador, DEPOIS
       // do último lote — marcar aqui encerraria o assunto da run inteira e um lote seguinte que
       // estourasse a espera ficaria invisível ao coletor (o filtro dele é `collected_at IS NULL`).
-      return { findings: [], error: "agents reiniciou durante a validação (job perdido)" };
+      return { findings: [], error: "agents reiniciou durante a validação (job perdido)", jobId };
     }
     if (poll.status !== 200) continue;
     const st = String(poll.data.status ?? "");
@@ -574,10 +743,10 @@ async function runStageB(pool: Pool, runId: string, projectId: string, specText:
         // GAP-129: o juiz devolveu mais do que o teto de ingestão aceita. Isso NÃO é "menos GAP".
         console.warn(`[spec-validation] run ${runId}: o juiz devolveu ${parsed.findings.length + parsed.dropped} achados e o teto de ingestão é ${STAGE_B_MAX_FINDINGS} — ${parsed.dropped} DESCARTADO(S). A contagem desta validação está INCOMPLETA por corte de entrada.`);
       }
-      return { findings: parsed.findings, dropped: parsed.dropped, ...(renewals ? { renewals } : {}) };
+      return { findings: parsed.findings, dropped: parsed.dropped, ...(renewals ? { renewals } : {}), jobId };
     }
     if (st === "error") {
-      return { findings: [], error: String(poll.data.error ?? "spec_validator error").slice(0, 300), ...(renewals ? { renewals } : {}) };
+      return { findings: [], error: String(poll.data.error ?? "spec_validator error").slice(0, 300), ...(renewals ? { renewals } : {}), jobId };
     }
     // 🔴 GAP-140: o job respondeu e NÃO terminou ⇒ está de pé do outro lado. Isso é prova de vida do
     // trabalho em curso, e é o que falta para o prazo da run acompanhar um lote longo. Espaçado por
@@ -590,7 +759,7 @@ async function runStageB(pool: Pool, runId: string, projectId: string, specText:
   // Único caminho que deixa `stage_b_collected_at` NULL de propósito: o job pode estar VIVO no
   // agents e o `collectStageBResults` (tick do worker) volta para buscá-lo.
   console.log(`[spec-validation] run ${runId}: espera do estágio B expirou (${VALIDATION_DEADLINE_MIN} min) — job ${jobId} fica PENDENTE de coleta (GAP-11).`);
-  return { findings: [], error: "timeout do estágio adversarial (resultado pendente de coleta)", pending: true, ...(renewals ? { renewals } : {}) };
+  return { findings: [], error: "timeout do estágio adversarial (resultado pendente de coleta)", pending: true, ...(renewals ? { renewals } : {}), jobId };
 }
 
 // ── ciclo de vida da run ──────────────────────────────────────────────────────
@@ -893,6 +1062,8 @@ interface StageBCoverage {
   totalChars?: number;
   cap?: number;
   batches?: number;
+  /** GAP-145: concorrência de despacho usada (ausente = 1, série). */
+  batchConcurrency?: number;
   fullShas?: Record<string, string>;
   pendingFullShas?: Record<string, string>;
   notMeasured?: Array<{ file: string; reason: string }>;
@@ -1015,6 +1186,9 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
     const base = {
       oversized: primeiro.oversized, totalChars: primeiro.totalChars, cap: primeiro.cap,
       batches: lotes.length,
+      // GAP-145: concorrência USADA nesta run. Só aparece quando > 1 — mudança de comportamento tem de
+      // ficar na linha da run, senão comparar o tempo de parede de duas runs compara coisas diferentes.
+      ...(BATCH_CONCURRENCY > 1 && lotes.length > 1 ? { batchConcurrency: Math.min(BATCH_CONCURRENCY, lotes.length) } : {}),
     };
     // A cobertura PLANEJADA é gravada antes de gastar LLM (como antes deste GAP): se a api morrer no
     // meio, a linha já diz o que esta run se propôs a ler. O que vale como "julgado" nunca vem daqui —
@@ -1043,42 +1217,98 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
       });
 
     const medidos: string[] = [];
-    let pendente: { erro: string; shas: Record<string, string> } | null = null;
+    let pendente: { erro: string; shas: Record<string, string>; idx: number; jobId?: string } | null = null;
     let primeiroErro: string | undefined;
-    for (const [i, lote] of lotes.entries()) {
+
+    // ── 🔴 GAP-145 — DESPACHO dos lotes (concorrência declarada, default 1 = série) ───────────────
+    const conc = Math.min(BATCH_CONCURRENCY, lotes.length);
+    if (conc > 1) console.log(`[spec-validation] run ${runId}: ${lotes.length} lote(s) de estágio B com concorrência ${conc} (GAP-145; SPEC_VALIDATION_BATCH_CONCURRENCY).`);
+    const resultados = await scheduleBatches(
+      lotes.length,
+      conc,
+      async (i) => {
+        const lote = lotes[i];
+        const rotulo = lotes.length > 1 ? ` lote ${i + 1}/${lotes.length}` : "";
+        const known = knownFindingsForJudge(ativos, lote.full);
+        if (known.length) console.log(`[spec-validation] run ${runId}:${rotulo} ${known.length} finding(s) ativo(s) enviados como continuidade de anchor (GAP-39).`);
+        // 🔴 GAP-136: o esperador deste lote tem seu PRÓPRIO teto de VALIDATION_DEADLINE_MIN. Sem
+        // empurrar o prazo da RUN aqui, o lote 2 em diante trabalha com prazo já gasto pelos anteriores
+        // e o watchdog derruba a run no meio de uma leitura que está progredindo. O teto duro
+        // (VALIDATION_MAX_MIN desde o início) é o que impede isso de virar "sem prazo".
+        if (i > 0 && await renewValidationDeadline(pool, runId, `lote ${i + 1}/${lotes.length} despachado`)) renovacoes += 1;
+        const batchId = await criarLoteRow(pool, runId, i, lotes.length, lote.full, shasDe(lote.full));
+        // GAP-145: exceção de UM lote não pode derrubar a fase. Em série isso era inofensivo (não há
+        // irmão em voo); em paralelo, deixar o `Promise.all` rejeitar abandonaria os irmãos escrevendo
+        // no banco DEPOIS de a run já ter sido marcada em erro — dois escritores da mesma linha, que é
+        // exatamente o que o GAP-66/138 custou para eliminar. Falha vira desfecho DECLARADO do lote.
+        const b = await runStageB(pool, runId, projectId, lote.text, known,
+          batchId ? { id: batchId, idx: i, claimRun: conc === 1 || i === 0 } : null,
+        ).catch((e): StageBOutcome => ({ findings: [], error: `exceção no lote ${i + 1}/${lotes.length}: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300) }));
+        if (!b.error) {
+          // Só marca cobertura quando o juiz REALMENTE devolveu. Erro/timeout deixa a marca para o
+          // coletor (GAP-11): resultado pago que chega depois também cobre esses arquivos.
+          // Concorrente é seguro: cada UPDATE é statement único em autocommit (sem transação
+          // explícita), então nenhum lock atravessa dois lotes e não há ciclo de espera. Lotes que se
+          // sobrepõem em `full` carregam o MESMO sha do MESMO texto ⇒ a escrita é idempotente.
+          await markFilesJudged(pool, projectId, shasDe(lote.full));
+        }
+        return { b, batchId };
+      },
+      // C7 só onde ele é a única defesa: em série. Ver `scheduleBatches`.
+      conc === 1 ? { abortOnPending: (r) => !!r.b.pending } : {},
+    );
+
+    // ── GAP-145 — REMONTAGEM por `idx`, NUNCA por ordem de chegada ────────────────────────────────
+    // Com concorrência a ordem de chegada é ruído de rede, e a ordem da lista de findings DECIDE
+    // identidade mais adiante (o colapso C2 escolhe quem sobrevive; o casador do GAP-102 recusou
+    // defeito porque outro reivindicou o mesmo finding ANTES). Ler por `idx` mantém a mesma lista que
+    // a execução serial produziria.
+    for (let i = 0; i < lotes.length; i++) {
+      const lote = lotes[i];
       const rotulo = lotes.length > 1 ? ` lote ${i + 1}/${lotes.length}` : "";
-      // 🔴 C7 — um lote que ficou PENDENTE de coleta interrompe o despacho: `agents_job_id` é uma
-      // coluna só, e sobrescrevê-la jogaria no lixo uma leitura adversarial JÁ PAGA (é o GAP-11).
-      // Os arquivos dos lotes que não foram despachados ficam `nao_medido` VISÍVEL — nunca ausência
-      // silenciosa. Eles seguem pendentes no acumulado, então a validação seguinte os pega.
-      if (pendente) {
+      const r = resultados[i];
+      if (!r) {
+        // Nunca despachado (C7 em série). Os arquivos ficam `nao_medido` VISÍVEL — nunca ausência
+        // silenciosa. Eles seguem pendentes no acumulado, então a validação seguinte os pega.
         for (const p of lote.full) naoMedido.push({ file: p, reason: `lote não despachado: o${rotulo} anterior ficou pendente de coleta` });
         continue;
       }
-      const known = knownFindingsForJudge(ativos, lote.full);
-      if (known.length) console.log(`[spec-validation] run ${runId}:${rotulo} ${known.length} finding(s) ativo(s) enviados como continuidade de anchor (GAP-39).`);
-      // 🔴 GAP-136: o esperador deste lote tem seu PRÓPRIO teto de VALIDATION_DEADLINE_MIN. Sem
-      // empurrar o prazo da RUN aqui, o lote 2 em diante trabalha com prazo já gasto pelos anteriores
-      // e o watchdog derruba a run no meio de uma leitura que está progredindo. O teto duro
-      // (VALIDATION_MAX_MIN desde o início) é o que impede isso de virar "sem prazo".
-      if (i > 0 && await renewValidationDeadline(pool, runId, `lote ${i + 1}/${lotes.length} despachado`)) renovacoes += 1;
-      const b = await runStageB(pool, runId, projectId, lote.text, known);
+      const b = r.b;
       renovacoes += b.renewals ?? 0; // GAP-140: renovação por prova de vida conta como as outras
       if (b.error) {
         primeiroErro ??= b.error;
-        // C7: a falha é do LOTE, e ela nomeia os arquivos que ficaram sem medição neste conteúdo.
-        for (const p of lote.full) naoMedido.push({ file: p, reason: b.error });
-        if (b.pending) pendente = { erro: b.error, shas: shasDe(lote.full) };
-        console.warn(`[spec-validation] run ${runId}:${rotulo} estágio B não mediu ${lote.full.length} arquivo(s) (${b.error}).`);
+        // Só o pendente de MENOR `idx` mantém a semântica de recuperação de hoje (é o que vai para
+        // `spec_validation_runs.agents_job_id` e `pendingFullShas`). Os outros pendentes são trabalho
+        // pago que esta etapa NÃO recupera — e isso é dito na cara, arquivo por arquivo.
+        const secundario = !!b.pending && !!pendente;
+        const razao = secundario
+          ? `${b.error} — GAP-145 etapa 1: apenas o lote pendente de MENOR índice é recuperado nesta etapa (este ficou DECLARADO como não medido)`
+          : b.error;
+        for (const p of lote.full) naoMedido.push({ file: p, reason: razao });
+        if (b.pending && !pendente) pendente = { erro: b.error, shas: shasDe(lote.full), idx: i, jobId: b.jobId };
+        if (r.batchId) {
+          const st = b.pending ? (secundario ? "given_up" : null) : b.error.includes("job perdido") ? "lost" : "error";
+          // `null` = o pendente principal continua `dispatched`: o job pode estar VIVO no agents e o
+          // `collectStageBResults` volta para buscá-lo. Fechar a linha aqui mataria o GAP-11.
+          if (st) await fecharLoteRow(pool, r.batchId, st, { error: razao });
+        }
+        console.warn(`[spec-validation] run ${runId}:${rotulo} estágio B não mediu ${lote.full.length} arquivo(s) (${razao}).`);
         continue;
       }
       findings.push(...b.findings); // UNIÃO — o LLM só ADICIONA, nunca remove o estágio A
       descartados += b.dropped ?? 0; // GAP-129: descarte por teto de ingestão NÃO é "menos GAP"
       stageBRan = true;
       medidos.push(...lote.full);
-      // Só marca cobertura quando o juiz REALMENTE devolveu. Erro/timeout deixa a marca para o coletor
-      // (GAP-11): resultado pago que chega depois também cobre esses arquivos.
-      await markFilesJudged(pool, projectId, shasDe(lote.full));
+      // `findings` vai completo (mesmo `[]`) — NULL na coluna é "não devolveu", `[]` é "leu e nada achou".
+      if (r.batchId) await fecharLoteRow(pool, r.batchId, "done", { findings: b.findings, dropped: b.dropped ?? 0 });
+    }
+    // GAP-145: com concorrência, quem fica na coluna da run é o pendente de MENOR `idx` — decidido só
+    // agora, porque no despacho ninguém sabe qual lote vai ficar pendente. Em série isto é no-op
+    // (o último despachado já é ele).
+    if (conc > 1 && pendente?.jobId) {
+      await pool.query("UPDATE spec_validation_runs SET agents_job_id = $2 WHERE id = $1", [runId, pendente.jobId])
+        .catch((e) => console.warn(`[spec-validation] run ${runId}: agents_job_id do lote pendente não gravado (${e instanceof Error ? e.message : String(e)}) — o resultado pago desse lote NÃO será recuperável.`));
+      console.log(`[spec-validation] run ${runId}: lote ${pendente.idx + 1}/${lotes.length} é o pendente de MENOR índice — job ${pendente.jobId.slice(0, 8)} fica na run para o coletor (GAP-11/GAP-145).`);
     }
 
     // 🔴 C7 — o que a run pode dizer de si: `error` só quando NENHUM lote mediu (aí a validação não
@@ -1435,6 +1665,7 @@ export async function collectStageBResults(
       : false;
     if (res === "not_found") {
       await markStageBCollected(pool, r.id);
+      await fecharLotePorJob(pool, String(r.agents_job_id), "lost", { error: "job não existe mais no agents (TTL/restart)" }); // GAP-145
       out.lost += 1;
       console.log(`[spec-validation] run ${short}: job ${r.agents_job_id} não existe mais no agents (TTL/restart) — resultado perdido, assunto encerrado.`);
       continue;
@@ -1458,6 +1689,8 @@ export async function collectStageBResults(
       // O estágio A já está gravado na linha — a UNIÃO se mantém (o LLM só ADICIONA).
       const existing = Array.isArray(r.findings) ? (r.findings as ValidationFinding[]) : [];
       const findings = [...existing, ...stageB];
+      // GAP-145: o lote que este job representava tem desfecho — a linha dele para de dizer 'dispatched'.
+      await fecharLotePorJob(pool, String(r.agents_job_id), "done", { findings: stageB, dropped: recuperado.dropped });
       const after = r.project_id ? await computeCurrentSpecHash(pool, r.project_id).catch(() => null) : null;
       // A spec pode ter mudado enquanto o resultado ficou pendente: dizer 'passed'/'failed' sobre
       // outro conteúdo seria mentir. 'superseded' é honesto e o laço autônomo não compara contagem.
@@ -1485,13 +1718,35 @@ export async function collectStageBResults(
       // recorte; sem ele, recuperar um lote marcaria como julgados também os arquivos dos lotes que
       // falharam. Cobertura antiga (uma chamada só) não tem o campo e continua caindo em `fullShas`.
       const cov = (r.stage_b_coverage ?? null) as { fullShas?: Record<string, string>; pendingFullShas?: Record<string, string> } | null;
-      const devidos = cov?.pendingFullShas ?? cov?.fullShas;
+      // 🔴 GAP-150 (achado ao implementar o GAP-145) — `cov.fullShas` é o fallback ERRADO para uma run
+      // multi-lote que morreu no meio. Cenário real: a cobertura PLANEJADA (gravada antes de gastar
+      // LLM) lista TODOS os arquivos de todos os lotes; se a api reinicia depois do lote 1 e o coletor
+      // adota a run, `pendingFullShas` não existe ainda ⇒ ele cai em `fullShas` e marca como julgados
+      // arquivos que NENHUM juiz leu. É cegueira virando cobertura — a família do GAP-17/18.
+      // Agora existe a resposta exata: a linha do LOTE daquele job (migração 119) diz quais arquivos
+      // ELE levou por inteiro. Escopo pelo `run_id` para que um id de job repetido não cruze runs.
+      const doLote = await pool.query(
+        "SELECT full_shas FROM spec_validation_batches WHERE run_id = $1 AND agents_job_id = $2 LIMIT 1",
+        [r.id, r.agents_job_id],
+      ).then((q) => {
+        const s = q.rows[0]?.full_shas as Record<string, string> | undefined;
+        return s && Object.keys(s).length > 0 ? s : null;
+      }).catch(() => null); // tabela ausente (migração não aplicada) ⇒ comportamento anterior
+      const devidos = doLote ?? cov?.pendingFullShas ?? cov?.fullShas;
+      if (doLote && !cov?.pendingFullShas) {
+        console.log(`[spec-validation] run ${short}: cobertura do resgate recortada ao LOTE do job (${Object.keys(doLote).length} arquivo(s)) — a cobertura da run listava ${Object.keys(cov?.fullShas ?? {}).length} planejado(s), e marcar todos seria dizer que foram julgados sem juiz (GAP-150).`);
+      }
       if (r.project_id && devidos && Object.keys(devidos).length > 0) {
         await markFilesJudged(pool, String(r.project_id), devidos);
         // C3: o lote recuperado passa a contar como MEDIDO na cobertura da run — é o que faz
         // `unionFindingsByCoverage` saber que estes arquivos foram olhados nesta run (GAP-20) e o que
         // tira estes arquivos de `notMeasured`. Sem isto a coluna diria que ninguém os leu.
-        if (cov?.pendingFullShas) await mergeRecoveredCoverage(pool, r.id, cov as StageBCoverage);
+        // GAP-150: quando quem definiu o recorte foi a linha do lote, é ELE que tem de ser fundido na
+        // cobertura — senão a run seguiria dizendo que aqueles arquivos não foram medidos.
+        const paraFundir: StageBCoverage | null = cov?.pendingFullShas
+          ? (cov as StageBCoverage)
+          : doLote ? { ...((cov ?? {}) as StageBCoverage), pendingFullShas: doLote } : null;
+        if (paraFundir) await mergeRecoveredCoverage(pool, r.id, paraFundir);
       }
       out.collected += 1;
       // A CAUSA da recuperação muda o diagnóstico: órfã adotada aponta para restart da api;
@@ -1505,12 +1760,14 @@ export async function collectStageBResults(
     }
     if (st === "error") {
       await markStageBCollected(pool, r.id);
+      await fecharLotePorJob(pool, String(r.agents_job_id), "error", { error: String(res.error ?? "").slice(0, 300) }); // GAP-145
       out.lost += 1;
       console.log(`[spec-validation] run ${short}: job do estágio B terminou em erro no agents (${(res.error ?? "").slice(0, 200)}) — nada a recuperar.`);
       continue;
     }
     if (overdue) {
       await markStageBCollected(pool, r.id);
+      await fecharLotePorJob(pool, String(r.agents_job_id), "given_up", { error: `ainda em '${st}' ${STAGE_B_COLLECT_GRACE_MIN} min após o deadline` }); // GAP-145
       out.givenUp += 1;
       console.log(`[spec-validation] run ${short}: job ${r.agents_job_id} ainda em '${st}' ${STAGE_B_COLLECT_GRACE_MIN} min após o deadline — desisto (o laço não pode esperar para sempre).`);
       continue;

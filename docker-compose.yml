@@ -56,6 +56,13 @@ services:
       # custo da medição (dois estágios B), então nasce OFF mesmo com a medição ligada. A comparação
       # é PAREADA por defeito e se recusa a concluir com menos de 2 discordâncias.
       - SPEC_JUDGE_RECALL_THINKING_AB=${SPEC_JUDGE_RECALL_THINKING_AB:-off}
+      # 🔴 GAP-145 — quantos lotes do estágio B despacham AO MESMO TEMPO. Medido em prod (7 dias, 130
+      # runs): 26 são multi-lote e custam ~18 min de parede contra ~6 min de uma chamada só. Nasce em
+      # **1**, que é byte-idêntico ao comportamento serial de antes (mesma ordem, mesmo corte do C7) —
+      # a migração 119 dá um `agents_job_id` POR LOTE, e só com ela concorrência deixa de descartar
+      # leitura adversarial já paga. Subir isto acelera parede, NÃO reduz token, e concentra chamadas
+      # de LLM no mesmo instante (teto do provedor).
+      - SPEC_VALIDATION_BATCH_CONCURRENCY=${SPEC_VALIDATION_BATCH_CONCURRENCY:-1}
       - UPLOAD_DIR=/shared/uploads
       - RUNNER_SERVICE_URL=http://runner:8001
       - GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/zentriz-autonomy.2026-04-24.private-key.pem
