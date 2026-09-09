@@ -38,6 +38,10 @@ vi.mock("../db/client.js", () => ({
 // para provar o roteamento cirúrgico e devolvemos uma resposta controlada.
 let httpPostCalls: { url: string; body: string }[] = [];
 let rawResponse = "{}";
+// GAP-170: quando a retentativa de ancoragem precisa de respostas DIFERENTES por chamada do editor
+// (a 1ª falha ao ancorar, a 2ª acerta), enfileira-se aqui. Cada chamada do editor consome uma; quando
+// a fila esvazia, volta-se a `rawResponse`. Vazia por padrão ⇒ nada muda para os testes existentes.
+let rawResponseQueue: string[] = [];
 // PR-4: o ROTEADOR de GAPs sem arquivo (specGapScope) também fala por /invoke/raw. Distinguimos pelo
 // corpo (só o roteador manda a "LISTA DE ARQUIVOS") para cada asserção olhar a chamada certa.
 let routerResponse = JSON.stringify({ response: '{"routes": []}', model_used: "us.anthropic.claude-haiku-4-5" });
@@ -47,7 +51,8 @@ vi.mock("./specs.js", () => ({
   httpPost: async (url: string, body: string) => {
     httpPostCalls.push({ url, body });
     if (!url.includes("/invoke/raw")) return "{}";
-    return body.includes("LISTA DE ARQUIVOS") ? routerResponse : rawResponse;
+    if (body.includes("LISTA DE ARQUIVOS")) return routerResponse;
+    return rawResponseQueue.length > 0 ? rawResponseQueue.shift()! : rawResponse;
   },
   httpGet: async () => "{}",
   extractSpecMarkdown: () => "",
@@ -64,10 +69,13 @@ beforeEach(async () => {
   queryHandler = (sql) => (sql.includes("FROM projects") ? { rows: [{ tenant_id: TENANT, created_by: USER_ID }] } : { rows: [] });
   httpPostCalls = [];
   rawResponse = "{}";
+  rawResponseQueue = [];
   routerResponse = JSON.stringify({ response: '{"routes": []}', model_used: "us.anthropic.claude-haiku-4-5" });
 });
 
 const msg = (content: string) => [{ role: "user", content }];
+const block = (search: string, replace: string) =>
+  ["<<<<<<< SEARCH", search, "=======", replace, ">>>>>>> REPLACE"].join("\n");
 
 describe("POST /api/spec-chat — guardas do modo por-arquivo", () => {
   it("filePath inválido (traversal) → 400", async () => {
@@ -812,6 +820,71 @@ describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
     expect(done?.status).toBe("error");
     expect(String(done?.error)).toContain("não puderam ser ancoradas");
     expect(done?.specMarkdown).toBeFalsy();
+  });
+
+  const editorCalls = () => httpPostCalls.filter((c) => c.url.includes("/invoke/raw") && !isRouterCall(c));
+
+  it("GAP-170: âncora que erra por um marcador `- ` → RELÊ o arquivo, reoferece verbatim e a 2ª tentativa APLICA", async () => {
+    // O caso medido em prod: o modelo acerta o conteúdo e erra os bytes (um `- ` a mais na linha).
+    const linhaReal = "> - **FR-03 Autorização por papel obrigatória.**";
+    const base = `# API\n\n${linhaReal}\n\ncorpo do requisito\n`;
+    // 1ª resposta: SEARCH sem o `- ` ⇒ não ancora. 2ª resposta: SEARCH com os bytes reais ⇒ aplica.
+    rawResponseQueue = [
+      JSON.stringify({
+        response: block("> **FR-03 Autorização por papel obrigatória.**", "> - **FR-03 Autorização por papel e tenant obrigatórios.**"),
+        model_used: "us.anthropic.claude-opus-5",
+      }),
+      JSON.stringify({
+        response: block(linhaReal, "> - **FR-03 Autorização por papel e tenant obrigatórios.**"),
+        model_used: "us.anthropic.claude-opus-5",
+      }),
+    ];
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: base, projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    const { jobId } = JSON.parse(res.body);
+    let done: Record<string, unknown> | null = null;
+    for (let i = 0; i < 30 && !done; i++) {
+      const p = await app.inject({ method: "GET", url: `/api/spec-chat/${jobId}` });
+      const b = JSON.parse(p.body);
+      if (b.status === "done" || b.status === "error") done = b;
+      else await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(done?.status).toBe("done");
+    expect(String(done?.specMarkdown)).toContain("e tenant obrigatórios");
+    // A retentativa REALMENTE aconteceu: houve DUAS chamadas ao editor…
+    expect(editorCalls()).toHaveLength(2);
+    // …e a segunda levou o FATO da releitura no fim do prompt (a linha verbatim do arquivo).
+    expect(editorCalls()[1].body).toContain("A TENTATIVA ANTERIOR NÃO PÔDE SER APLICADA");
+    expect(editorCalls()[1].body).toContain(linhaReal);
+  });
+
+  it("GAP-170: âncora que não se aproxima de NENHUMA linha → NÃO retenta (não queima token à toa)", async () => {
+    const base = "# API\n\nEndpoints públicos definidos aqui.\n";
+    // Uma única resposta na fila: se houvesse retentativa, a 2ª chamada cairia em `rawResponse` ("{}").
+    rawResponseQueue = [
+      JSON.stringify({
+        response: block("linha completamente ausente do arquivo real", "novo texto"),
+        model_used: "m",
+      }),
+    ];
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: base, projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    const { jobId } = JSON.parse(res.body);
+    let done: Record<string, unknown> | null = null;
+    for (let i = 0; i < 30 && !done; i++) {
+      const p = await app.inject({ method: "GET", url: `/api/spec-chat/${jobId}` });
+      const b = JSON.parse(p.body);
+      if (b.status === "done" || b.status === "error") done = b;
+      else await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(done?.status).toBe("error");
+    expect(String(done?.error)).toContain("não puderam ser ancoradas");
+    // SEM fato novo ⇒ UMA só chamada ao editor (a fila não foi consumida uma segunda vez).
+    expect(editorCalls()).toHaveLength(1);
   });
 
   it("A5.2: EDIÇÕES + resposta cortada → aplica as completas e NÃO marca truncado (o laço aproveita)", async () => {

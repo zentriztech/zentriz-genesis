@@ -43,6 +43,7 @@ import { parseSpecPath } from "./specFiles.js";
 import type { ValidationFinding } from "../services/specValidation.js";
 import { productScopeEnabled, buildProductMap, selectSiblingBodies } from "../services/productContext.js";
 import { applySpecEditResponse, looksLikeEdits } from "../services/specFileEdits.js";
+import { buildReanchorFacts, isReanchorable } from "../services/specEditReanchor.js";
 import { MANIFEST_PATH } from "../services/specManifest.js";
 import { DIAGRAMS_PATH, MIN_DIAGRAMS } from "../services/specDiagrams.js";
 // GAP-68: `import type` de propósito — `gapContinuity` importa `httpPost` de `routes/specs.js`, e um
@@ -837,6 +838,19 @@ export function gapFileEditsEnabled(): boolean {
 }
 
 /**
+ * 🔴 GAP-170 — retentativa de ancoragem. Nasce LIGADA, ao contrário do padrão de flag nova do repo.
+ *
+ * O motivo é medido, não preferência: ela só roda onde a rodada já estava **100% perdida** (nenhuma
+ * edição ancorou) e só quando o código tem trecho verbatim NOVO para entregar. O pior caso é uma
+ * chamada extra em ~0,7% das rodadas (7 de 954 medidas em prod) trocando um passe inteiro descartado.
+ * Nascer desligada exigiria editar o `.env` de prod (o gotcha do `env_file:`) para provar ao vivo algo
+ * que só pode melhorar. `SPEC_EDIT_REANCHOR=off` desliga.
+ */
+export function reanchorEnabled(): boolean {
+  return (process.env.SPEC_EDIT_REANCHOR ?? "on").trim().toLowerCase() !== "off";
+}
+
+/**
  * Teto de conteúdo do "Resolver GAPs por arquivo".
  *
  * No formato `whole` o teto de ENTRADA existia para a SAÍDA caber no orçamento (o arquivo voltava
@@ -1555,6 +1569,16 @@ function runFileChatJob(
    * contas (chat livre, criação de arquivo) e nada é gravado em `gap_outcomes`.
    */
   outcomeGaps: ValidationFinding[] | null = null,
+  /**
+   * 🔴 GAP-170 — estado da RETENTATIVA DE ANCORAGEM. Objeto (e não mais dois posicionais) porque a
+   * lição do GAP-156 foi exatamente esta: parâmetro posicional novo numa lista longa passa
+   * silenciosamente errado, e o teste tem de pinar o CALL SITE.
+   *
+   * `digested` diz se o arquivo chegou RECORTADO ao prompt — sem isso o fato entregue ao agente
+   * mentiria por omissão ("a âncora não existe" quando o certo é "você não recebeu esse trecho").
+   * `attempt` é 0 na primeira chamada; a retentativa é UMA só.
+   */
+  reanchor: { digested?: boolean; attempt?: number } = {},
 ): void {
   const job = _chatJobs.get(jobId);
   if (!job) return;
@@ -1603,12 +1627,40 @@ function runFileChatJob(
         const applied = applySpecEditResponse(editsBase, (data.response ?? "").replace(/\r\n/g, "\n"));
         if (!applied.ok) {
           console.warn(`[SpecChat] job=${jobId} edits REPROVADOS (${applied.code}) — ${applied.message}`);
+          // 🔴 GAP-170: 7 passes de Opus (~145k chars cada) foram descartados INTEIROS em prod porque
+          // o `SEARCH` errava os bytes de uma linha que EXISTE no arquivo (medido: um `- ` de lista a
+          // mais). O `Edit` do Claude Code falha com erro preciso e o modelo corrige no MESMO turno;
+          // aqui a rodada morria. Passa a haver UMA retentativa — e só quando o código tem um FATO
+          // NOVO a entregar (trecho verbatim localizado). Sem fato novo, falha como antes, sem gasto.
+          const attempt = reanchor.attempt ?? 0;
+          if (attempt === 0 && isReanchorable(applied.code) && reanchorEnabled()) {
+            const facts = buildReanchorFacts(editsBase, applied.skipped, { digested: reanchor.digested });
+            if (facts) {
+              const anterior = String(raw.user_message ?? "");
+              console.warn(
+                `[SpecChat] job=${jobId} GAP-170 RETENTATIVA de ancoragem: ${facts.located} âncora(s) `
+                + `localizada(s) no arquivo real, ${facts.unlocated} sem trecho aproximado`
+                + `${facts.truncated.length ? ` (fora: ${facts.truncated.join("; ")})` : ""}`
+                + ` — +${facts.text.length} chars ANEXADOS ao fim do user_message (prefixo intacto, cache preservado).`,
+              );
+              // O fato vai no FIM: o `prompt_override` e a cabeça estável continuam byte a byte
+              // iguais, então o cache de prompt do GAP-142 segue valendo nesta segunda chamada.
+              runFileChatJob(
+                jobId, { ...raw, user_message: `${anterior}\n${facts.text}` }, agentsUrl,
+                doneReply, editsBase, outcomeGaps, { ...reanchor, attempt: attempt + 1 },
+              );
+              return;
+            }
+            console.warn(`[SpecChat] job=${jobId} GAP-170 SEM retentativa: nenhuma âncora recusada tem trecho aproximado no arquivo — repetir o pedido custaria outra chamada pela mesma resposta.`);
+          }
           settleJob(jobId, {
             status: "error",
             modelUsed: data.model_used ?? null,
             // Deliberadamente NÃO marca `truncated`: a causa foi a âncora, não o teto — e `truncated`
             // tem significado próprio para o laço (`assessRevisionIntegrity`).
-            error: `A IA devolveu edições que não puderam ser ancoradas no arquivo — nada foi alterado. ${applied.message}`,
+            // GAP-170: quando a releitura JÁ foi entregue e falhou de novo, o laço precisa saber —
+            // senão a próxima rodada lê "âncora errada" e tenta a mesma coisa achando que é a 1ª vez.
+            error: `A IA devolveu edições que não puderam ser ancoradas no arquivo — nada foi alterado.${attempt > 0 ? " Isto já é a SEGUNDA tentativa: o arquivo foi relido e os trechos verbatim foram entregues ao agente, e as âncoras continuaram sem casar." : ""} ${applied.message}`,
           });
           return;
         }
@@ -2044,6 +2096,10 @@ export async function dispatchGapFileJob(opts: {
     // `gap_outcomes` uma leva de omissões que são decisão do laço, e o A1 as devolveria ao agente na
     // rodada seguinte como dívida dele. Rodada que não pede conserto não cobra conta.
     consolidationBlock ? null : opts.findings,
+    // 🔴 GAP-170: `digested` é o MESMO fato que decidiu o conteúdo do prompt (`target.digested`). Se a
+    // retentativa não soubesse dele, entregaria "esta âncora não existe no arquivo" para um agente que
+    // simplesmente não recebeu aquele trecho — o fato estaria certo e a conclusão errada.
+    { digested: target.digested },
   );
   return { ok: true, gaps: opts.findings.length };
 }
@@ -2538,6 +2594,10 @@ export async function specChatRoutes(app: FastifyInstance) {
           // 🔴 GAP-157: a lista despachada, para que a prestação de contas que o prompt EXIGE seja lida,
           // mostrada ao humano e gravada. Sem este argumento o bloco era escrito e jogado fora.
           fileGaps,
+          // 🔴 GAP-170: o botão humano recebe a MESMA retentativa. Um clique que devolve "não pôde ser
+          // ancorada" é o pior resultado possível para quem está olhando a tela, e o recorte aqui é
+          // decidido pelo mesmo `humanTarget` — repetir a régua do laço é o ponto (GAP-156).
+          { digested: !("tooLarge" in humanTarget) && humanTarget.digested },
         );
       } else if (filePath) {
         // Modo por-arquivo: edição cirúrgica via /invoke/raw (preserva o conteúdo original).

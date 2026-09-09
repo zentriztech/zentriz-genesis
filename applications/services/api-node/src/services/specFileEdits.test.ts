@@ -418,3 +418,57 @@ describe("GAP-65 — remover marcador de conflito que já está no arquivo", () 
     }
   });
 });
+
+/**
+ * GAP-170 — a FALHA passa a expor `skipped` (com o `search` de cada âncora recusada).
+ *
+ * Antes, quando nenhum bloco aplicava, só o PRIMEIRO defeito sobrevivia e as outras 19 âncoras
+ * recusadas eram perdidas — o chamador não tinha como pedir ao agente a releitura do arquivo para
+ * elas. E a `SpecEditSkipped` não trazia o `search`, então quem quisesse comparar a âncora com a
+ * linha real do arquivo teria de reconstruí-la a partir da `message` (prosa cortada) — adivinhação.
+ */
+describe("GAP-170 — `search` e `skipped` também no caminho de FALHA", () => {
+  it("cada bloco recusado carrega o `search` verbatim que o agente pediu", () => {
+    const r = applySpecEditResponse(BASE, block("Uma frase que nunca existiu.", "x"));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.skipped).toHaveLength(1);
+    expect(r.skipped[0].search).toBe("Uma frase que nunca existiu.");
+  });
+
+  it("NENHUM bloco aplica → `skipped` traz TODAS as âncoras recusadas, não só a primeira", () => {
+    const raw = [
+      block("não existe A neste arquivo", "x"),
+      block("não existe B neste arquivo", "y"),
+      block("não existe C neste arquivo", "z"),
+    ].join("\n");
+    const r = applySpecEditResponse(BASE, raw);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("SEARCH_NOT_FOUND"); // motivo do primeiro (comportamento anterior preservado)
+    expect(r.skipped).toHaveLength(3);
+    expect(r.skipped.map((s) => s.search)).toEqual([
+      "não existe A neste arquivo",
+      "não existe B neste arquivo",
+      "não existe C neste arquivo",
+    ]);
+  });
+
+  it("SHRUNK também expõe `skipped` (para o chamador poder reancorar o que não fosse esvaziamento)", () => {
+    const r = applySpecEditBlocks(BASE, [
+      { search: BASE.slice(0, Math.floor(BASE.length * 0.8)), replace: "" },
+    ]);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("SHRUNK");
+    expect(Array.isArray(r.skipped)).toBe(true);
+  });
+
+  it("NO_BLOCKS expõe `skipped` vazio (não há âncora a reler)", () => {
+    const r = applySpecEditResponse(BASE, "só prosa, nenhum bloco de edição aqui");
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("NO_BLOCKS");
+    expect(r.skipped).toEqual([]);
+  });
+});

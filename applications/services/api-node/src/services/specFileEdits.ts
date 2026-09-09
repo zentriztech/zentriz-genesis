@@ -175,11 +175,22 @@ export interface SpecEditSkipped {
   index: number;
   code: SpecEditApplyFailure["code"];
   message: string;
+  /**
+   * 🔴 GAP-170 — o texto que o agente pediu para casar. Sem ele, quem quiser dizer ao agente QUAL
+   * linha do arquivo se aproxima da âncora recusada não tem o que comparar: a `message` já é prosa
+   * com o rótulo cortado em 70 chars, e reconstruir a âncora a partir dela seria adivinhar.
+   */
+  search: string;
 }
 
 export type SpecEditApplyResult =
   | { ok: true; content: string; applied: number; dropped: number; skipped: SpecEditSkipped[] }
-  | ({ ok: false } & SpecEditApplyFailure);
+  /**
+   * 🔴 GAP-170: `skipped` também no caminho de FALHA. Antes, quando nenhum bloco aplicava, só o
+   * PRIMEIRO defeito sobrevivia (`firstFailure[0]`) e as outras 19 âncoras recusadas eram perdidas —
+   * então o chamador não tinha como devolver ao agente a releitura do arquivo para as demais.
+   */
+  | ({ ok: false; skipped: SpecEditSkipped[] } & SpecEditApplyFailure);
 
 /** Quantas vezes `needle` aparece em `hay` (busca literal, sem regex). */
 function countOccurrences(hay: string, needle: string): number {
@@ -248,12 +259,12 @@ export function applySpecEditBlocks(
   const dropped = opts.dropped ?? 0;
   const minRatio = opts.minRatio ?? 0.6;
   if (blocks.length === 0) {
-    return { ok: false, code: "NO_BLOCKS", message: "A resposta não trouxe nenhum bloco de edição completo." };
+    return { ok: false, code: "NO_BLOCKS", message: "A resposta não trouxe nenhum bloco de edição completo.", skipped: [] };
   }
   const skipped: SpecEditSkipped[] = [];
   const firstFailure: SpecEditApplyFailure[] = [];
-  const skip = (f: SpecEditApplyFailure & { index: number }) => {
-    skipped.push({ index: f.index, code: f.code, message: f.message });
+  const skip = (f: SpecEditApplyFailure & { index: number; search: string }) => {
+    skipped.push({ index: f.index, code: f.code, message: f.message, search: f.search });
     if (firstFailure.length === 0) firstFailure.push(f);
   };
   let current = baseContent.replace(/\r\n/g, "\n");
@@ -261,7 +272,7 @@ export function applySpecEditBlocks(
     const b = blocks[i];
     const search = b.search.replace(/\r\n/g, "\n");
     if (!search.trim()) {
-      skip({ code: "EMPTY_SEARCH", index: i, message: `Edição ${i + 1}: bloco SEARCH vazio.` });
+      skip({ code: "EMPTY_SEARCH", index: i, search, message: `Edição ${i + 1}: bloco SEARCH vazio.` });
       continue;
     }
     // GAP-9 (invariante, não heurística): nenhuma substituição pode INTRODUZIR uma linha de marcador
@@ -271,7 +282,7 @@ export function applySpecEditBlocks(
     const badLine = b.replace.replace(/\r\n/g, "\n").split("\n").find((l) => isMarkerLine(l.trim()));
     if (badLine !== undefined) {
       skip({
-        code: "MARKER_IN_REPLACE", index: i,
+        code: "MARKER_IN_REPLACE", index: i, search,
         message: `Edição ${i + 1}: o texto novo contém uma linha de marcador de edição ("${badLine.trim().slice(0, 20)}") — recusado para não gravar conflito de merge na spec. Reemita o bloco; se a linha for mesmo conteúdo, use cabeçalho ATX (\`# Título\`) em vez de sublinhado.`,
       });
       continue;
@@ -297,14 +308,14 @@ export function applySpecEditBlocks(
           + " e todas as anteriores contam como texto do arquivo dentro do SEARCH."
         : "";
       skip({
-        code: "SEARCH_NOT_FOUND", index: i,
+        code: "SEARCH_NOT_FOUND", index: i, search,
         message: `Edição ${i + 1}: o trecho a substituir não existe no arquivo — âncora: "${label(search)}".${sep}`,
       });
       continue;
     }
     if (hits > 1) {
       skip({
-        code: "SEARCH_AMBIGUOUS", index: i,
+        code: "SEARCH_AMBIGUOUS", index: i, search,
         message: `Edição ${i + 1}: o trecho a substituir aparece ${hits}× no arquivo (âncora ambígua) — "${label(search)}". Inclua mais linhas de contexto.`,
       });
       continue;
@@ -314,10 +325,10 @@ export function applySpecEditBlocks(
   }
   const applied = blocks.length - skipped.length;
   // Nenhum bloco aplicou: a rodada é a mesma falha de antes, com o motivo do PRIMEIRO bloco recusado.
-  if (applied === 0) return { ok: false, ...firstFailure[0] };
+  if (applied === 0) return { ok: false, ...firstFailure[0], skipped };
   if (current.length < Math.floor(baseContent.length * minRatio)) {
     return {
-      ok: false, code: "SHRUNK",
+      ok: false, code: "SHRUNK", skipped,
       message: `As edições encolheriam o arquivo de ${baseContent.length} para ${current.length} caracteres — recusado (possível remoção de conteúdo válido).`,
     };
   }
