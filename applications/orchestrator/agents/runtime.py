@@ -1442,13 +1442,23 @@ def _persist_raw_llm_response(role: str, message: dict, raw_text: str) -> None:
 
 
 def _get_model_for_role(role: str) -> str:
-    """Seleção de modelo por contexto (Blueprint 6.1): spec/charter vs código."""
+    """Modelo do papel a partir do env do RUN — nunca um literal.
+
+    ⚖️ LEI 2026-09-10 (Jean): *"nao podemos mais usar hard-code para injetar provide X ou Y e nem
+    Modelos"*. Aqui havia `os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")`: um modelo escolhido
+    pela Zentriz, cobrado na conta de quem estivesse rodando. O literal morreu.
+
+    O env continua sendo lido porque na Fábrica ele é o TRANSPORTE do slot: `runner_server.py`
+    resolve `tenant_llm_configs` e injeta `CLAUDE_MODEL`/`CLAUDE_MODEL_REWORK` no env DO RUN. O que
+    não pode existir é valor de container (`.env` da plataforma) fazendo as vezes de escolha do
+    tenant — por isso, sem nada, isto devolve "" e o chamador FALHA ALTO em vez de inventar modelo.
+    """
     role_upper = (role or "").upper()
     if role_upper in ("CTO", "ENGINEER", "PM"):
-        return os.environ.get("CLAUDE_MODEL_SPEC") or os.environ.get("PIPELINE_LLM_MODEL") or os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+        return (os.environ.get("CLAUDE_MODEL_SPEC") or os.environ.get("PIPELINE_LLM_MODEL") or os.environ.get("CLAUDE_MODEL") or "").strip()
     if role_upper == "DEV":
-        return os.environ.get("CLAUDE_MODEL_CODE") or os.environ.get("PIPELINE_LLM_MODEL") or os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
-    return os.environ.get("PIPELINE_LLM_MODEL") or os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+        return (os.environ.get("CLAUDE_MODEL_CODE") or os.environ.get("PIPELINE_LLM_MODEL") or os.environ.get("CLAUDE_MODEL") or "").strip()
+    return (os.environ.get("PIPELINE_LLM_MODEL") or os.environ.get("CLAUDE_MODEL") or "").strip()
 
 
 def _build_foundry_client(llm_cfg: dict | None = None):
@@ -1476,6 +1486,551 @@ def _build_foundry_client(llm_cfg: dict | None = None):
     return Anthropic(api_key=key, base_url=base)
 
 
+
+def _build_azure_openai_client(llm_cfg: dict | None = None, timeout: int = 900):
+    """Azure OpenAI: endpoint + deployment + api-version do SLOT do tenant (BYOC), env como fallback.
+
+    Sem isto o provider `azure_openai` existia só na tela: o dispatch caía no ramo Anthropic e a
+    chamada ia para a API pública da Anthropic — mesmo defeito que o slot Foundry tinha.
+    """
+    cfg = llm_cfg or {}
+    key = (cfg.get("api_key") or os.environ.get("AZURE_OPENAI_API_KEY")
+           or os.environ.get("CLAUDE_API_KEY") or "").strip()
+    endpoint = (cfg.get("azure_endpoint") or os.environ.get("AZURE_OPENAI_ENDPOINT") or "").strip()
+    version = (cfg.get("azure_api_version") or os.environ.get("AZURE_OPENAI_API_VERSION")
+               or "2024-02-01").strip()
+    # Validar ANTES de importar: config faltando é erro do operador e a mensagem tem de dizer
+    # isso, não "No module named openai".
+    if not key or not endpoint:
+        raise ValueError(
+            "provider=azure_openai exige API Key e Endpoint no slot de LLM do tenant "
+            "(ou AZURE_OPENAI_API_KEY/AZURE_OPENAI_ENDPOINT no container)."
+        )
+    from openai import AzureOpenAI as _AzureOpenAI  # type: ignore
+    return _AzureOpenAI(api_key=key, azure_endpoint=endpoint, api_version=version, timeout=timeout)
+
+
+def _azure_deployment(llm_cfg: dict | None, model: str) -> str:
+    """No Azure quem endereça a chamada é o DEPLOYMENT, não o nome do modelo."""
+    cfg = llm_cfg or {}
+    return ((cfg.get("azure_deployment") or os.environ.get("AZURE_OPENAI_DEPLOYMENT") or "").strip()
+            or model)
+
+
+# ── Google (Vertex AI / Gemini) ───────────────────────────────────────────────────────────────────
+# Jean, 2026-09-09: "vamos receber créditos do Google e poderemos usar em modelos que o Google paga
+# via crédito, então o slot deve ser de provider Google para os modelos da família que ele subsidia".
+# O crédito do Google cobre o **Vertex AI**, cujo Model Garden revende famílias de TERCEIROS (Claude,
+# Llama, Mistral, Qwen) além do Gemini nativo. Por isso o slot `google` não é "só Gemini".
+#
+# Dois caminhos de credencial, deliberadamente:
+#   1. `google_api_key`  → Gemini pela Gemini API (endpoint OpenAI-compatível). Simples, sem GCP.
+#   2. `vertex_*`        → Vertex AI com service account. Cobre as famílias subsidiadas do Model
+#      Garden. Claude no Vertex fala o protocolo Anthropic (AnthropicVertex); as demais famílias
+#      falam o endpoint OpenAI-compatível do Vertex.
+_GEMINI_OPENAI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+
+def _vertex_openai_base(project: str, location: str) -> str:
+    return (f"https://{location}-aiplatform.googleapis.com/v1/projects/{project}"
+            f"/locations/{location}/endpoints/openapi")
+
+
+def _vertex_credentials(llm_cfg: dict | None = None):
+    """Credenciais GCP a partir do envelope (BYOC) ou do env/ADC do container.
+
+    O JSON da service account NUNCA é logado. Sem `google-auth` instalado, falha com mensagem
+    acionável em vez de um AttributeError obscuro lá na frente.
+    """
+    llm_cfg = llm_cfg or {}
+    try:
+        from google.oauth2 import service_account as _sa  # type: ignore
+        import google.auth as _gauth  # type: ignore
+    except ImportError:
+        raise ImportError(
+            "provider=google no modo Vertex exige `google-auth` na imagem "
+            "(pip install google-auth). Para Gemini sem GCP, use apenas `google_api_key`."
+        )
+    raw = (llm_cfg.get("vertex_service_account_json")
+           or os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or "").strip()
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+    if raw:
+        import json as _json
+        return _sa.Credentials.from_service_account_info(_json.loads(raw), scopes=scopes)
+    # Sem SA explícita: ADC do container (GOOGLE_APPLICATION_CREDENTIALS / metadata do GCE).
+    creds, _ = _gauth.default(scopes=scopes)
+    return creds
+
+
+def _vertex_project_location(llm_cfg: dict | None = None) -> tuple[str, str]:
+    llm_cfg = llm_cfg or {}
+    project = (llm_cfg.get("vertex_project_id") or os.environ.get("GOOGLE_VERTEX_PROJECT") or "").strip()
+    location = (llm_cfg.get("vertex_location") or os.environ.get("GOOGLE_VERTEX_LOCATION") or "us-east5").strip()
+    if not project:
+        raise ValueError("provider=google no modo Vertex exige `vertex_project_id` (ou GOOGLE_VERTEX_PROJECT).")
+    return project, location
+
+
+
+# ── Quem decide o provider: o tenant ou a infraestrutura? ─────────────────────────────────────────
+# Jean, 2026-09-10: "não se trata só da ZFactory — QUALQUER tenant precisa poder usar uma diversidade
+# de providers (inclusive conexão direta via API), e isso tem de refletir nos agentes da Fábrica E da
+# Bancada". Este é o ÚNICO ponto onde essa escolha é honrada ou perdida: os agentes rodam em container
+# próprio, com `GENESIS_LLM_PROVIDER` global; a escolha do tenant chega só pelo `llm_config` do
+# envelope (Bancada: resolveWorkbenchLlm · Fábrica: runner_server → env do run → _build_message_envelope).
+#
+# O guarda anterior ("env=foundry SEMPRE vence") existia por um motivo real: config antiga no banco
+# trazia `bedrock`/`anthropic` de uma época em que o Foundry não existia como opção — provider stale,
+# não escolha. Mas ele tornava TODO slot não-Google decorativo: um tenant que cadastrasse OpenAI, ou
+# Anthropic com chave própria, era sequestrado para o Foundry em silêncio.
+#
+# Critério: a escolha é DELIBERADA quando o slot traz credencial própria (BYOC) ou quando o provider
+# não é dos que o Foundry substitui. Só o slot Claude legado SEM credencial cai para o env.
+_BYOC_FIELDS = ("api_key", "aws_access_key_id", "foundry_api_key",
+                "google_api_key", "vertex_project_id", "vertex_service_account_json")
+
+
+def resolve_provider(llm_cfg: dict | None, env_provider: str) -> str:
+    """Provider efetivo: escolha do tenant quando deliberada, env quando o slot é legado."""
+    cfg = llm_cfg or {}
+    declared = (cfg.get("provider") or "").strip().lower()
+    env_provider = (env_provider or "").strip().lower()
+    if not declared:
+        return env_provider
+    byoc = any(str(cfg.get(k) or "").strip() for k in _BYOC_FIELDS)
+    # `bedrock`/`anthropic` sem credencial = "use a identidade do host" — indistinguível do
+    # default legado, então a infraestrutura decide. Com credencial, é BYOC e vale.
+    legado_sem_credencial = declared in ("bedrock", "anthropic") and not byoc
+    if env_provider == "foundry" and legado_sem_credencial:
+        return "foundry"
+    return declared
+
+def _build_google_client(llm_cfg: dict | None = None, model: str = "") -> tuple[str, str]:
+    """Devolve (api_key, base_url) para o SDK OpenAI falar com Gemini/Model Garden.
+
+    Modo 1 (chave): Gemini API. Modo 2 (Vertex): troca a service account por um bearer token,
+    que o SDK OpenAI manda no header Authorization — é o mesmo shape de `api_key`.
+
+    `model` decide quando a chave NÃO serve: a Gemini API só serve Gemini. Modelo do Model
+    Garden (Llama/Mistral/Qwen — as famílias de terceiros que o crédito do Google paga) existe
+    apenas no Vertex, então com os dois modos configurados o Vertex vence para esses ids.
+    """
+    llm_cfg = llm_cfg or {}
+    key = (llm_cfg.get("google_api_key") or os.environ.get("GOOGLE_API_KEY") or "").strip()
+    base = (llm_cfg.get("google_base_url") or os.environ.get("GOOGLE_BASE_URL") or "").strip()
+    _is_gemini = "gemini" in (model or "").lower() or not model
+    if key and _is_gemini:
+        return key, (base or _GEMINI_OPENAI_BASE).rstrip("/") + "/"
+    if key and not _is_gemini and not (
+        llm_cfg.get("vertex_project_id") or os.environ.get("GOOGLE_VERTEX_PROJECT")
+    ):
+        raise ValueError(
+            f"modelo '{model}' é do Vertex AI Model Garden e não existe na Gemini API: "
+            "preencha Projeto GCP + Service Account no slot Google (modo Vertex)."
+        )
+    creds = _vertex_credentials(llm_cfg)
+    from google.auth.transport.requests import Request as _GReq  # type: ignore
+    creds.refresh(_GReq())
+    project, location = _vertex_project_location(llm_cfg)
+    return creds.token, (base or _vertex_openai_base(project, location)).rstrip("/") + "/"
+
+
+def _build_vertex_anthropic_client(llm_cfg: dict | None = None):
+    """Claude servido pelo Vertex AI Model Garden — protocolo Anthropic, faturado pelo GCP."""
+    from anthropic import AnthropicVertex  # type: ignore
+    project, location = _vertex_project_location(llm_cfg)
+    return AnthropicVertex(project_id=project, region=location, credentials=_vertex_credentials(llm_cfg))
+
+
+def _build_anthropic_direct_client(llm_cfg: dict | None = None):
+    """API pública da Anthropic com a chave DO SLOT (provider=anthropic).
+
+    ⚖️ LEI 2026-09-10 — este cliente não existia: `provider=anthropic` com `api_key` próprio caía
+    no ramo Bedrock de `call_bedrock_direct` (identidade do host) ou lia `CLAUDE_API_KEY` do
+    contêiner no `run_agent`. Nos dois casos a chave que o tenant cadastrou era descartada.
+    """
+    from anthropic import Anthropic
+    cfg = llm_cfg or {}
+    key = (cfg.get("api_key") or os.environ.get("ANTHROPIC_API_KEY")
+           or os.environ.get("CLAUDE_API_KEY") or "").strip()
+    if not key:
+        raise ValueError("provider=anthropic exige API Key no slot de LLM do tenant.")
+    base = (cfg.get("anthropic_base_url") or os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+    return Anthropic(api_key=key, base_url=base) if base else Anthropic(api_key=key)
+
+
+# ── ⚖️ Cascata de slots (Jean, 2026-09-10) ────────────────────────────────────────────────────────
+# *"todos devem usar identidade, credencial e modelos dos slots […] sempre testando se funciona e em
+# caso de não funcionar testa o próximo"*.
+#
+# O tenant cadastra até 4 slots, mas só o PRIMEIRO utilizável viajava: chave expirada, modelo fora
+# do ar na região ou cota estourada matavam a chamada com três contingências paradas na tela. A
+# contingência existia como DADO, não como comportamento.
+#
+# Duas decisões de desenho, ambas para NÃO regredir o que já funciona:
+#  1. Só falha DE SLOT troca de slot. Erro de conteúdo (prompt grande demais, resposta truncada,
+#     JSON inválido) é do pedido, não da credencial — repetir noutro provider pagaria o dobro para
+#     receber o mesmo erro. Daí `classify_llm_error` em vez de um `except Exception` genérico.
+#  2. A ordem é a DO TENANT (o api-node monta `llm_candidates` já ordenado). Trocar de slot troca de
+#     credencial, logo de fatura: a fila continua sendo escolha dele.
+_ERR_AUTH = ("401", "403", "accessdenied", "unrecognizedclient", "invalidsignature",
+             "invalid_api_key", "invalid api key", "authentication", "unauthorized",
+             "permission_denied", "permissiondenied", "invalidclienttokenid",
+             "expiredtoken", "credential", "not authorized", "forbidden")
+_ERR_MODEL = ("404", "not_found", "not found", "does not exist", "model_not_found",
+              "invalid model", "modelo não", "deploymentnotfound", "unsupported model",
+              "validationexception", "resourcenotfound", "no deployment")
+_ERR_QUOTA = ("429", "throttl", "quota", "rate limit", "rate_limit", "resource_exhausted",
+              "resourceexhausted", "insufficient_quota", "too many requests",
+              "serviceunavailable", "503", "overloaded")
+_ERR_NETWORK = ("timeout", "timed out", "connection", "getaddrinfo", "temporary failure in name",
+                "ssl", "econnrefused", "network is unreachable")
+# Mensagens que ESTE código emite quando o slot está mal preenchido — a chamada nem sai da máquina.
+_ERR_CONFIG = ("configure um slot", "não definida", "exige api key", "exige `vertex_project_id",
+               "não serve o modelo", "defina anthropic_foundry", "não existe na gemini api",
+               "exige projeto gcp", "exige `google-auth`")
+
+
+def classify_llm_error(exc: BaseException | str) -> str:
+    """`auth` | `model` | `quota` | `network` | `config` | `other`.
+
+    A ordem de teste importa: um 403 costuma trazer a palavra "model" no corpo (o serviço explica
+    QUAL modelo foi negado), então credencial é avaliada antes de disponibilidade. Classificar 403
+    como `model` faria a cascata pular o slot certo e culpar o id.
+    """
+    txt = (str(exc) or "").lower()
+    if any(m in txt for m in _ERR_CONFIG):
+        return "config"
+    if any(m in txt for m in _ERR_AUTH):
+        return "auth"
+    if any(m in txt for m in _ERR_QUOTA):
+        return "quota"
+    if any(m in txt for m in _ERR_MODEL):
+        return "model"
+    if any(m in txt for m in _ERR_NETWORK):
+        return "network"
+    return "other"
+
+
+def is_slot_failure(exc: BaseException | str) -> bool:
+    """Este erro é do SLOT (⇒ vale tentar o próximo) ou do PEDIDO (⇒ tentar de novo é desperdício)?"""
+    return classify_llm_error(exc) in ("auth", "model", "quota", "network", "config")
+
+
+def llm_candidates(body: dict) -> list[dict]:
+    """Envelopes a tentar, em ordem: o slot ESCOLHIDO primeiro, depois as contingências.
+
+    Aceita o corpo como já viaja hoje (`model_id` + `llm_config`) e o campo ADITIVO
+    `llm_candidates` (lista de envelopes completos, cada um com `provider`, `model` e as próprias
+    credenciais). Corpo antigo, sem o campo novo, produz exatamente uma tentativa — o comportamento
+    de hoje, byte por byte.
+    """
+    cfg0 = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else {}
+    m0 = str(body.get("model_id") or (cfg0 or {}).get("model") or "").strip()
+    f0 = str(body.get("model_id_fallback") or body.get("model_id_rework")
+             or (cfg0 or {}).get("model_rework") or "").strip()
+    out: list[dict] = []
+    if m0:
+        out.append({"model": m0, "fallback": f0, "llm_cfg": (cfg0 or None)})
+    for cand in (body.get("llm_candidates") or []):
+        if not isinstance(cand, dict):
+            continue
+        m = str(cand.get("model") or "").strip()
+        if not m:
+            continue
+        # Dedup por (modelo, provider): o 1º candidato normalmente É o slot escolhido, e tentar a
+        # mesma credencial duas vezes só duplicaria a fatura do erro.
+        if any(c["model"] == m and str((c["llm_cfg"] or {}).get("provider") or "")
+               == str(cand.get("provider") or "") for c in out):
+            continue
+        out.append({"model": m, "fallback": str(cand.get("model_rework") or "").strip(),
+                    "llm_cfg": cand})
+    return out
+
+
+def _scrub_secrets(text: str, llm_cfg: dict | None) -> str:
+    """Remove de uma mensagem de erro qualquer valor de credencial do envelope.
+
+    Provedores ecoam trechos do que receberam (o Google devolve a API key na URL do erro). Esta
+    mensagem vai para a TELA do tenant e para o banco — sem esta limpeza, uma chave viraria log.
+    """
+    out = str(text or "")
+    for k, v in (llm_cfg or {}).items():
+        if k in ("provider", "model", "model_rework"):
+            continue
+        s = str(v or "").strip()
+        if len(s) >= 8:
+            out = out.replace(s, "***")
+    return out[:600]
+
+
+def probe_slot(llm_cfg: dict | None, model: str, max_tokens: int = 256) -> dict:
+    """Uma chamada REAL, mínima, pelo mesmo caminho da produção — "testa no momento em que é
+    adicionado" (Jean, 2026-09-10).
+
+    Por que uma chamada real e não um `GET /models`: as três falhas que interessam (chave inválida,
+    modelo que a conta não tem direito, cota zerada) só aparecem no `invoke`. O Bedrock, por
+    exemplo, lista modelos que ele recusa invocar — foi exatamente esse o GOTCHA do entitlement
+    (`converse` dava AccessDenied enquanto o catálogo mostrava o modelo).
+
+    ⚠️ `max_tokens` NÃO pode ser apertado. Com o teto em 16 (valor original), medi o
+    `claude-opus-5` no Foundry parar em `stop_reason=max_tokens` em **3 de 8 chamadas** — o
+    preâmbulo/thinking consome o orçamento e o corpo volta sem bloco de texto. O ramo "respondeu
+    VAZIO" abaixo então REPROVA um slot que está perfeitamente bom (falso-negativo em ~37% dos
+    testes, e o slot seria descartado da cascata). O custo de um probe é irrelevante perto de
+    carimbar como quebrado o slot que paga a conta do tenant.
+
+    Devolve sempre um dict (nunca lança) com `ok`, `kind` (classificação da falha), `message` já
+    SEM credencial, `effective_model` e `latency_ms`.
+    """
+    t0 = time.time()
+    cfg = dict(llm_cfg or {})
+    provider = resolve_provider(cfg, os.environ.get("GENESIS_LLM_PROVIDER", ""))
+    model = (model or str(cfg.get("model") or "")).strip()
+    if not model:
+        return {"ok": False, "kind": "config", "provider": provider, "model": "",
+                "message": "slot sem modelo declarado", "latency_ms": 0}
+    if not provider:
+        return {"ok": False, "kind": "config", "provider": "", "model": model,
+                "message": "slot sem provider declarado", "latency_ms": 0}
+    token = LAST_EFFECTIVE_MODEL.set("")
+    try:
+        resp = call_bedrock_direct(
+            system="Responda com uma única palavra.",
+            user="ok",
+            model_id=model, max_tokens=max_tokens, temperature=1.0, llm_cfg=cfg,
+        )
+        efetivo = (LAST_EFFECTIVE_MODEL.get() or model).strip()
+        ms = int((time.time() - t0) * 1000)
+        # 🔴 `call_bedrock_direct` tem cascata PRÓPRIA (CLAUDE_MODEL_FALLBACK + cache de negados):
+        # sem esta comparação, um modelo que a conta NÃO serve devolveria 200 aqui porque OUTRO
+        # respondeu — e o slot seria carimbado como verde. O teste é do slot, não da plataforma.
+        if efetivo and efetivo != model:
+            return {"ok": False, "kind": "model", "provider": provider, "model": model,
+                    "effective_model": efetivo, "latency_ms": ms,
+                    "message": f"o modelo '{model}' não respondeu; quem atendeu foi '{efetivo}' "
+                               "(fallback da plataforma). Corrija o modelo do slot."}
+        if not (resp or "").strip():
+            return {"ok": False, "kind": "other", "provider": provider, "model": model,
+                    "latency_ms": ms, "message": "o modelo respondeu VAZIO"}
+        return {"ok": True, "kind": "", "provider": provider, "model": model,
+                "effective_model": efetivo or model, "latency_ms": ms, "message": ""}
+    except Exception as exc:  # noqa: BLE001 — o probe classifica, não propaga
+        return {"ok": False, "kind": classify_llm_error(exc), "provider": provider, "model": model,
+                "latency_ms": int((time.time() - t0) * 1000),
+                "message": _scrub_secrets(exc, cfg)}
+    finally:
+        LAST_EFFECTIVE_MODEL.reset(token)
+
+
+# ── ⚖️ Catálogo DINÂMICO de modelos (Jean, 2026-09-10) ────────────────────────────────────────
+# *"a lista de modelos disponíveis deve ser obtida de forma dinâmica baseado no provider e
+# credenciais informadas, daí carrega a lista de modelos disponíveis nos selects"*.
+#
+# Por que isto existe: a tela tinha a lista CRAVADA em `PROVIDER_META` (page.tsx). Em 2026-09-10
+# essa lista oferecia `us.anthropic.claude-opus-5` no Bedrock — e a conta 820198199720 responde
+# 403 "is not available for this account" a esse id pelos TRÊS caminhos testados. Escolher ali
+# criava um slot que nascia morto, e ninguém descobria até a primeira run falhar.
+#
+# 🔴 A lição que molda o desenho: **listar não é poder usar**. `list-inference-profiles` devolve
+# todos os 75 perfis como `ACTIVE`, inclusive os que o `invoke` recusa. Por isso a descoberta é
+# só o primeiro passo; quem decide o que entra no select é a INVOCAÇÃO real (`probe_slot`).
+
+# Providers sem API de listagem: a lista local é o único ponto de partida possível.
+# Foundry: `GET {resource}.cognitiveservices.azure.com/anthropic/v1/models` → 404
+# `api_not_supported` MESMO com chave válida (medido 2026-09-10; sem chave dá 401, ou seja, a
+# rota autentica antes de negar — não é erro de credencial, o endpoint não existe mesmo).
+_CATALOGO_LOCAL: dict[str, tuple[str, ...]] = {
+    "foundry": ("claude-opus-5", "claude-sonnet-5", "claude-fable-5-1",
+                "claude-haiku-4-5", "claude-opus-4-8", "claude-sonnet-4-6"),
+}
+
+# Modalidades que o Genesis não sabe consumir como texto — listá-las só geraria ruído e ~20
+# invocações inúteis por abertura de tela.
+_FAMILIAS_NAO_TEXTO = ("stability", "twelvelabs")
+
+_MODELOS_CACHE: dict[str, tuple[float, dict]] = {}
+_MODELOS_CACHE_TTL = float(os.environ.get("LLM_MODELS_CACHE_TTL", "900"))  # 15 min
+
+
+def _chave_cache_modelos(cfg: dict, provider: str) -> str:
+    """Chave do cache: provider + credencial + região. NUNCA guarda a credencial em claro."""
+    import hashlib
+    material = "|".join([
+        provider,
+        str(cfg.get("aws_region") or ""), str(cfg.get("vertex_location") or ""),
+        str(cfg.get("foundry_resource") or ""), str(cfg.get("azure_endpoint") or ""),
+        *(str(cfg.get(k) or "") for k in _BYOC_FIELDS),
+    ])
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def discover_models(llm_cfg: dict | None) -> tuple[list[str], str, str]:
+    """Pergunta ao provider quais modelos existem PARA ESTA credencial.
+
+    Devolve `(ids, origem, aviso)` — `origem` é `"provider"` quando a lista veio de uma chamada
+    real ao provider e `"catalog"` quando caiu na lista local (provider sem API de listagem, ou
+    a listagem falhou). A tela mostra essa origem: uma lista local não foi confirmada por
+    ninguém, e o operador precisa saber disso.
+
+    NUNCA lança: descoberta é conveniência. Se falhar, devolve o catálogo local com o aviso —
+    travar a tela por causa de uma listagem seria transformar indisponibilidade em bloqueio.
+    """
+    cfg = dict(llm_cfg or {})
+    provider = (cfg.get("provider") or "").strip().lower()
+    local = list(_CATALOGO_LOCAL.get(provider, ()))
+    try:
+        if provider == "bedrock":
+            return _discover_bedrock(cfg), "provider", ""
+        if provider == "anthropic":
+            cli = _build_anthropic_direct_client(cfg)
+            return [m.id for m in cli.models.list(limit=100).data], "provider", ""
+        if provider in ("openai", "azure_openai"):
+            return _discover_openai_like(cfg, provider), "provider", ""
+        if provider == "google":
+            return _discover_google(cfg), "provider", ""
+        if provider == "foundry":
+            return local, "catalog", ("o Azure AI Foundry não expõe endpoint de listagem "
+                                      "(/v1/models → 404): esta lista é local e só o teste "
+                                      "de invocação confirma cada id.")
+        return local, "catalog", f"provider '{provider}' não tem listagem conhecida."
+    except Exception as exc:  # noqa: BLE001 — listagem é conveniência, não pode derrubar a tela
+        return local, "catalog", ("não foi possível listar no provider: "
+                                  + _scrub_secrets(exc, cfg)[:200])
+
+
+def _discover_bedrock(cfg: dict) -> list[str]:
+    """Inference profiles `us.*` + foundation models de TEXTO sob demanda, deduplicados.
+
+    O Genesis invoca por inference profile (`us.anthropic.…`), então eles vêm primeiro; os
+    foundation models entram para cobrir o que não tem perfil regional.
+    """
+    import boto3
+    ak, sk, token, region = _aws_creds_for(cfg)
+    kwargs: dict = {"region_name": region}
+    if ak and sk:
+        kwargs["aws_access_key_id"] = ak
+        kwargs["aws_secret_access_key"] = sk
+        if token:
+            kwargs["aws_session_token"] = token
+    cli = boto3.client("bedrock", **kwargs)
+
+    ids: list[str] = []
+    tok: str | None = None
+    while True:
+        resp = cli.list_inference_profiles(maxResults=100, **({"nextToken": tok} if tok else {}))
+        for p in resp.get("inferenceProfileSummaries", []):
+            pid = str(p.get("inferenceProfileId") or "")
+            if pid.startswith("us.") and not any(f in pid for f in _FAMILIAS_NAO_TEXTO):
+                ids.append(pid)
+        tok = resp.get("nextToken")
+        if not tok:
+            break
+    try:
+        fm = cli.list_foundation_models(byOutputModality="TEXT", byInferenceType="ON_DEMAND")
+        for m in fm.get("modelSummaries", []):
+            mid = str(m.get("modelId") or "")
+            if mid and not any(f in mid.lower() for f in _FAMILIAS_NAO_TEXTO):
+                ids.append(mid)
+    except Exception:  # noqa: BLE001 — perfis já bastam; foundation models são complemento
+        pass
+    return sorted(dict.fromkeys(ids))
+
+
+def _discover_openai_like(cfg: dict, provider: str) -> list[str]:
+    if provider == "azure_openai":
+        # No Azure OpenAI o que se invoca é o DEPLOYMENT, não o modelo — é o nome do deployment
+        # que precisa ir para o select.
+        import urllib.request
+        endpoint = str(cfg.get("azure_endpoint") or "").rstrip("/")
+        version = str(cfg.get("azure_api_version") or "2024-02-01")
+        req = urllib.request.Request(
+            f"{endpoint}/openai/deployments?api-version={version}",
+            headers={"api-key": str(cfg.get("api_key") or "")})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read())
+        return sorted({str(d.get("id") or d.get("model") or "") for d in data.get("data", []) if d})
+    from openai import OpenAI  # type: ignore
+    cli = OpenAI(api_key=str(cfg.get("api_key") or ""))
+    return sorted({m.id for m in cli.models.list().data})
+
+
+def _discover_google(cfg: dict) -> list[str]:
+    """Gemini API lista por chave; no modo Vertex a listagem do Model Garden não é equivalente."""
+    import urllib.request
+    key = str(cfg.get("google_api_key") or "").strip()
+    if not key:
+        raise ValueError("no modo Vertex a listagem do Model Garden não é pública: "
+                         "informe a API Key do Google para listar, ou digite o id do modelo.")
+    base = (str(cfg.get("google_base_url") or "").strip()
+            or "https://generativelanguage.googleapis.com/v1beta")
+    with urllib.request.urlopen(f"{base.rstrip('/')}/models?key={key}", timeout=30) as r:
+        data = json.loads(r.read())
+    out = []
+    for m in data.get("models", []):
+        nome = str(m.get("name") or "").split("/")[-1]
+        if nome and "generateContent" in (m.get("supportedGenerationMethods") or []):
+            out.append(nome)
+    return sorted(set(out))
+
+
+def list_models_verified(llm_cfg: dict | None, max_workers: int = 10,
+                         usar_cache: bool = True) -> dict:
+    """Descobre + **testa por invocação real** cada modelo. É o que alimenta os selects da tela.
+
+    ⚖️ Jean escolheu verificar TODOS ao abrir a tela (2026-09-10), e não só o escolhido ao
+    salvar: assim o select nunca oferece um id que a conta não serve. O preço é ~100 invocações
+    mínimas na primeira abertura do Bedrock — por isso rodam em paralelo e o resultado fica em
+    cache por `LLM_MODELS_CACHE_TTL` (15 min), chaveado por provider+credencial+região.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    cfg = dict(llm_cfg or {})
+    provider = (cfg.get("provider") or "").strip().lower()
+    chave = _chave_cache_modelos(cfg, provider)
+    agora = time.time()
+    if usar_cache:
+        hit = _MODELOS_CACHE.get(chave)
+        if hit and (agora - hit[0]) < _MODELOS_CACHE_TTL:
+            return {**hit[1], "cached": True}
+
+    ids, origem, aviso = discover_models(cfg)
+    t0 = time.time()
+
+    # 🔴 MEDIDO 2026-09-10: sem esta guarda a listagem MENTE. Com `provider=bedrock` e slot **sem
+    # credencial**, `resolve_provider` resolve para o provider do ambiente (foundry, aqui) — a
+    # descoberta perguntava ao Bedrock (87 ids) e o probe invocava no Foundry, devolvendo 86
+    # `DeploymentNotFound` como se os modelos do Bedrock não existissem. Além de falso, invocar
+    # pela identidade do host contraria a LEI dos slots (o custo é do tenant, não da Zentriz).
+    # Então: lista sim, verifica NÃO — e diz por quê.
+    efetivo = resolve_provider(cfg, os.environ.get("GENESIS_LLM_PROVIDER", ""))
+    if provider and efetivo and efetivo != provider:
+        modelos = [{"id": m, "ok": False, "kind": "config", "latency_ms": 0,
+                    "message": "não verificado: este slot não tem credencial própria"}
+                   for m in ids]
+        out = {"provider": provider, "source": origem, "models": modelos,
+               "warning": ((aviso + " ") if aviso else "")
+                          + f"o slot declara '{provider}' mas não tem credencial própria — a "
+                            f"infraestrutura resolveria para '{efetivo}'. Informe a credencial "
+                            "acima para que os modelos sejam testados de verdade.",
+               "usable": 0, "total": len(modelos),
+               "elapsed_ms": int((time.time() - t0) * 1000), "cached": False}
+        _MODELOS_CACHE[chave] = (agora, out)
+        return out
+
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as ex:
+        veredictos = list(ex.map(lambda m: probe_slot(cfg, m), ids))
+
+    modelos = [{"id": m, "ok": bool(v.get("ok")), "kind": v.get("kind") or "",
+                "message": v.get("message") or "", "latency_ms": int(v.get("latency_ms") or 0)}
+               for m, v in zip(ids, veredictos)]
+    modelos.sort(key=lambda x: (not x["ok"], x["id"]))
+    out = {"provider": provider, "source": origem, "warning": aviso, "models": modelos,
+           "usable": sum(1 for m in modelos if m["ok"]), "total": len(modelos),
+           "elapsed_ms": int((time.time() - t0) * 1000), "cached": False}
+    _MODELOS_CACHE[chave] = (agora, out)
+    return out
+
+
 # OpenAI model limits (context window e max_output)
 _OPENAI_MODEL_LIMITS: dict[str, dict[str, int]] = {
     "gpt-4o":            {"context": 128_000, "max_output": 16_384},
@@ -1489,6 +2044,12 @@ _OPENAI_MODEL_LIMITS: dict[str, dict[str, int]] = {
     "o1":                {"context": 200_000, "max_output": 100_000},
     "o1-mini":           {"context": 128_000, "max_output": 65_536},
     "o3-mini":           {"context": 200_000, "max_output": 100_000},
+    # Famílias servidas pelo Google (Gemini nativo + Model Garden), consumidas pelo endpoint
+    # OpenAI-compatível. Tetos conservadores: o teto real por modelo depende da região/quota.
+    "gemini-2.5-pro":    {"context": 1_000_000, "max_output": 65_536},
+    "gemini-2.5-flash":  {"context": 1_000_000, "max_output": 65_536},
+    "gemini-3-pro":      {"context": 1_000_000, "max_output": 65_536},
+    "gemini-3-flash":    {"context": 1_000_000, "max_output": 65_536},
 }
 _OPENAI_DEFAULT_LIMITS = {"context": 128_000, "max_output": 16_384}
 
@@ -1501,11 +2062,20 @@ def _run_agent_openai(
     model: str,
     timeout: int,
     system_prompt_override: str | None = None,
+    base_url: str | None = None,
+    client: object | None = None,
 ) -> dict:
-    """Executa agente via OpenAI SDK — interface compatível com run_agent (Anthropic/Bedrock)."""
+    """Executa agente via SDK OpenAI — interface compatível com run_agent (Anthropic/Bedrock).
+
+    `base_url` permite apontar o MESMO caminho para endpoints OpenAI-compatíveis de terceiros
+    (Gemini API e Vertex Model Garden) sem duplicar o parser de resposta. `client` cobre o caso
+    em que a autenticação NÃO é `Authorization: Bearer` — Azure OpenAI usa header `api-key`,
+    rota por deployment e `api-version`, então o cliente vem pronto de `_build_azure_openai_client`.
+    """
     from openai import OpenAI as _OpenAI  # type: ignore
 
-    client    = _OpenAI(api_key=api_key, timeout=timeout)
+    if client is None:
+        client = _OpenAI(api_key=api_key, timeout=timeout, **({"base_url": base_url} if base_url else {}))
     oai_lim   = _OPENAI_MODEL_LIMITS.get(model, _OPENAI_DEFAULT_LIMITS)
     env_max   = int(os.environ.get("CLAUDE_MAX_TOKENS", "16384"))
     max_tokens = min(env_max, oai_lim["max_output"])
@@ -1574,6 +2144,36 @@ def _run_agent_openai(
     return _normalize_response_envelope(out, request_id, raw_text)
 
 
+def _call_openai_compatible_raw(system: str, user: str, model: str, max_tokens: int,
+                                api_key: str = "", base_url: str = "",
+                                client: object | None = None, timeout: int = 900) -> tuple[str, int, int]:
+    """Chamada de TEXTO CRU por endpoint OpenAI-compatível (Gemini/Model Garden/Azure OpenAI).
+
+    ⚖️ LEI 2026-09-10 — existe porque `call_bedrock_direct` (o caminho de `/invoke/raw`, do
+    splitter, do spec_validator e do Cyborg) só conhecia dois destinos: Foundry (por env) e
+    Bedrock. Um tenant com slot **Google** caía no ramo Bedrock/Converse, que sem credencial no
+    envelope autentica pela identidade DO HOST — a chamada ia para a conta da Zentriz (e ainda
+    falhava, porque Gemini não existe no Bedrock).
+
+    Devolve `(texto, tokens_entrada, tokens_saída)` — sem parser de envelope: quem chama aqui
+    quer a resposta bruta, igual ao ramo Anthropic.
+    """
+    from openai import OpenAI as _OpenAI  # type: ignore
+
+    if client is None:
+        client = _OpenAI(api_key=api_key, timeout=timeout,
+                         **({"base_url": base_url} if base_url else {}))
+    _lim = _OPENAI_MODEL_LIMITS.get(model, _OPENAI_DEFAULT_LIMITS)
+    resp = client.chat.completions.create(  # type: ignore[attr-defined]
+        model=model,
+        max_tokens=min(max_tokens, _lim["max_output"]),
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+    )
+    texto = (resp.choices[0].message.content or "") if resp.choices else ""
+    _u = getattr(resp, "usage", None)
+    return texto, (getattr(_u, "prompt_tokens", 0) or 0), (getattr(_u, "completion_tokens", 0) or 0)
+
+
 def run_agent(
     system_prompt_path: str | Path,
     message: dict,
@@ -1596,20 +2196,24 @@ def run_agent(
     # Ex: provider=openai mas model=claude-sonnet-4-5 → usar bedrock/anthropic
     def _infer_provider_from_model(m: str) -> str:
         ml = m.lower()
+        # Ids do Vertex Model Garden são inconfundíveis: versão com `@`, prefixo de vendor
+        # (`meta/`) ou sufixo `-maas`. Precisa vir ANTES do ramo Claude — `claude-...@data`
+        # é Claude faturado pelo GCP, não pela Anthropic.
+        if "@" in ml or ml.startswith("meta/") or ml.endswith("-maas"):
+            return "google"
         if any(x in ml for x in ("claude", "anthropic", "sonnet", "opus", "haiku")):
             return "bedrock" if ml.startswith("us.anthropic") else "anthropic"
+        if "gemini" in ml:
+            return "google"
         if any(x in ml for x in ("gpt", "o1", "o3", "davinci", "composer")):
             return "openai"
         return ""
 
-    # Se o container está forçado a Foundry (GENESIS_LLM_PROVIDER=foundry), o env VENCE o
-    # override do envelope — o envelope pode trazer provider stale (bedrock/anthropic) da
-    # config LLM no banco, que não conhece Foundry. Foundry é decisão de infraestrutura.
-    _env_provider = os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").strip().lower()
-    if _env_provider == "foundry":
-        _raw_provider = "foundry"
-    else:
-        _raw_provider = _provider_override or _env_provider
+    # ⚖️ LEI 2026-09-10: sem default literal. Era `"anthropic"` — a plataforma escolhendo provider
+    # por omissão. Vazio faz `resolve_provider` devolver "" quando o slot também não declarou, e o
+    # guarda abaixo falha alto em vez de rotear para um provider que ninguém pediu.
+    _env_provider = os.environ.get("GENESIS_LLM_PROVIDER", "").strip().lower()
+    _raw_provider = resolve_provider(_llm_cfg, _env_provider)
     _model_for_inference = _model_override or _get_model_for_role(role)
     _inferred = _infer_provider_from_model(_model_for_inference)
     # Se o provider declarado é openai mas o modelo é Claude → corrigir silenciosamente
@@ -1622,16 +2226,98 @@ def run_agent(
     else:
         provider = _raw_provider
 
-    # model e timeout definidos aqui para uso tanto no bloco OpenAI quanto Anthropic/Bedrock
-    # Foundry: ignora _model_override do envelope (pode ser id bedrock us.anthropic.* que o
-    # Foundry rejeita) e usa os modelos Claude 5 do env (_get_model_for_role lê CLAUDE_MODEL*).
-    model   = _get_model_for_role(role) if provider == "foundry" else (_model_override or _get_model_for_role(role))
+    # model e timeout definidos aqui para uso tanto no bloco OpenAI quanto Anthropic/Bedrock.
+    #
+    # Foundry: o motivo original de ignorar o _model_override era que o envelope trazia id de
+    # Bedrock (`us.anthropic.*`) que o Foundry REJEITA. Mas ignorar SEMPRE tornava o slot do
+    # tenant decorativo — o operador escolhia o modelo na tela e o env vencia em silêncio.
+    # Regra correta: sob Foundry o envelope vale quando o id é BARE; só o id no formato Bedrock
+    # é descartado (com log, não em silêncio) em favor do env.
+    if provider == "foundry":
+        # O cliente Foundry é o SDK `anthropic` na rota `/anthropic`: só serve deployments Claude.
+        # Ids de OUTRA família (`amazon.nova-*`, `mistral.*`, `meta.*`, …) são BARE e passariam pelo
+        # teste do prefixo Bedrock — mas o Foundry devolveria 404. Antes da LEI 2026-09-10 esses ids
+        # nasciam no env da api (`SPEC_CROSS_AUDIT_MODEL`, `SPEC_RECALL_MATCH_MODEL/AUDIT_MODEL`) e
+        # chegavam aqui montados sobre as credenciais do slot PRIMÁRIO — daí a degradação silenciosa.
+        # A Fase 2 matou essas envs: o revisor cross-family agora traz o envelope do PRÓPRIO slot
+        # (provider + credencial). Logo, id não-Claude sob `provider=foundry` só acontece com slot
+        # mal configurado ⇒ erro explícito, nunca degradação.
+        _ov = (_model_override or "").lower()
+        _is_claude_bare = bool(_ov) and not _ov.startswith("us.anthropic") and any(
+            x in _ov for x in ("claude", "sonnet", "opus", "haiku")
+        )
+        if _is_claude_bare:
+            model = _model_override
+        elif _model_override:
+            # ⚖️ LEI 2026-09-10: antes isto DEGRADAVA para o modelo do env — a plataforma cobrindo,
+            # em silêncio, um pedido que o slot não consegue servir. Hoje o pedido cross-family vem
+            # com o envelope do PRÓPRIO slot revisor (api-node `resolveReviewerLlm`), então chegar
+            # aqui significa slot mal configurado. Falhar alto é o único jeito de isso ser visto.
+            raise ValueError(
+                f"slot com provider=foundry não serve o modelo '{_model_override}': "
+                "o Foundry desta conta só tem deployments Claude com id bare (ex.: claude-opus-5). "
+                "Corrija o modelo do slot em Configurações → LLM."
+            )
+        else:
+            model = _get_model_for_role(role)
+    else:
+        model = _model_override or _get_model_for_role(role)
+
+    # ⚖️ LEI 2026-09-10 — sem modelo resolvido a chamada FALHA. Não existe mais um default da
+    # plataforma para cair: rodar no modelo da Zentriz é exatamente a fatura que a lei fecha.
+    if not (model or "").strip():
+        raise ValueError(
+            "nenhum modelo de LLM resolvido para este papel: o slot do tenant não declarou modelo e "
+            "não há modelo no envelope. Configure um slot em Configurações → LLM."
+        )
+    if not provider:
+        raise ValueError(
+            "nenhum provider de LLM resolvido: o slot do tenant não declarou provider. "
+            "Configure um slot em Configurações → LLM."
+        )
     _msg_limits_early = message.get("limits") or {}
     timeout = int(
         _msg_limits_early.get("timeout_sec")
         or os.environ.get("REQUEST_TIMEOUT")
         or 900
     )
+
+    # ── Google (Vertex AI / Gemini) ───────────────────────────────────────────
+    # Claude no Vertex fala o protocolo Anthropic → cai no bloco anthropic abaixo.
+    # As demais famílias subsidiadas falam o endpoint OpenAI-compatível.
+    if provider == "google" and "claude" not in (model or "").lower():
+        try:
+            from openai import OpenAI as _OpenAI  # noqa: F401
+        except ImportError:
+            raise ImportError("Instale openai: pip install openai (provider=google usa o endpoint OpenAI-compatível)")
+        _g_key, _g_base = _build_google_client(_llm_cfg, model)
+        return _run_agent_openai(
+            system_prompt_path=system_prompt_path,
+            message=message,
+            role=role,
+            api_key=_g_key,
+            model=model,
+            timeout=timeout,
+            system_prompt_override=system_prompt_override,
+            base_url=_g_base,
+        )
+
+    # ── Azure OpenAI ──────────────────────────────────────────────────────────
+    if provider == "azure_openai":
+        try:
+            from openai import AzureOpenAI as _AzureOpenAI  # noqa: F401
+        except ImportError:
+            raise ImportError("Instale openai: pip install openai (provider=azure_openai)")
+        return _run_agent_openai(
+            system_prompt_path=system_prompt_path,
+            message=message,
+            role=role,
+            api_key="",
+            model=_azure_deployment(_llm_cfg, model),
+            timeout=timeout,
+            system_prompt_override=system_prompt_override,
+            client=_build_azure_openai_client(_llm_cfg, timeout),
+        )
 
     # ── OpenAI ────────────────────────────────────────────────────────────────
     if provider == "openai":
@@ -1658,7 +2344,11 @@ def run_agent(
     except ImportError:
         raise ImportError("Instale anthropic: pip install anthropic")
 
-    if provider == "foundry":
+    if provider == "google":
+        # Claude no Vertex AI Model Garden — faturado pelo GCP (crédito do Google).
+        client = _build_vertex_anthropic_client(_llm_cfg)
+        api_key = None
+    elif provider == "foundry":
         # Azure AI Foundry serve Claude (Opus 5 / Sonnet 5) via SDK anthropic com base_url
         # apontando para <resource>.cognitiveservices.azure.com/anthropic + API key.
         # Alternativa ao Bedrock (usada quando a cota diária do Bedrock esgota).
@@ -1696,9 +2386,15 @@ def run_agent(
         client = AnthropicBedrock(**kwargs)
         api_key = None
     else:
-        api_key = os.environ.get("CLAUDE_API_KEY")
+        # ⚖️ LEI 2026-09-10 — era `os.environ.get("CLAUDE_API_KEY")` puro: um tenant com slot
+        # `provider=anthropic` e chave PRÓPRIA rodava na chave do CONTÊINER (fatura da Zentriz) e
+        # nem sabia. A chave do slot (`_api_key_override`) vem primeiro; o env só sobrevive como
+        # compat de quem nunca cadastrou slot.
+        api_key = _api_key_override or os.environ.get("CLAUDE_API_KEY")
         if not api_key:
-            raise ValueError("CLAUDE_API_KEY não definida. Para Bedrock, use GENESIS_LLM_PROVIDER=bedrock")
+            raise ValueError(
+                "provider=anthropic sem API Key: cadastre a chave no slot em Configurações → LLM."
+            )
 
     # model e timeout já foram definidos acima (antes do bloco OpenAI)
     agent_name = _label(role)
@@ -1771,6 +2467,8 @@ def run_agent(
 
     if provider == "foundry":
         client = _build_foundry_client(_llm_cfg)
+    elif provider == "google":
+        client = _build_vertex_anthropic_client(_llm_cfg)
     elif provider != "bedrock":
         client = Anthropic(api_key=api_key)
     request_id = message.get("request_id", "unknown")
@@ -1786,8 +2484,15 @@ def run_agent(
     # Se QA reprovar 3x → BLOCKED (revisão humana). Opus paga para evitar BLOCKED.
     _is_rework_role = (role or "").upper() in ("DEV", "QA")
     if _is_rework_role and _rework_attempt >= 1:
-        _rework_model = os.environ.get("CLAUDE_MODEL_REWORK", "us.anthropic.claude-opus-4-6-v1")
-        if _rework_model != model:
+        # ⚖️ LEI 2026-09-10: o modelo de rework é o `model_id_fallback` DO SLOT — ele chega no
+        # envelope como `model_rework` (Bancada) ou no env do run como `CLAUDE_MODEL_REWORK`
+        # (Fábrica, injetado por `runner_server`). O literal `us.anthropic.claude-opus-4-6-v1` era a
+        # Zentriz escolhendo um Opus na fatura do tenant. Sem fallback declarado, não escala.
+        _rework_model = (
+            (_llm_cfg.get("model_rework") or "").strip()
+            or os.environ.get("CLAUDE_MODEL_REWORK", "").strip()
+        )
+        if _rework_model and _rework_model != model:
             model = _rework_model
             logger.info("[REWORK-ESCALATE] %s rework %d → escalando para modelo %s", role, _rework_attempt, model)
         _rework_boost = int(os.environ.get("CLAUDE_MAX_TOKENS_DEV_REWORK", "48000"))
@@ -2424,6 +3129,10 @@ def model_identity_scope(llm_cfg: dict | None = None) -> str:
     if provider == "foundry":
         key = (str(cfg.get("foundry_api_key") or "") or os.environ.get("ANTHROPIC_FOUNDRY_API_KEY", "")).strip()
         return "foundry:" + (_hashlib.sha256(key.encode()).hexdigest()[:12] if key else "env")
+    if provider == "google":
+        ident = (str(cfg.get("google_api_key") or "") or str(cfg.get("vertex_project_id") or "")
+                 or os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GOOGLE_VERTEX_PROJECT", "")).strip()
+        return "google:" + (_hashlib.sha256(ident.encode()).hexdigest()[:12] if ident else "env")
     ak = (str(cfg.get("aws_access_key_id") or "") or os.environ.get("AWS_ACCESS_KEY_ID", "")).strip()
     if ak:
         return "bedrock:" + _hashlib.sha256(ak.encode()).hexdigest()[:12]
@@ -2623,7 +3332,19 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     # Zera o resultado publicado: se ESTA chamada morrer antes de reportar, ninguém lê o
     # stop_reason/usage da chamada ANTERIOR deste contexto como se fosse desta.
     _record_call_outcome(0, 0, None)
-    if os.environ.get("GENESIS_LLM_PROVIDER", "").strip().lower() == "foundry":
+    # ⚖️ LEI 2026-09-10 — o destino sai do SLOT, não do env do contêiner.
+    #
+    # 🔴 Achado MEDIDO na validação e2e (2026-09-10): a condição aqui era
+    # `os.environ["GENESIS_LLM_PROVIDER"] == "foundry"` e o cliente era `_build_foundry_client()`
+    # SEM o envelope. Prova ao vivo: com a chave real no contêiner e uma chave BOGUS no
+    # `llm_config`, a chamada devolveu 200 — ou seja, a credencial do tenant era ignorada e o
+    # consumo ia INTEIRO para a conta da Zentriz. É o caminho mais quente do produto
+    # (`/invoke/raw`, splitter, spec_validator, Cyborg), então era o maior vazamento dos três eixos.
+    #
+    # `resolve_provider` é a MESMA função que o `run_agent` usa: slot deliberado vence; slot
+    # legado sem credencial ainda cai no env (compat de quem nunca configurou nada).
+    _provider_efetivo = resolve_provider(llm_cfg, os.environ.get("GENESIS_LLM_PROVIDER", ""))
+    if _provider_efetivo == "foundry":
         if cache_prefix:
             logger.info("[call_bedrock_direct] cache_prefix pedido, mas o provider é foundry — "
                         "IGNORADO (o ganho medido e o guard só existem no Bedrock).")
@@ -2633,7 +3354,7 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
             # vazio). Ignorar em silêncio faria o A/B comparar dois braços iguais.
             logger.warning("[call_bedrock_direct] thinking pedido, mas o provider é foundry — "
                            "IGNORADO (o `text_stream` descarta blocos de raciocínio; achado #51).")
-        client = _build_foundry_client()
+        client = _build_foundry_client(llm_cfg)
         # temperature é depreciada nos modelos Claude 5 do Foundry — omitir.
         # STREAMING obrigatório p/ max_tokens alto: o Foundry rejeita chamadas não-streaming
         # que podem passar de 10 min ("Streaming is required...") → 500. Com stream, acumula
@@ -2702,6 +3423,72 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
             if t:
                 parts.append(t)
         return "".join(parts)
+
+    # ⚖️ LEI 2026-09-10 — slots NÃO-Claude neste caminho.
+    #
+    # Antes existiam só dois destinos aqui: Foundry (por env) e Bedrock. Um tenant com slot
+    # `google` ou `azure_openai` chegava ao ramo Bedrock/Converse abaixo, que sem credencial AWS
+    # no envelope autentica pela identidade DO HOST — a chamada saía na conta da Zentriz e ainda
+    # por cima falhava (Gemini/GPT não existem no Bedrock). Este é o mesmo defeito do "Grupo C",
+    # um nível abaixo: lá era o `run_agent`, aqui é o `call_bedrock_direct`.
+    # ⚖️ LEI 2026-09-10 — dois destinos que o `run_agent` já servia e este caminho NÃO:
+    #  · `anthropic` (API pública com a chave do slot) caía no ramo Bedrock lá embaixo, autenticando
+    #    pela identidade DO HOST — a chave que o tenant cadastrou era simplesmente ignorada;
+    #  · `google` servindo CLAUDE (Model Garden, o que o crédito do Google subsidia) caía no
+    #    endpoint OpenAI-compatível, que não fala o protocolo Anthropic.
+    # Sem estes dois ramos, metade dos slots possíveis era decorativa no caminho MAIS QUENTE do
+    # produto (`/invoke/raw`, splitter, spec_validator, Cyborg).
+    if _provider_efetivo == "anthropic" or (
+        _provider_efetivo == "google" and "claude" in (model_id or "").lower()
+    ):
+        _cli = (_build_vertex_anthropic_client(llm_cfg) if _provider_efetivo == "google"
+                else _build_anthropic_direct_client(llm_cfg))
+        _kw: dict = {
+            "model": model_id, "max_tokens": max_tokens,
+            "system": system, "messages": [{"role": "user", "content": user}],
+            "timeout": _nonstreaming_timeout_sec(max_tokens),
+            **_thinking_extra(_provider_efetivo, opt_in=thinking),
+        }
+        try:
+            _resp = _cli.messages.create(**_kw)
+        except Exception as _exc:
+            # Mesma rede do caminho Bedrock: `thinking` é otimização, não pode derrubar a chamada.
+            if "thinking" not in _kw or not _is_thinking_param_error(_exc):
+                raise
+            logger.warning("[call_bedrock_direct] %s recusou `thinking` — reenviando sem o "
+                           "parâmetro. Detalhe: %s", _provider_efetivo, str(_exc)[:200])
+            _kw.pop("thinking", None)
+            _resp = _cli.messages.create(**_kw)
+        _u = getattr(_resp, "usage", None)
+        _in = getattr(_u, "input_tokens", 0) or 0
+        _out = getattr(_u, "output_tokens", 0) or 0
+        _report_direct_usage(usage_project_id, usage_agent, model_id, _in, _out,
+                             int((time.time() - _t0) * 1000), cache=_cache_tokens(_u))
+        _sink_usage(_in, _out, model_id, _cache_tokens(_u))
+        _record_call_outcome(_in, _out, getattr(_resp, "stop_reason", None), _cache_tokens(_u))
+        LAST_EFFECTIVE_MODEL.set(model_id)
+        return "".join(t for t in (getattr(b, "text", None)
+                                   for b in (getattr(_resp, "content", []) or [])) if t)
+
+    if _provider_efetivo in ("google", "azure_openai"):
+        if _provider_efetivo == "google":
+            _g_key, _g_base = _build_google_client(llm_cfg, model_id)
+            _txt, _in, _out = _call_openai_compatible_raw(
+                system=system, user=user, model=model_id, max_tokens=max_tokens,
+                api_key=_g_key, base_url=_g_base,
+                timeout=_nonstreaming_timeout_sec(max_tokens))
+        else:
+            _az = _build_azure_openai_client(llm_cfg, timeout=_nonstreaming_timeout_sec(max_tokens))
+            _txt, _in, _out = _call_openai_compatible_raw(
+                system=system, user=user, model=model_id, max_tokens=max_tokens, client=_az)
+        _report_direct_usage(usage_project_id, usage_agent, model_id, _in, _out,
+                             int((time.time() - _t0) * 1000))
+        _sink_usage(_in, _out, model_id, {})
+        # `stop_reason` do dialeto OpenAI é `finish_reason`; "length" é o equivalente a
+        # `max_tokens` do Anthropic — sem esta tradução o guard de truncamento não veria o corte.
+        _record_call_outcome(_in, _out, "max_tokens" if _out >= max_tokens else "end_turn")
+        LAST_EFFECTIVE_MODEL.set(model_id)
+        return _txt
 
     # ── REVISOR CROSS-FAMILY (2026-09-07) ───────────────────────────────────────────────────
     # `arXiv:2609.04270` mede que auto-revisão da MESMA família de modelo NÃO ganha nada (zero

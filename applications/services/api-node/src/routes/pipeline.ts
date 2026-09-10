@@ -395,9 +395,18 @@ export async function pipelineRoutes(app: FastifyInstance) {
       // G38: Resolve LLM config do tenant (usa conta própria se configurada)
       const tenantId = user.tenantId ?? "";
       const llmConfig = tenantId ? await getTenantLlmConfig(tenantId) : null;
-      if (llmConfig && !llmConfig.isDefault) {
+      if (llmConfig) {
         request.log.info({ projectId, provider: llmConfig.provider, model: llmConfig.modelId },
           "[G38] Usando LLM config do tenant");
+      } else {
+        // ⚖️ LEI 2026-09-10: sem slot utilizável não há default de env. O dispatch falharia adiante
+        // com uma mensagem opaca; barrar aqui devolve ao usuário a ação concreta.
+        request.log.warn({ projectId, tenantId }, "[G38] Tenant sem slot de LLM utilizável — dispatch barrado");
+        return reply.status(422).send({
+          ok: false,
+          error: "LLM_SLOT_NOT_CONFIGURED",
+          message: "Nenhum slot de LLM utilizável. Configure um provider com credenciais próprias em Configurações → LLM.",
+        });
       }
 
       // G39 / RFC-0003 (C2): claim ATÔMICO de slot de concorrência (substitui o enqueueOrStart

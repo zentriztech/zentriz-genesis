@@ -20,3 +20,9 @@ psycopg2-binary==2.9.12
 # YAML — usado DIRETO (runner.py, zentriz_cyborg.py, pipeline_context.py); antes só
 # entrava como carona do extra uvicorn[standard] (frágil). Declarado explicitamente.
 PyYAML==6.0.3
+# Provider Google (Vertex AI / Gemini) — o crédito do Google cobre o Vertex, cujo Model Garden
+# revende Claude/Llama/Mistral além do Gemini. `openai` fala o endpoint OpenAI-compatível
+# (Gemini + Model Garden) e já servia ao provider `openai`, que até aqui morria em ImportError.
+# `google-auth` troca a service account por bearer token e alimenta AnthropicVertex.
+openai==2.54.0
+google-auth==2.42.1

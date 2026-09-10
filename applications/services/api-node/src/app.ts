@@ -26,6 +26,8 @@ import { cloudRoutes } from "./routes/cloud.js";
 import { uiuxRoutes } from "./routes/uiux.js";
 import { uiuxOAuthRoutes } from "./routes/uiuxOAuth.js";
 import { llmRoutes } from "./routes/llm.js";
+import { managementLlmRoutes } from "./routes/managementLlm.js";
+import { opsAgentRoutes } from "./routes/opsAgent.js";
 import { productRoutes } from "./routes/products.js";
 import { internalLlmRoutes } from "./routes/internalLlm.js";
 import { telegramRoutes } from "./routes/telegram.js";
@@ -109,6 +111,9 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(uiuxRoutes);
   await app.register(uiuxOAuthRoutes); // callback público do OAuth Canva (sem auth hook)
   await app.register(llmRoutes);
+  // Conta de GESTÃO (zentriz_admin): LLM próprio, custeado pela Zentriz, + agente interno.
+  await app.register(managementLlmRoutes);
+  await app.register(opsAgentRoutes);
   await app.register(productRoutes);
   await app.register(internalLlmRoutes);
   await app.register(telegramRoutes);

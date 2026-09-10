@@ -1,5 +1,14 @@
 "use client";
 
+/**
+ * Configuração de LLM do TENANT.
+ *
+ * O editor de slot vive em `components/llm/LlmSlotEditor.tsx` e é o MESMO usado pela conta de
+ * gestão (`/zentriz/llm`) — as duas telas configuram a mesma coisa e falam o mesmo payload; o que
+ * muda aqui é o endpoint (`/api/tenant/llm-config`), o escopo de tenant do master, e o fato de o
+ * slot de tenant rodar fábrica (logo, ter Cyborg e limites).
+ */
+
 import { useCallback, useEffect, useState } from "react";
 import { observer } from "mobx-react-lite";
 import Alert from "@mui/material/Alert";
@@ -9,515 +18,35 @@ import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
-import Dialog from "@mui/material/Dialog";
-import DialogActions from "@mui/material/DialogActions";
-import DialogContent from "@mui/material/DialogContent";
-import DialogTitle from "@mui/material/DialogTitle";
 import Divider from "@mui/material/Divider";
-import FormControl from "@mui/material/FormControl";
-import IconButton from "@mui/material/IconButton";
-import InputLabel from "@mui/material/InputLabel";
-import MenuItem from "@mui/material/MenuItem";
-import Select from "@mui/material/Select";
-import Slider from "@mui/material/Slider";
 import Stack from "@mui/material/Stack";
-import Tab from "@mui/material/Tab";
-import Tabs from "@mui/material/Tabs";
-import TextField from "@mui/material/TextField";
-import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import AddIcon from "@mui/icons-material/Add";
-import ArrowDownwardIcon from "@mui/icons-material/ArrowDownward";
-import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
-import CheckCircleIcon from "@mui/icons-material/CheckCircle";
-import DeleteIcon from "@mui/icons-material/Delete";
-import EditIcon from "@mui/icons-material/Edit";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import PsychologyIcon from "@mui/icons-material/Psychology";
-import SaveIcon from "@mui/icons-material/Save";
-import { apiGet, apiPut, apiDelete, withQuery } from "@/lib/api";
+import { apiGet, apiPost, apiDelete, withQuery } from "@/lib/api";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
-
-// ── Tipos ─────────────────────────────────────────────────────────────────────
-
-type Provider = "bedrock" | "openai" | "anthropic" | "azure_openai";
-
-interface LlmSlot {
-  configured: boolean;
-  priority: number;
-  priority_label: string;
-  provider: Provider | null;
-  model_id: string | null;
-  model_id_fallback: string | null;
-  cyborg_model_id?: string | null;
-  cyborg_model_id_fallback?: string | null;
-  credentials_masked: Record<string, string>;
-  has_credentials: boolean;
-  max_concurrent_projects: number;
-  daily_token_quota: number | null;
-  deadpool_token_reserve: number;
-  is_active: boolean;
-}
+import {
+  LlmSlotEditor, LlmSlotCard, SLOT_LABEL, VERIFY_LABEL,
+  type LlmSlot, type VerifyResult,
+} from "@/components/llm/LlmSlotEditor";
 
 interface LlmConfigResponse {
   slots: LlmSlot[];
+  /** ⚖️ LEI 2026-09-10: provider/model vêm NULOS — não existe mais "padrão do sistema" de env. */
   system_default: {
-    provider: string;
-    model_id: string;
+    provider: string | null;
+    model_id: string | null;
     cyborg_model_id?: string | null;
     cyborg_model_id_fallback?: string | null;
   };
-}
-
-// ── Meta dos providers ────────────────────────────────────────────────────────
-
-const PROVIDER_META: Record<Provider, {
-  label: string; icon: string; models: string[];
-  fields: { key: string; label: string; placeholder: string; secret?: boolean }[];
-}> = {
-  bedrock: {
-    // Modelos Bedrock validados por invocação real (Converse). Família Claude 5 (Opus 5,
-    // Sonnet 5, Fable 5/5.1) + Haiku 4.5 validados em 2026-09-03. Modelos que retornam
-    // "model identifier invalid" ou "not authorized" foram removidos.
-    // ⚠️ ENTITLEMENT: a família Claude 5 está liberada na conta de build (896328489567) mas
-    // ainda NEGADA no Bedrock Model Access da conta de PROD (820198199720) — selecionáveis já,
-    // mas em prod caem na cascata CLAUDE_MODEL_FALLBACK até o grant ser concedido. Haiku 4.5 e
-    // Sonnet 4.6 funcionam em prod hoje. Se novos modelos forem liberados, adicionar após teste real.
-    label: "AWS Bedrock", icon: "☁️",
-    models: [
-      "us.anthropic.claude-opus-5",
-      "us.anthropic.claude-sonnet-5",
-      "us.anthropic.claude-fable-5",
-      "us.anthropic.claude-fable-5-1",
-      "us.anthropic.claude-opus-4-8",
-      "us.anthropic.claude-opus-4-7",
-      "us.anthropic.claude-sonnet-4-6",
-      "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    ],
-    fields: [
-      { key: "aws_access_key_id",     label: "AWS Access Key ID",     placeholder: "AKIA...",     secret: false },
-      { key: "aws_secret_access_key", label: "AWS Secret Access Key", placeholder: "wJalrXUt...", secret: true  },
-      { key: "aws_region",            label: "AWS Region",            placeholder: "us-east-1",   secret: false },
-    ],
-  },
-  openai: {
-    label: "OpenAI (GPT)", icon: "🤖",
-    models: ["gpt-5.5-high","gpt-5.5-high-fast","gpt-5.4-high","gpt-5.4-high-fast","gpt-4o","gpt-4o-mini","gpt-4-turbo","o1","o3-mini"],
-    fields: [
-      { key: "api_key", label: "API Key", placeholder: "sk-proj-...", secret: true },
-    ],
-  },
-  anthropic: {
-    label: "Anthropic (API Direta)", icon: "🧠",
-    models: ["claude-opus-5","claude-sonnet-5","claude-fable-5","claude-opus-4-7","claude-sonnet-4-6","claude-haiku-4-5-20251001","claude-3-5-sonnet-20241022","claude-3-opus-20240229"],
-    fields: [
-      { key: "api_key", label: "API Key (sk-ant-...)", placeholder: "sk-ant-...", secret: true },
-    ],
-  },
-  azure_openai: {
-    label: "Azure OpenAI", icon: "🔷",
-    models: ["gpt-4o","gpt-4.1","gpt-4-turbo","gpt-35-turbo"],
-    fields: [
-      { key: "api_key",         label: "API Key",          placeholder: "...",                          secret: true  },
-      { key: "endpoint",        label: "Endpoint",         placeholder: "https://xxx.openai.azure.com", secret: false },
-      { key: "deployment_name", label: "Deployment Name",  placeholder: "my-gpt4o",                     secret: false },
-      { key: "api_version",     label: "API Version",      placeholder: "2024-02-01",                   secret: false },
-    ],
-  },
-};
-
-const PROVIDERS = Object.keys(PROVIDER_META) as Provider[];
-
-const MODEL_PROVIDER_MAP: Record<string, Provider> = {
-  "us.anthropic.claude-opus-5":               "bedrock",
-  "us.anthropic.claude-sonnet-5":             "bedrock",
-  "us.anthropic.claude-fable-5":              "bedrock",
-  "us.anthropic.claude-fable-5-1":            "bedrock",
-  "us.anthropic.claude-haiku-4-5-20251001-v1:0": "bedrock",
-  "us.anthropic.claude-sonnet-4-6":           "bedrock",
-  "us.anthropic.claude-opus-4-7":             "bedrock",
-  "us.anthropic.claude-opus-4-8":             "bedrock",
-  "claude-opus-5":                            "anthropic",
-  "claude-sonnet-5":                          "anthropic",
-  "claude-fable-5":                           "anthropic",
-  "claude-opus-4-7":                          "anthropic",
-  "claude-sonnet-4-6":                        "anthropic",
-  "claude-haiku-4-5-20251001":                "anthropic",
-  "claude-3-5-sonnet-20241022":               "anthropic",
-  "claude-3-opus-20240229":                   "anthropic",
-  "gpt-4o": "openai", "gpt-4o-mini": "openai", "gpt-4-turbo": "openai",
-  "gpt-5.5-high": "openai", "gpt-5.5-high-fast": "openai",
-  "gpt-5.4-high": "openai", "gpt-5.4-high-fast": "openai",
-  "o1": "openai", "o3-mini": "openai",
-};
-
-function resolveProvider(modelId: string, tabProvider: Provider): Provider {
-  return MODEL_PROVIDER_MAP[modelId] ?? tabProvider;
-}
-
-// ── Labels / cores por posição ────────────────────────────────────────────────
-
-const SLOT_LABEL = (idx: number) =>
-  idx === 0 ? "Padrão" : `Contingência ${idx}`;
-
-const SLOT_COLOR = (idx: number) => {
-  const COLORS = ["#6366F1", "#10B981", "#F59E0B", "#EF4444"];
-  return COLORS[idx] ?? "#6366F1";
-};
-
-// ── Modal de cadastro / edição ────────────────────────────────────────────────
-
-interface AddModalProps {
-  open: boolean;
-  slot: LlmSlot | null;          // null = novo
-  priority: number;              // posição onde será inserido
-  tenantId: string | null;       // tenant selecionado no topo (master); null = próprio JWT
-  onClose: () => void;
-  onSaved: () => void;
-  globalLimits: { maxConc: number; quota: string; dpRes: number };
-  onLimitsChange: (v: { maxConc: number; quota: string; dpRes: number }) => void;
-}
-
-function AddModal({ open, slot, priority, tenantId, onClose, onSaved, globalLimits, onLimitsChange }: AddModalProps) {
-  const initialProvider = (slot?.provider as Provider) ?? "bedrock";
-  const [tab, setTab]           = useState(PROVIDERS.indexOf(initialProvider));
-  const [modelId, setModelId]   = useState(slot?.model_id ?? "");
-  const [fallbackId, setFallbackId] = useState(slot?.model_id_fallback ?? "");
-  const [cyborgId, setCyborgId] = useState(slot?.cyborg_model_id ?? "");
-  const [cyborgFallbackId, setCyborgFallbackId] = useState(slot?.cyborg_model_id_fallback ?? "");
-  const [creds, setCreds]       = useState<Record<string, string>>({});
-  const [saving, setSaving]     = useState(false);
-  const [err, setErr]           = useState<string | null>(null);
-  const [showLimits, setShowLimits] = useState(false);
-
-  // Sincronizar tab quando o slot muda (edição de slot existente)
-  useEffect(() => {
-    if (open) {
-      const p = (slot?.provider as Provider) ?? "bedrock";
-      setTab(PROVIDERS.indexOf(p));
-      setModelId(slot?.model_id ?? "");
-      setFallbackId(slot?.model_id_fallback ?? "");
-      setCyborgId(slot?.cyborg_model_id ?? "");
-      setCyborgFallbackId(slot?.cyborg_model_id_fallback ?? "");
-      setCreds({});
-      setErr(null);
-    }
-  }, [open, slot]);
-
-  // Reset model ao trocar provider
-  useEffect(() => {
-    const meta = PROVIDER_META[PROVIDERS[tab]];
-    setModelId(meta.models[0] ?? "");
-    setFallbackId("");
-    setCyborgId("");
-    setCyborgFallbackId("");
-    setCreds({});
-  }, [tab]);
-
-  const provider = PROVIDERS[tab] as Provider;
-  const meta     = PROVIDER_META[provider];
-
-  const handleSave = async () => {
-    setSaving(true); setErr(null);
-    try {
-      const selected         = modelId || meta.models[0];
-      const resolvedProvider = resolveProvider(selected, provider);
-      await apiPut(withQuery(`/api/tenant/llm-config/${priority}`, { tenantId }), {
-        provider:                resolvedProvider,
-        model_id:                selected,
-        model_id_fallback:       fallbackId || null,
-        cyborg_model_id:         cyborgId || null,
-        cyborg_model_id_fallback: cyborgFallbackId || null,
-        credentials:             creds,
-        max_concurrent_projects: globalLimits.maxConc,
-        daily_token_quota:       globalLimits.quota ? Number(globalLimits.quota) : null,
-        deadpool_token_reserve:  globalLimits.dpRes,
-      });
-      onSaved();
-      onClose();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Erro ao salvar.");
-    } finally { setSaving(false); }
-  };
-
-  const isEdit = slot?.configured && slot.has_credentials;
-
-  return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth
-      PaperProps={{ sx: { bgcolor: "background.paper" } }}>
-      <DialogTitle sx={{ pb: 1 }}>
-        <Stack direction="row" alignItems="center" spacing={1}>
-          <PsychologyIcon sx={{ color: "primary.main" }} />
-          <Typography fontWeight={700}>
-            {isEdit ? `Editar — ${SLOT_LABEL(priority)}` : "Adicionar LLM"}
-          </Typography>
-          <Chip label={SLOT_LABEL(priority)} size="small"
-            sx={{ bgcolor: SLOT_COLOR(priority) + "22", color: SLOT_COLOR(priority), fontWeight: 700, ml: 0.5 }} />
-        </Stack>
-      </DialogTitle>
-
-      <DialogContent sx={{ pt: "8px !important" }}>
-        {err && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setErr(null)}>{err}</Alert>}
-
-        {/* Tabs de provider */}
-        <Tabs value={tab} onChange={(_e, v) => setTab(v as number)}
-          sx={{ mb: 2.5, borderBottom: "1px solid", borderColor: "divider", minHeight: 36 }}
-          variant="scrollable" scrollButtons="auto">
-          {PROVIDERS.map((p, i) => (
-            <Tab key={p} value={i}
-              label={
-                <Stack direction="row" spacing={0.5} alignItems="center">
-                  <span style={{ fontSize: "0.9rem" }}>{PROVIDER_META[p].icon}</span>
-                  <span style={{ fontSize: "0.72rem" }}>{PROVIDER_META[p].label}</span>
-                </Stack>
-              }
-              sx={{ textTransform: "none", minHeight: 36, py: 0.5 }}
-            />
-          ))}
-        </Tabs>
-
-        {/* Credenciais */}
-        <Stack spacing={1.5} sx={{ mb: 2 }}>
-          {meta.fields.map((f) => (
-            <TextField key={f.key}
-              label={f.label}
-              placeholder={
-                isEdit && slot?.provider === provider && slot.credentials_masked[f.key]
-                  ? slot.credentials_masked[f.key]
-                  : f.placeholder
-              }
-              type={f.secret ? "password" : "text"}
-              size="small"
-              value={creds[f.key] ?? ""}
-              onChange={(e) => setCreds((prev) => ({ ...prev, [f.key]: e.target.value }))}
-              helperText={
-                isEdit && slot?.provider === provider && slot.credentials_masked[f.key]
-                  ? "Deixe em branco para manter o valor salvo"
-                  : undefined
-              }
-              fullWidth
-            />
-          ))}
-        </Stack>
-
-        {/* Modelo principal + Fallback */}
-        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mb: 2 }}>
-          <FormControl size="small" fullWidth>
-            <InputLabel>Modelo principal</InputLabel>
-            <Select value={modelId || meta.models[0]} label="Modelo principal"
-              onChange={(e) => setModelId(e.target.value)}>
-              {meta.models.map((m) => (
-                <MenuItem key={m} value={m} sx={{ fontSize: "0.8rem" }}>{m}</MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-          <FormControl size="small" fullWidth>
-            <InputLabel>Fallback (rework / QA)</InputLabel>
-            <Select value={fallbackId} label="Fallback (rework / QA)"
-              onChange={(e) => setFallbackId(e.target.value)}>
-              <MenuItem value="" sx={{ fontSize: "0.8rem", color: "text.disabled" }}>
-                — Nenhum —
-              </MenuItem>
-              {meta.models.map((m) => (
-                <MenuItem key={m} value={m} sx={{ fontSize: "0.8rem" }}>{m}</MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-        </Stack>
-        {fallbackId && (
-          <Alert severity="info" icon={false} sx={{ mb: 2, py: 0.5, fontSize: "0.75rem" }}>
-            Dev/QA usam <strong>{modelId || meta.models[0]}</strong> no 1º intento.
-            No rework (QA_FAIL ≥ 1) ou quando Dev escalou, <strong>{fallbackId}</strong> é chamado automaticamente.
-          </Alert>
-        )}
-
-        {/* Cyborg — modelo dedicado para lapidação e entrega final */}
-        <Box sx={{ border: "1px solid", borderColor: "warning.main", borderRadius: 1, p: 1.5, mb: 2, bgcolor: "warning.main", color: "warning.contrastText" }}>
-          <Typography variant="caption" sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700, display: "block", mb: 1 }}>
-            🤖 Cyborg — Lapidação e Entrega (etapa final crítica)
-          </Typography>
-          <Typography variant="caption" sx={{ display: "block", mb: 1.5, opacity: 0.9 }}>
-            O Cyborg audita o produto entregue pelo squad, corrige gaps residuais e publica no S3.
-            Use o modelo mais capaz disponível — é a etapa mais importante do pipeline.
-          </Typography>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-            <FormControl size="small" fullWidth sx={{ bgcolor: "background.paper", borderRadius: 1 }}>
-              <InputLabel>Cyborg principal</InputLabel>
-              <Select value={cyborgId} label="Cyborg principal"
-                onChange={(e) => setCyborgId(e.target.value)}>
-                <MenuItem value="" sx={{ fontSize: "0.8rem", color: "text.disabled" }}>
-                  — Usar padrão Zentriz —
-                </MenuItem>
-                {meta.models.map((m) => (
-                  <MenuItem key={m} value={m} sx={{ fontSize: "0.8rem" }}>{m}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            <FormControl size="small" fullWidth sx={{ bgcolor: "background.paper", borderRadius: 1 }}>
-              <InputLabel>Cyborg fallback</InputLabel>
-              <Select value={cyborgFallbackId} label="Cyborg fallback"
-                onChange={(e) => setCyborgFallbackId(e.target.value)}>
-                <MenuItem value="" sx={{ fontSize: "0.8rem", color: "text.disabled" }}>
-                  — Nenhum —
-                </MenuItem>
-                {meta.models.map((m) => (
-                  <MenuItem key={m} value={m} sx={{ fontSize: "0.8rem" }}>{m}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          </Stack>
-        </Box>
-
-        {/* Limites globais — expansível */}
-        <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden" }}>
-          <Box
-            onClick={() => setShowLimits((v) => !v)}
-            sx={{ px: 2, py: 1, display: "flex", alignItems: "center", cursor: "pointer",
-              bgcolor: "action.hover", "&:hover": { bgcolor: "action.selected" } }}>
-            <Typography variant="caption" sx={{ textTransform: "uppercase", letterSpacing: "0.08em", flexGrow: 1 }}>
-              Limites globais
-            </Typography>
-            <Typography variant="caption" color="text.secondary">{showLimits ? "▲" : "▼"}</Typography>
-          </Box>
-          {showLimits && (
-            <Box sx={{ px: 2, pb: 2, pt: 1.5 }}>
-              <Stack spacing={2}>
-                <Box>
-                  <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
-                    <Typography variant="body2">Projetos simultâneos máx.</Typography>
-                    <Typography variant="body2" fontWeight={700} color="primary.main">{globalLimits.maxConc}</Typography>
-                  </Stack>
-                  <Slider value={globalLimits.maxConc}
-                    onChange={(_e, v) => onLimitsChange({ ...globalLimits, maxConc: v as number })}
-                    min={1} max={20} step={1}
-                    marks={[{ value: 1, label: "1" }, { value: 10 }, { value: 20, label: "20" }]}
-                    sx={{ color: "primary.main" }} />
-                </Box>
-                <TextField label="Quota diária de tokens (opcional)" placeholder="ex: 1000000"
-                  size="small" type="number" value={globalLimits.quota}
-                  onChange={(e) => onLimitsChange({ ...globalLimits, quota: e.target.value })}
-                  helperText="Vazio = sem limite." fullWidth />
-                <Box>
-                  <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
-                    <Stack direction="row" spacing={0.5} alignItems="center">
-                      <Typography variant="body2">Reserva Auto Care</Typography>
-                      <Tooltip title="Tokens reservados para o Auto Care.">
-                        <InfoOutlinedIcon sx={{ fontSize: "0.85rem", color: "text.secondary" }} />
-                      </Tooltip>
-                    </Stack>
-                    <Typography variant="body2" fontWeight={700} color="secondary.main">
-                      {globalLimits.dpRes > 0 ? `${(globalLimits.dpRes / 1000).toFixed(0)}k` : "0"}
-                    </Typography>
-                  </Stack>
-                  <Slider value={globalLimits.dpRes}
-                    onChange={(_e, v) => onLimitsChange({ ...globalLimits, dpRes: v as number })}
-                    min={0} max={500000} step={10000}
-                    marks={[{ value: 0, label: "0" }, { value: 250000, label: "250k" }, { value: 500000, label: "500k" }]}
-                    sx={{ color: "secondary.main" }} />
-                </Box>
-              </Stack>
-            </Box>
-          )}
-        </Box>
-      </DialogContent>
-
-      <DialogActions sx={{ px: 3, pb: 2, gap: 1 }}>
-        <Button variant="outlined" onClick={onClose} disabled={saving}>Cancelar</Button>
-        <Button variant="contained" onClick={handleSave} disabled={saving}
-          startIcon={saving ? <CircularProgress size={14} color="inherit" /> : <SaveIcon />}>
-          {saving ? "Salvando…" : "Salvar"}
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-}
-
-// ── Card de um LLM configurado ────────────────────────────────────────────────
-
-interface LlmCardProps {
-  slot: LlmSlot;
-  index: number;
-  total: number;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
-  deleting: boolean;
-}
-
-function LlmCard({ slot, index, total, onMoveUp, onMoveDown, onEdit, onDelete, deleting }: LlmCardProps) {
-  const color = SLOT_COLOR(index);
-  const meta  = PROVIDER_META[slot.provider!];
-
-  return (
-    <Card variant="outlined" sx={{ borderColor: color + "55", borderLeft: `4px solid ${color}` }}>
-      <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
-        <Stack direction="row" alignItems="center" spacing={1.5} flexWrap="wrap" useFlexGap>
-          {/* Badge de posição */}
-          <Chip label={SLOT_LABEL(index)} size="small"
-            sx={{ bgcolor: color + "20", color, fontWeight: 700, border: `1px solid ${color}44`, minWidth: 100 }} />
-
-          {/* Info do provider */}
-          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-              <Typography sx={{ fontSize: "1rem" }}>{meta?.icon}</Typography>
-              <Typography variant="body2" fontWeight={600} noWrap>{meta?.label}</Typography>
-              <Typography variant="caption" color="text.secondary" noWrap sx={{ fontFamily: "monospace" }}>
-                {slot.model_id}
-                {slot.model_id_fallback && (
-                  <> <span style={{ opacity: 0.5 }}>→</span> {slot.model_id_fallback}</>
-                )}
-              </Typography>
-              {slot.cyborg_model_id && (
-                <Typography variant="caption" sx={{ display: "block", fontFamily: "monospace", color: "warning.main", fontSize: "0.68rem" }}>
-                  🤖 Cyborg: {slot.cyborg_model_id}
-                  {slot.cyborg_model_id_fallback && (
-                    <> <span style={{ opacity: 0.5 }}>→</span> {slot.cyborg_model_id_fallback}</>
-                  )}
-                </Typography>
-              )}
-            </Stack>
-            {slot.has_credentials ? (
-              <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.25 }}>
-                <CheckCircleIcon sx={{ fontSize: "0.75rem", color: "success.main" }} />
-                <Typography variant="caption" color="success.main">Credenciais configuradas</Typography>
-              </Stack>
-            ) : (
-              <Typography variant="caption" color="warning.main">Sem credenciais</Typography>
-            )}
-          </Box>
-
-          {/* Ações */}
-          <Stack direction="row" spacing={0.25} sx={{ flexShrink: 0 }}>
-            <Tooltip title="Mover para cima (aumentar prioridade)">
-              <span>
-                <IconButton size="small" onClick={onMoveUp} disabled={index === 0}>
-                  <ArrowUpwardIcon fontSize="small" />
-                </IconButton>
-              </span>
-            </Tooltip>
-            <Tooltip title="Mover para baixo (diminuir prioridade)">
-              <span>
-                <IconButton size="small" onClick={onMoveDown} disabled={index === total - 1}>
-                  <ArrowDownwardIcon fontSize="small" />
-                </IconButton>
-              </span>
-            </Tooltip>
-            <Tooltip title="Editar credenciais / modelo">
-              <IconButton size="small" onClick={onEdit}>
-                <EditIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
-            <Tooltip title="Remover">
-              <IconButton size="small" color="error" onClick={onDelete} disabled={deleting}>
-                {deleting ? <CircularProgress size={14} /> : <DeleteIcon fontSize="small" />}
-              </IconButton>
-            </Tooltip>
-          </Stack>
-        </Stack>
-      </CardContent>
-    </Card>
-  );
+  /** Tenant autorizado por zentriz_admin a rodar na conta da Zentriz. */
+  byoc_exempt?: boolean;
+  /** Famílias distintas cobertas pelos slots utilizáveis (base da recomendação dos 2 slots). */
+  families?: string[];
+  has_usable_slot?: boolean;
+  /** `families.length >= 2` — o que destrava o revisor cross-family (+12 p.p., arXiv:2609.04270). */
+  cross_family_available?: boolean;
 }
 
 // ── Página principal ──────────────────────────────────────────────────────────
@@ -526,7 +55,14 @@ function LlmSettingsInner() {
   // Master: escopa as leituras/escritas ao tenant selecionado no topo (null = próprio JWT).
   const tenantId = tenantScopeStore.effectiveTenantId;
   const [slots, setSlots]   = useState<LlmSlot[]>([]);
-  const [sysDefault, setSysDefault] = useState({ provider: "bedrock", model_id: "us.anthropic.claude-sonnet-4-6" });
+  // ⚖️ LEI 2026-09-10: o `sysDefault` literal ("bedrock · sonnet-4-6") era a tela ENSINANDO que
+  // existia um LLM de reserva da plataforma. O servidor já devolve `null`; aqui o estado nasce nulo.
+  const [sysDefault, setSysDefault] = useState<{ provider: string | null; model_id: string | null }>(
+    { provider: null, model_id: null },
+  );
+  /** Famílias distintas cobertas pelos slots utilizáveis — vem calculado do servidor. */
+  const [familias, setFamilias] = useState<string[]>([]);
+  const [crossFamily, setCrossFamily] = useState(false);
   const [loading, setLoading] = useState(true);
   const [globalMsg, setGlobalMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
@@ -537,6 +73,8 @@ function LlmSettingsInner() {
 
   // Deleting por priority
   const [deletingPriority, setDeletingPriority] = useState<number | null>(null);
+  // Testando por priority (⚖️ Jean, 2026-09-10 — re-teste sob demanda)
+  const [testingPriority, setTestingPriority] = useState<number | null>(null);
 
   // Limites globais — lidos do slot 0, usados em todos os saves
   const [globalLimits, setGlobalLimits] = useState({ maxConc: 3, quota: "", dpRes: 0 });
@@ -549,6 +87,8 @@ function LlmSettingsInner() {
       if ("slots" in raw) {
         const resp = raw as LlmConfigResponse;
         setSysDefault(resp.system_default);
+        setFamilias(resp.families ?? []);
+        setCrossFamily(!!resp.cross_family_available);
         const configured = resp.slots.filter((s) => s.configured && s.has_credentials);
         setSlots(configured);
         // Puxar limites do slot 0 se existir
@@ -568,6 +108,39 @@ function LlmSettingsInner() {
 
   useEffect(() => { void load(); }, [load]);
 
+  /** Mensagem única para o veredicto — mesma no salvar e no botão "Testar". */
+  const mostrarVeredicto = (v: VerifyResult | undefined, slotLabel: string) => {
+    if (!v) {
+      setGlobalMsg({ type: "success", text: `${slotLabel} salvo. Não foi possível testar agora — use ▶ para testar.` });
+      return;
+    }
+    if (v.ok) {
+      setGlobalMsg({ type: "success", text: `${slotLabel}: ${v.model} respondeu em ${v.latency_ms} ms.` });
+    } else if (v.status === "unavailable") {
+      // Indisponibilidade nossa não reprova o slot do tenant — e por isso também não é gravada.
+      setGlobalMsg({ type: "success", text: `${slotLabel} salvo. ${VERIFY_LABEL.unavailable} (${v.message}).` });
+    } else {
+      // Reprovar NÃO desfaz o salvamento: o slot fica gravado e a cascata o ignora até funcionar.
+      setGlobalMsg({
+        type: "error",
+        text: `${slotLabel} salvo, mas o teste falhou — ${VERIFY_LABEL[v.status] ?? VERIFY_LABEL.other}: ${v.message}`,
+      });
+    }
+  };
+
+  const testSlot = async (priority: number, slotLabel: string) => {
+    setTestingPriority(priority);
+    setGlobalMsg(null);
+    try {
+      const r = await apiPost<{ verify: VerifyResult }>(
+        withQuery(`/api/tenant/llm-config/${priority}/test`, { tenantId }), {});
+      mostrarVeredicto(r?.verify, slotLabel);
+      await load();
+    } catch (e) {
+      setGlobalMsg({ type: "error", text: e instanceof Error ? e.message : "Falha ao testar o slot." });
+    } finally { setTestingPriority(null); }
+  };
+
   // ── Reordenar: troca duas posições e re-salva com novas priorities ────────
 
   const swapSlots = async (indexA: number, indexB: number) => {
@@ -577,21 +150,15 @@ function LlmSettingsInner() {
     // Optimistic update
     setSlots(next);
 
-    // Persistir: DELETE tudo → re-inserir na nova ordem
+    // 🔴 Antes: "DELETE tudo → re-PUT de cada um com credentials {}". Como o DELETE vinha antes, a
+    // preservação de credencial do upsert não achava a linha anterior e o REORDER APAGAVA as chaves
+    // de todos os slots. Agora a permutação é uma transação no servidor que move a linha inteira
+    // (credencial, limites e o veredicto do último teste) — e não dispara teste nenhum: mudar a
+    // ordem de preferência não reconfigura nada.
     setGlobalMsg(null);
     try {
-      await apiDelete(withQuery("/api/tenant/llm-config", { tenantId }));
-      for (let i = 0; i < next.length; i++) {
-        const s = next[i];
-        await apiPut(withQuery(`/api/tenant/llm-config/${i}`, { tenantId }), {
-          provider:                s.provider,
-          model_id:                s.model_id,
-          credentials:             {},                  // vazio = mantém credenciais salvas
-          max_concurrent_projects: globalLimits.maxConc,
-          daily_token_quota:       globalLimits.quota ? Number(globalLimits.quota) : null,
-          deadpool_token_reserve:  globalLimits.dpRes,
-        });
-      }
+      await apiPost(withQuery("/api/tenant/llm-config/reorder", { tenantId }),
+        { order: next.map((s) => s.priority) });
       await load();
     } catch {
       setGlobalMsg({ type: "error", text: "Erro ao reordenar. Recarregando…" });
@@ -606,18 +173,13 @@ function LlmSettingsInner() {
     if (!confirm(`Remover "${SLOT_LABEL(slotIndex)}" (${slot.model_id})?`)) return;
     setDeletingPriority(slot.priority);
     try {
-      // Remove, então reorganiza priorities dos que ficaram
+      // Remove SÓ o slot pedido e compacta as prioridades pelo reorder transacional — os demais
+      // slots nem chegam a ser reescritos, então não perdem credencial nem veredicto de teste.
       const remaining = configuredSlots.filter((_, i) => i !== slotIndex);
-      await apiDelete(withQuery("/api/tenant/llm-config", { tenantId }));
-      for (let i = 0; i < remaining.length; i++) {
-        await apiPut(withQuery(`/api/tenant/llm-config/${i}`, { tenantId }), {
-          provider:                remaining[i].provider,
-          model_id:                remaining[i].model_id,
-          credentials:             {},
-          max_concurrent_projects: globalLimits.maxConc,
-          daily_token_quota:       globalLimits.quota ? Number(globalLimits.quota) : null,
-          deadpool_token_reserve:  globalLimits.dpRes,
-        });
+      await apiDelete(withQuery(`/api/tenant/llm-config/${slot.priority}`, { tenantId }));
+      if (remaining.length > 0) {
+        await apiPost(withQuery("/api/tenant/llm-config/reorder", { tenantId }),
+          { order: remaining.map((s) => s.priority) });
       }
       await load();
     } catch {
@@ -678,8 +240,14 @@ function LlmSettingsInner() {
             <Typography variant="body1" color="text.secondary" fontWeight={500}>
               Nenhum LLM configurado
             </Typography>
-            <Typography variant="body2" color="text.disabled" sx={{ mb: 2 }}>
-              Usando provider padrão da Zentriz ({sysDefault.provider} · {sysDefault.model_id})
+            {/* ⚖️ LEI 2026-09-10: aqui se lia "Usando provider padrão da Zentriz (bedrock ·
+                sonnet-4-6)" — a tela prometia um LLM de reserva que rodava na NOSSA conta.
+                Não existe mais reserva: sem slot, nada roda. */}
+            <Typography variant="body2" color="warning.main" sx={{ mb: 2 }}>
+              {sysDefault.provider
+                ? `Padrão do sistema: ${sysDefault.provider} · ${sysDefault.model_id}`
+                : "Sem nenhum slot configurado, o Genesis não executa runs, validações nem revisões "
+                  + "para este tenant. Cadastre ao menos um slot com credenciais próprias."}
             </Typography>
             <Button variant="contained" startIcon={<AddIcon />} onClick={openAdd}>
               Adicionar primeiro LLM
@@ -689,7 +257,7 @@ function LlmSettingsInner() {
       ) : (
         <Stack spacing={1.5}>
           {configuredSlots.map((slot, index) => (
-            <LlmCard
+            <LlmSlotCard
               key={slot.priority}
               slot={slot}
               index={index}
@@ -698,7 +266,9 @@ function LlmSettingsInner() {
               onMoveDown={() => swapSlots(index, index + 1)}
               onEdit={() => openEdit(index)}
               onDelete={() => handleDelete(index)}
+              onTest={() => void testSlot(slot.priority, SLOT_LABEL(index))}
               deleting={deletingPriority === slot.priority}
+              testing={testingPriority === slot.priority}
             />
           ))}
 
@@ -725,6 +295,26 @@ function LlmSettingsInner() {
         </Stack>
       )}
 
+      {/* ⚖️ Recomendação do Jean (2026-09-10): "aconselhar os clientes a ter pelo menos 2 slots
+          com famílias diferentes". Não é preferência estética — é a única configuração que a
+          pesquisa mede como ganho: revisor da MESMA família rende ZERO e rejeita 35% do que está
+          certo; cross-family de porte médio rende +12 p.p. com 2% de falso-positivo
+          (arXiv:2609.04270). Com uma família só, o revisor cross-family simplesmente não roda. */}
+      {configuredSlots.length > 0 && !crossFamily && (
+        <Alert severity="warning" sx={{ mt: 3 }}>
+          <Typography variant="body2" fontWeight={600} sx={{ mb: 0.5 }}>
+            Todos os seus slots são da mesma família{familias[0] ? ` (${familias[0]})` : ""}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            A revisão cruzada do Genesis fica <strong>desligada</strong>: um modelo revisando a si
+            mesmo não acrescenta nada e rejeita cerca de 35% do que está correto. Cadastre um
+            segundo slot de <strong>outra família</strong> (ex.: Google ao lado de Claude) — a
+            medição de referência mostra <strong>+12 pontos percentuais</strong> de defeitos
+            encontrados, com 2% de falso-positivo.
+          </Typography>
+        </Alert>
+      )}
+
       {/* Informativo */}
       {configuredSlots.length > 0 && (
         <Alert severity="info" sx={{ mt: 3 }} icon={<InfoOutlinedIcon />}>
@@ -733,18 +323,24 @@ function LlmSettingsInner() {
             O Genesis tenta os providers em ordem. Se o <strong>Padrão</strong> falhar ou atingir limite,
             tenta <strong>Contingência 1</strong>, depois <strong>2</strong> e <strong>3</strong>.
             Use ↑ ↓ para mudar a ordem — a posição define a prioridade.
+            {crossFamily && (
+              <> Com <strong>{familias.length} famílias</strong> cadastradas, a revisão cruzada
+              (um modelo de outra família revisando o executor) está <strong>ativa</strong>.</>
+            )}
           </Typography>
         </Alert>
       )}
 
       {/* Modal de adicionar / editar */}
-      <AddModal
+      <LlmSlotEditor
         open={modalOpen}
         slot={editSlot}
         priority={editPriority}
+        endpoint="/api/tenant/llm-config"
         tenantId={tenantId}
+        showCyborg
         onClose={() => setModalOpen(false)}
-        onSaved={load}
+        onSaved={(verify) => { mostrarVeredicto(verify, SLOT_LABEL(editPriority)); void load(); }}
         globalLimits={globalLimits}
         onLimitsChange={setGlobalLimits}
       />

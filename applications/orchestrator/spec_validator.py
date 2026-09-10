@@ -472,14 +472,27 @@ def validate_spec(
                            triage_model, str(e)[:200])
             triage = None
 
-    # Modelo do refutador: Sonnet por DESIGN (custo ~US$0,30-0,60/validação; Opus só por
-    # escolha explícita via SPEC_VALIDATOR_MODEL). Herdar CLAUDE_MODEL do pipeline seria
-    # herdar Opus — 5x o custo E, em prod, um id indisponível nesta rota (403 provado).
-    # No Foundry (local), CLAUDE_MODEL é o único id válido do resource → usa-o.
-    provider = (os.environ.get("GENESIS_LLM_PROVIDER") or "").strip().lower()
-    default_model = (os.environ.get("CLAUDE_MODEL") if provider == "foundry" else None) \
-        or "us.anthropic.claude-sonnet-4-6"
-    model = (os.environ.get("SPEC_VALIDATOR_MODEL") or (model_id or "").strip() or default_model).strip()
+    # ⚖️ LEI 2026-09-10 (Jean): o refutador roda no modelo do SLOT do tenant.
+    #
+    # Aqui havia `default_model = ... or "us.anthropic.claude-sonnet-4-6"`, com o comentário
+    # "Sonnet por DESIGN (custo ~US$0,30-0,60/validação)". A economia era real, mas a decisão era
+    # NOSSA sobre uma fatura ALHEIA — e fora do Foundry o literal ignorava por completo o slot.
+    # Ordem: override operacional explícito → modelo pedido pelo chamador (= slot, via `model_id`)
+    # → `CLAUDE_MODEL` do env DO RUN (transporte do slot feito pelo `runner_server`).
+    #
+    # ⚠️ Trade-off DECLARADO: com slot em Opus, a validação custa ~5x o que custava em Sonnet. Se o
+    # tenant quiser a validação barata de volta, isso precisa virar um CAMPO do slot ("modelo
+    # econômico") — escolha dele —, não um literal nosso. Mesmo raciocínio de `specSemanticGate.ts`.
+    model = (
+        (os.environ.get("SPEC_VALIDATOR_MODEL") or "").strip()
+        or (model_id or "").strip()
+        or (os.environ.get("CLAUDE_MODEL") or "").strip()
+    )
+    if not model:
+        raise ValueError(
+            "spec_validator sem modelo: nenhum slot de LLM resolvido para este projeto. "
+            "Cadastre um slot em Configurações → LLM."
+        )
 
     # Estabilização por MULTI-VOTO (SPEC_VALIDATOR_VOTES, default 1 = comportamento clássico).
     # O refutador é não-determinístico (temp alta nos modelos de raciocínio) → ~60% de churn entre

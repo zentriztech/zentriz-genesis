@@ -128,8 +128,11 @@ def test_foundry_ignora_thinking_e_DECLARA_em_log(monkeypatch, caplog):
     sink: list = []
     runtime = _ambiente_bedrock(monkeypatch)
     monkeypatch.setenv("GENESIS_LLM_PROVIDER", "foundry")
+    # ⚖️ LEI 2026-09-10: o stub aceita o envelope porque o cliente Foundry passou a recebê-lo
+    # (`_build_foundry_client(llm_cfg)`). Antes era `lambda:` sem argumento — e essa assinatura
+    # zero-arg era o próprio vazamento: a credencial do slot nunca chegava ao cliente.
     monkeypatch.setattr(runtime, "_build_foundry_client",
-                        lambda: types.SimpleNamespace(messages=_Messages(sink)))
+                        lambda llm_cfg=None: types.SimpleNamespace(messages=_Messages(sink)))
     with caplog.at_level("WARNING"):
         runtime.call_bedrock_direct("S", "U", "opus-5", max_tokens=8000, thinking=True)
     assert sink[0]["thinking"] == {"type": "disabled"}      # NÃO ligou

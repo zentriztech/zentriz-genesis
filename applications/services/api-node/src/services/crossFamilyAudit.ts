@@ -51,14 +51,20 @@ import { buildFileDigest } from "./specFileDigest.js";
 import { loadSpecFiles, resolveFindingPath, type SpecFileRef } from "./specGapScope.js";
 import { buildSiblingContext } from "./specSiblingContext.js";
 import type { ValidationFinding } from "./specValidation.js";
+import {
+  agentsLlmFields, resolveReviewerLlmForProject, type ReviewerResolution,
+} from "./tenantLlmConfig.js";
 
 /**
- * Família do auditor. Default `amazon.nova-pro-v1:0` — mid-tier de OUTRA família, que é exatamente
- * a configuração que o paper mede como a que ganha (+12 p.p.). Trocar por `mistral.mistral-large-3-675b-instruct`,
- * `deepseek.v3.2` ou `qwen.qwen3-32b-v1:0` não exige deploy: todas as quatro acertaram 12/12 no
- * gold set de calibração de 2026-09-07 (inclui acusação falsa-confiante e acusação fora do trecho).
+ * ⚖️ 2026-09-10 — NÃO existe mais um `AUDIT_MODEL` de env aqui.
+ *
+ * A env `SPEC_CROSS_AUDIT_MODEL` nomeava o auditor (default `amazon.nova-pro-v1:0`) e o cobrava na
+ * credencial do slot Padrão do tenant. Isso viola a lei do Jean por dois lados — modelo escolhido
+ * por hard-code, e id de outra família pedido ao provider errado. O auditor agora sai dos SLOTS
+ * (`resolveReviewerLlm`), que trazem provider e credencial próprios. A régua de qualidade não mudou:
+ * `pickReviewerModel` continua exigindo outra família e não-mais-fraco — a configuração medida em
+ * +12 p.p. por `arXiv:2609.04270`. Mudou só a FONTE dos candidatos, que é o que a lei governa.
  */
-const AUDIT_MODEL = (process.env.SPEC_CROSS_AUDIT_MODEL ?? "amazon.nova-pro-v1:0").trim();
 const AUDIT_TIMEOUT_MS = num(process.env.SPEC_CROSS_AUDIT_TIMEOUT_MS, 90_000);
 /** Teto por validação. Auditar 25 findings custa centavos, mas teto explícito > surpresa na fatura. */
 const AUDIT_MAX_PER_RUN = num(process.env.SPEC_CROSS_AUDIT_MAX, 40);
@@ -337,11 +343,14 @@ export async function auditFindings(db: Db, args: {
   purpose?: AuditPurpose;
   /** Teto de itens nesta chamada. Default `SPEC_CROSS_AUDIT_MAX`. */
   max?: number;
+  /** Revisor já resolvido (quem chama em lote resolve uma vez). Ausente ⇒ resolve pelos slots. */
+  reviewer?: ReviewerResolution | null;
 }): Promise<CrossFamilyAuditResult> {
   const purpose: AuditPurpose = args.purpose ?? "acusacao";
   const max = args.max && args.max > 0 ? args.max : AUDIT_MAX_PER_RUN;
-  const empty = (reason: string): CrossFamilyAuditResult =>
-    ({ ran: false, audits: [], reason, skipped: 0, failed: 0, model: AUDIT_MODEL });
+  // Sem revisor escolhido não existe "modelo da auditoria" — nomear um aqui seria o hard-code de volta.
+  const empty = (reason: string, model = ""): CrossFamilyAuditResult =>
+    ({ ran: false, audits: [], reason, skipped: 0, failed: 0, model });
 
   if ((process.env.SPEC_CROSS_AUDIT ?? "").trim().toLowerCase() !== "on") {
     return empty("SPEC_CROSS_AUDIT != on");
@@ -356,6 +365,30 @@ export async function auditFindings(db: Db, args: {
   const alvo = args.findings.filter(isAuditableFinding);
   const skipped = args.findings.length - alvo.length;
   if (alvo.length === 0) return { ...empty("nenhum finding ancorado importante"), skipped };
+
+  // 🔴 GRUPO C (2026-09-10): aqui o `model_id` do auditor vinha ANTES do spread de `args.llm` — o
+  // modelo do TENANT sobrescrevia o auditor e a auditoria "cross-family" virava auto-revisão, em
+  // silêncio. Agora a escolha é explícita e defensável: "outra família E não mais fraco que o
+  // executor; se não houver, ALERTAR" (Jean). Sem revisor viável a auditoria NÃO roda — cair no
+  // modelo do tenant seria justamente a configuração que a pesquisa mede como inútil.
+  //
+  // ⚖️ LEI 2026-09-10 (Jean): os candidatos saem dos SLOTS do tenant, não de `SPEC_CROSS_AUDIT_MODEL`.
+  // A env nomeava um modelo escolhido pela infra e o cobrava na credencial do slot Padrão — modelo
+  // hard-coded (proibido) e, pior, um id de outra família pedido ao provider errado (o Foundry desta
+  // conta só serve Claude ⇒ 400). Agora cada slot concorre COM o próprio provider e as próprias
+  // credenciais, na ordem que o tenant cadastrou: reordenar slots na tela troca o revisor sem deploy.
+  const executorModel = String((args.llm as { model_id?: unknown } | null | undefined)?.model_id ?? "").trim();
+  const pick = args.reviewer
+    ?? (await resolveReviewerLlmForProject({ projectId: args.projectId, executorModel }));
+  if (!pick.ok) {
+    console.warn(`[crossFamilyAudit] ${pick.alert}`);
+    return { ...empty(pick.alert, ""), skipped };
+  }
+  const auditModel = pick.model;
+  // O envelope INTEIRO é o do slot do revisor. Trocar só o `model_id` sobre as credenciais do slot
+  // primário era o que funcionava por acidente enquanto tudo era Bedrock; com slots de providers
+  // diferentes isso vira 401/400 — é o mesmo erro do Grupo C, um nível acima.
+  const reviewerFields = agentsLlmFields(pick.llm);
 
   const refs = await loadSpecFiles(db, args.projectId).catch(() => []);
   if (refs.length === 0) return { ...empty("projeto sem arquivos de spec"), skipped };
@@ -394,8 +427,11 @@ export async function auditFindings(db: Db, args: {
         user_message: buildAuditMessage(f, section, purpose),
         max_tokens: AUDIT_MAX_TOKENS,
         temperature: 0,
-        model_id: AUDIT_MODEL,
-        ...(args.llm ?? {}),
+        // GAP-98 / Grupo C: o envelope do AUDITOR vem DEPOIS — é ele que define a família, e o do
+        // tenant não pode sobrescrevê-lo. Sob a LEI 2026-09-10 vai o envelope COMPLETO do slot
+        // revisor (provider + credenciais), porque o revisor pode morar em outro provider.
+        ...reviewerFields,
+        model_id: auditModel,
       }), AUDIT_TIMEOUT_MS);
       const data = JSON.parse(body) as { response?: string; truncated?: boolean };
       // Parecer CORTADO é parecer sem conclusão — a família T1/T2 nasceu de aplicar o mutilado.
@@ -424,7 +460,7 @@ export async function auditFindings(db: Db, args: {
       evidence,
       evidenceVerbatim: evidenceIsVerbatim(evidence, section),
       why: (parsed.why ?? "").slice(0, 2_000),
-      model: AUDIT_MODEL,
+      model: auditModel,
       sectionChars: section.length,
       fileShaAt: file.sha,
       purpose,
@@ -432,7 +468,7 @@ export async function auditFindings(db: Db, args: {
   }
 
   await persistAudits(db, args.projectId, args.validationRunId ?? null, args.autonomyRunId ?? null, audits);
-  return { ran: true, audits, skipped: skipped + extraSkipped, failed, model: AUDIT_MODEL };
+  return { ran: true, audits, skipped: skipped + extraSkipped, failed, model: auditModel };
 }
 
 /** Grava as auditorias. Conflito no mesmo (finding, conteúdo, modelo) ⇒ reescreve: é reauditoria. */

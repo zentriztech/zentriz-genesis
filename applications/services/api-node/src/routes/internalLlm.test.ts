@@ -35,12 +35,22 @@ vi.mock("../db/client.js", () => ({
 }));
 
 // Resolver de config LLM: devolve uma api_key marcada pelo projeto pedido (prova de vazamento).
+// ⚖️ Jean, 2026-09-10 (*"em caso de não funcionar testa o próximo"*): a rota passou a resolver a
+// FILA de slots; o 1º continua sendo o corpo da resposta e a fila inteira vai em `candidates`.
+// Cada contingência traz credencial PRÓPRIA — daí o `KEY-FOR-...-alt`, que prova que a chave do
+// slot 2 não é a do slot 1.
+const fila = vi.hoisted(() => ({ contingencias: [] as Record<string, unknown>[] }));
 vi.mock("../services/tenantLlmConfig.js", () => ({
+  resolveProjectLlmCandidates: async (projectId: string) => [
+    { provider: "openai", modelId: "gpt-4o", apiKey: `KEY-FOR-${projectId}` },
+    ...fila.contingencias,
+  ],
   resolveProjectLlmConfig: async (projectId: string) => ({
     provider: "openai",
     modelId: "gpt-4o",
     apiKey: `KEY-FOR-${projectId}`,
   }),
+  LlmSlotNotConfiguredError: class LlmSlotNotConfiguredError extends Error {},
 }));
 
 let app: FastifyInstance;
@@ -65,6 +75,7 @@ afterAll(async () => {
 beforeEach(() => {
   projectOwnerTenant = TENANT;
   cyborgProjectRow = { tenant_id: TENANT, created_by: "owner-1", owner_email: "owner@x", owner_role: "user" };
+  fila.contingencias = [];
 });
 
 function get(projectId: string, token: string, header: "x-internal-token" | "authorization" = "x-internal-token") {
@@ -112,6 +123,25 @@ describe("GET /api/internal/project-llm-config/:projectId — binding por projet
   it("sem token → 401 fail-closed em produção", async () => {
     const res = await app.inject({ method: "GET", url: `/api/internal/project-llm-config/${PROJECT}` });
     expect(res.statusCode).toBe(401);
+  });
+
+  it("slot único → resposta SEM `candidates` (nenhum consumidor atual muda de forma)", async () => {
+    const res = await get(PROJECT, STATIC_TOKEN);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, apiKey: `KEY-FOR-${PROJECT}` });
+    expect(res.json().candidates).toBeUndefined();
+  });
+
+  it("com contingência → corpo segue sendo o slot ESCOLHIDO e `candidates` traz a fila inteira", async () => {
+    fila.contingencias = [{ provider: "bedrock", modelId: "claude-sonnet-4-6", apiKey: "KEY-ALT" }];
+    const res = await get(PROJECT, STATIC_TOKEN);
+    expect(res.statusCode).toBe(200);
+    // Compatibilidade: quem lê `provider`/`modelId`/`apiKey` no topo continua vendo o 1º slot.
+    expect(res.json()).toMatchObject({ ok: true, provider: "openai", apiKey: `KEY-FOR-${PROJECT}` });
+    const cands = res.json().candidates as Record<string, unknown>[];
+    expect(cands).toHaveLength(2);
+    // Trocar de slot troca de CREDENCIAL — é isso que faz a fatura ser do tenant certo.
+    expect(cands[1]).toMatchObject({ provider: "bedrock", apiKey: "KEY-ALT" });
   });
 
   it("token de run escopado usado em rota do próprio projeto via Authorization header → 200", async () => {

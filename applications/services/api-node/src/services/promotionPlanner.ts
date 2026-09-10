@@ -33,6 +33,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { httpPost } from "../routes/specs.js";
+import { specializedModelFor } from "./reviewerModel.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
 
 /** Contrato mínimo de banco (aceita `pool`, um `PoolClient` e um duplo de teste). */
@@ -40,8 +41,15 @@ export interface Queryable {
   query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }>;
 }
 
-/** Modelo do planejador. ID **COM VERSÃO**: o apelido sem versão é 400 no Bedrock (medido em prod). */
-const PLANNER_MODEL = process.env.PROMOTION_PLANNER_MODEL ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+/**
+ * ⚖️ LEI 2026-09-10 — vazio de propósito: o modelo do planejador é o do SLOT do tenant.
+ *
+ * Era `process.env.PROMOTION_PLANNER_MODEL ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0"`. A env
+ * nunca esteve setada em prod (medido 2026-09-10), então o literal do Bedrock era o que rodava —
+ * modelo escolhido por nós, fatura do tenant. Mesma decisão (e mesmo trade-off de custo declarado)
+ * do `SPEC_GATE_MODEL` em `specSemanticGate.ts`.
+ */
+const PLANNER_MODEL = "";
 const PLANNER_TIMEOUT_MS = Number(process.env.PROMOTION_PLANNER_TIMEOUT_MS ?? "180000");
 const PLANNER_MAX_TOKENS = Number(process.env.PROMOTION_PLANNER_MAX_TOKENS ?? "8000");
 /** Trecho do arquivo primário enviado por projeto — o suficiente para o arquiteto ver de que camada é. */
@@ -402,9 +410,21 @@ export async function buildPromotionPlan(
   }
 
   const portrait = renderPortrait(opts.productName, candidates, knownEdges);
-  // BYOC do tenant/projeto (mesma autoridade da Bancada). O `model_id` default vem primeiro para o
-  // override do tenant vencer no spread.
+  // BYOC do tenant/projeto (mesma autoridade da Bancada).
   const llm = await resolveWorkbenchLlm({ projectId: candidates[0].projectId, tenantId: opts.tenantId });
+  const llmFields = agentsLlmFields(llm);
+  // 🔴 GRUPO C (2026-09-10): `model_id: PLANNER_MODEL` vinha ANTES do spread, e o comentário antigo
+  // dizia que era de propósito — o efeito real era o oposto do nome da constante: o modelo do tenant
+  // sobrescrevia o planejador barato, e a env `PROMOTION_PLANNER_MODEL` não fazia nada. Agora ele vem
+  // DEPOIS, mas só quando o provider do tenant consegue servi-lo (o default é id do Bedrock e o
+  // tenant pode estar no Foundry/Google) — senão o modelo do tenant continua valendo, com aviso.
+  const provider = String(
+    (llmFields.llm_config as { provider?: unknown } | undefined)?.provider ?? process.env.GENESIS_LLM_PROVIDER ?? "",
+  );
+  // `PLANNER_MODEL` é vazio desde a LEI 2026-09-10 (ver a constante) — o seletor fica no caminho
+  // para quando o "modelo econômico" for um campo do slot do tenant.
+  const especializado = specializedModelFor({ provider, model: PLANNER_MODEL });
+  if (PLANNER_MODEL && !especializado.model) console.warn(`[promotionPlanner] ${especializado.why}`);
 
   let raw: string;
   try {
@@ -413,10 +433,10 @@ export async function buildPromotionPlan(
       JSON.stringify({
         prompt_override: SYSTEM_PROMPT,
         user_message: portrait,
-        model_id: PLANNER_MODEL,
         max_tokens: PLANNER_MAX_TOKENS,
         temperature: 0,
-        ...agentsLlmFields(llm),
+        ...llmFields,
+        ...(especializado.model ? { model_id: especializado.model } : {}),
       }),
       PLANNER_TIMEOUT_MS,
     );

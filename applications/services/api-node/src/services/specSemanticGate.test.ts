@@ -120,11 +120,55 @@ describe("checkSpecIsMinimallyValid — veredito", () => {
     expect(r2.block.missing).toEqual(missing.slice(0, 3));
   });
 
-  it("o modelo default do gate é um inference profile COM VERSÃO (não o apelido)", async () => {
+  // ⚖️ LEI 2026-09-10: o gate NÃO impõe mais modelo nenhum. Havia aqui o literal
+  // `us.anthropic.claude-haiku-4-5-20251001-v1:0` (id do Bedrock escolhido pela Zentriz, cobrado na
+  // credencial do tenant); e a env `SPEC_GATE_MODEL` nunca esteve setada em prod, então era ele que
+  // rodava. Sem modelo declarado, o corpo não carrega `model_id` e vale o do slot do tenant.
+  it("o gate não impõe modelo: sem declaração, quem manda é o slot do tenant", async () => {
     delete process.env.SPEC_GATE_MODEL;
     mockVerdictOnce('{"is_spec": true, "confidence": 0.9, "reason": "ok"}');
     await checkSpecIsMinimallyValid({ title: "X", projectType: "backend_api", content: "spec real..." });
-    const sent = JSON.parse(String(httpPostMock.mock.calls[0][1])) as { model_id: string };
-    expect(sent.model_id).toMatch(/^us\.anthropic\.claude-haiku-4-5-\d{8}-v\d+:\d+$/);
+    const sent = JSON.parse(String(httpPostMock.mock.calls[0][1])) as { model_id?: string };
+    expect(sent.model_id).toBeUndefined();
+  });
+});
+
+/**
+ * GRUPO C (2026-09-10) — este gate mandava `model_id` e NENHUM campo de `llm`: ignorava o tenant
+ * inteiro, inclusive as credenciais. Sob um tenant que não é Bedrock ele pedia um id do Bedrock,
+ * tomava erro e, sendo **fail-open**, deixava passar TODA submissão sem juiz — em silêncio, que é
+ * exatamente como o bug do apelido sem versão sobreviveu em prod.
+ */
+describe("checkSpecIsMinimallyValid — a config de LLM do tenant chega ao gate", () => {
+  const corpo = () => JSON.parse(String(httpPostMock.mock.calls[0][1])) as Record<string, unknown>;
+
+  it("leva o llm_config E o modelo do tenant — nada nosso sobrescreve o slot", async () => {
+    delete process.env.SPEC_GATE_MODEL;
+    mockVerdictOnce('{"is_spec": true, "confidence": 0.9, "reason": "ok"}');
+    await checkSpecIsMinimallyValid({
+      title: "X", projectType: "backend_api", content: "spec real...",
+      llm: { model_id: "us.anthropic.claude-opus-5", llm_config: { provider: "bedrock", api_key: "k" } },
+    });
+    expect(corpo().llm_config).toEqual({ provider: "bedrock", api_key: "k" });
+    expect(corpo().model_id).toBe("us.anthropic.claude-opus-5");
+  });
+
+  it("tenant no Foundry: não pede um id do Bedrock — usa o modelo do tenant e o gate continua julgando", async () => {
+    delete process.env.SPEC_GATE_MODEL;
+    mockVerdictOnce('{"is_spec": false, "confidence": 0.95, "reason": "gibberish"}');
+    const r = await checkSpecIsMinimallyValid({
+      title: "X", projectType: "backend_api", content: "aaaa aaaa",
+      llm: { model_id: "claude-haiku-4-5", llm_config: { provider: "foundry", foundry_api_key: "k" } },
+    });
+    expect(corpo().model_id).toBe("claude-haiku-4-5");
+    expect(r.ok).toBe(false);
+  });
+
+  it("sem tenant resolvido continua funcionando (o intake não pode cair por causa do slot)", async () => {
+    delete process.env.SPEC_GATE_MODEL;
+    mockVerdictOnce('{"is_spec": true, "confidence": 0.9, "reason": "ok"}');
+    const r = await checkSpecIsMinimallyValid({ title: "X", projectType: "backend_api", content: "spec real..." });
+    expect(r.ok).toBe(true);
+    expect(corpo().llm_config).toBeUndefined();
   });
 });

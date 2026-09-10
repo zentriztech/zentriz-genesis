@@ -11,7 +11,7 @@ Endpoints:
   GET  /health          — healthcheck
 """
 import http.server, json, subprocess, os, logging, threading, time, uuid, hmac
-import base64, io, tarfile, re as _re
+import base64, io, tarfile, re as _re, shutil, tempfile
 import urllib.request, urllib.error
 from pathlib import Path
 from socketserver import ThreadingMixIn
@@ -131,18 +131,44 @@ _SANDBOX_ENV_ALLOW = {
 _SANDBOX_ENV_ALLOW_PREFIXES = ("XDG_",)
 
 
-def _sanitized_base_env() -> dict:
+# ⚖️ LEI dos slots (Jean, 2026-09-10) — TODA variável que decide POR QUAL CONTA a chamada de LLM
+# é faturada. Quando o job vem com slot do tenant, nenhuma delas pode sobreviver do host: a que
+# mais dói é `CLAUDE_CODE_USE_BEDROCK`, que faz o `claude` cair no instance role da EC2 da Zentriz
+# — verde, funcional e na conta ERRADA.
+_CLI_ROUTING_KEYS = (
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE",
+    "AWS_REGION", "AWS_DEFAULT_REGION",
+    "ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL",
+    "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "GOOGLE_APPLICATION_CREDENTIALS",
+    "ANTHROPIC_MODEL", "CLAUDE_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+)
+
+
+def _sanitized_base_env(slot_bound: bool = False) -> dict:
     """Env MÍNIMO por allowlist — SEM nenhum segredo de control plane.
-    Default-deny: só passa o que está explicitamente na allowlist."""
+    Default-deny: só passa o que está explicitamente na allowlist.
+
+    `slot_bound=True` (job com slot do tenant) remove TAMBÉM o roteamento de LLM do host: sem
+    isso o executor herdaria `CLAUDE_CODE_USE_BEDROCK=1` + IMDS e rodaria na identidade da
+    Zentriz mesmo com credencial do tenant no payload — a chave do slot ficaria decorativa.
+    """
     out = {}
     for k, v in os.environ.items():
         if k in _SANDBOX_ENV_ALLOW or k.startswith(_SANDBOX_ENV_ALLOW_PREFIXES):
             out[k] = v
-    # Bedrock via instance role (IMDS): garante região + flag mesmo se ausentes.
-    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
-    out.setdefault("AWS_REGION", region)
-    out.setdefault("AWS_DEFAULT_REGION", region)
-    out.setdefault("CLAUDE_CODE_USE_BEDROCK", os.environ.get("CLAUDE_CODE_USE_BEDROCK", "1"))
+    if slot_bound:
+        for k in _CLI_ROUTING_KEYS:
+            out.pop(k, None)
+    else:
+        # Caminho legado (payload sem slot): Bedrock via instance role (IMDS) — garante região
+        # + flag mesmo se ausentes. Mantido byte-a-byte para não regredir chamadores antigos.
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+        out.setdefault("AWS_REGION", region)
+        out.setdefault("AWS_DEFAULT_REGION", region)
+        out.setdefault("CLAUDE_CODE_USE_BEDROCK", os.environ.get("CLAUDE_CODE_USE_BEDROCK", "1"))
     out.setdefault("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
     out.setdefault("HOME", os.environ.get("HOME", "/home/ubuntu"))
     return out
@@ -204,10 +230,15 @@ def _resolve_scoped_token(payload: dict, project_id: str) -> str:
 
 
 def _build_cyborg_sandbox_env(project_id: str, prod_id: str, model_id: str,
-                              scoped_token: str, api_key: str = "") -> dict:
+                              scoped_token: str, api_key: str = "",
+                              slot_env: dict | None = None) -> dict:
     """Env do subprocesso Cyborg: base saneada + PATH dos wrappers + SÓ o token
-    de projeto escopado (nunca o admin). Os wrappers leem GENESIS_API_TOKEN/API_BASE_URL."""
-    env = _sanitized_base_env()
+    de projeto escopado (nunca o admin). Os wrappers leem GENESIS_API_TOKEN/API_BASE_URL.
+
+    `slot_env` (⚖️ LEI 2026-09-10) é o roteamento de LLM DO SLOT do tenant — provider, modelo e
+    credencial. Quando presente, ele é a ÚNICA fonte: o env do host é limpo antes de aplicá-lo.
+    """
+    env = _sanitized_base_env(slot_bound=bool(slot_env))
     # Diretório dos wrappers zentriz-* no PATH. Env-driven p/ Host B (rota B / Fase 3),
     # onde os wrappers vivem em /opt/hostb/wrappers (não há repo /opt/zentriz-genesis lá).
     wrapper_dir = os.environ.get("CYBORG_WRAPPER_DIR", "/opt/zentriz-genesis/scripts/cyborg-wrappers")
@@ -227,7 +258,295 @@ def _build_cyborg_sandbox_env(project_id: str, prod_id: str, model_id: str,
     if api_key:
         env["ANTHROPIC_API_KEY"] = api_key
         env["CLAUDE_API_KEY"] = api_key
+    if slot_env:
+        # Já veio limpo de `_sanitized_base_env(slot_bound=True)`; repetir a limpeza cobre o
+        # `model_id` escrito acima, que pode ser de OUTRO slot que o desta tentativa.
+        for k in _CLI_ROUTING_KEYS:
+            env.pop(k, None)
+        env.update(slot_env)
     return env
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ⚖️ LEI dos slots no EXECUTOR (Jean, 2026-09-10):
+# *"todos devem usar identidade, credencial e modelos dos slots inclusive spawn_engineer,
+#  sempre testando se funciona e em caso de nao funcionar testa o proximo"*.
+#
+# O `claude` CLI não aceita envelope de credencial como os agents — ele se roteia por ENV.
+# Estas funções traduzem o envelope do slot (o mesmo que viaja em `/invoke/raw`) para as
+# variáveis que o CLI entende, testam o slot com uma chamada REAL mínima antes de gastar uma
+# sessão de 30-60 min nele, e caem para a próxima contingência quando o slot não responde.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _cli_env_from_slot(llm: dict, model_id: str = "", fallback_id: str = "",
+                       creds_dir: str = "") -> dict | None:
+    """Roteamento do `claude` CLI para a identidade do slot. `None` ⇒ slot inutilizável AQUI.
+
+    Devolve `None` (e não um env parcial) em três casos, todos deliberados:
+    - **provider que o CLI não fala** (`openai`, `azure_openai`, Gemini): o CLI só entende o
+      protocolo Anthropic. Um slot desses continua servindo Bancada/Fábrica — só não dirige o
+      executor, e por isso é PULADO em vez de derrubar o job.
+    - **slot sem credencial própria** (bedrock/anthropic "legado"): rodar assim é rodar no
+      instance role da Zentriz. É exatamente a fatura que a LEI proíbe.
+    - **Vertex sem diretório temporário**: a service account precisa virar arquivo em disco
+      (`GOOGLE_APPLICATION_CREDENTIALS` é um caminho), e ele tem de ser apagado depois.
+    """
+    prov = (llm.get("provider") or "").strip().lower()
+    model = (model_id or llm.get("model") or "").strip()
+    if not prov or not model:
+        return None
+    out: dict = {}
+    if prov == "bedrock":
+        key = (llm.get("aws_access_key_id") or "").strip()
+        sec = (llm.get("aws_secret_access_key") or "").strip()
+        if not key or not sec:
+            return None
+        region = (llm.get("aws_region") or "us-east-1").strip()
+        out.update({"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_ACCESS_KEY_ID": key,
+                    "AWS_SECRET_ACCESS_KEY": sec,
+                    "AWS_REGION": region, "AWS_DEFAULT_REGION": region})
+        tok = (llm.get("aws_session_token") or "").strip()
+        if tok:
+            out["AWS_SESSION_TOKEN"] = tok
+    elif prov == "anthropic":
+        key = (llm.get("api_key") or "").strip()
+        if not key:
+            return None
+        out["ANTHROPIC_API_KEY"] = key
+        out["CLAUDE_API_KEY"] = key
+        base = (llm.get("anthropic_base_url") or "").strip()
+        if base:
+            out["ANTHROPIC_BASE_URL"] = base
+    elif prov == "foundry":
+        key = (llm.get("foundry_api_key") or "").strip()
+        base = (llm.get("foundry_base_url") or "").strip()
+        res = (llm.get("foundry_resource") or "").strip()
+        if not key or not (base or res):
+            return None
+        out["CLAUDE_CODE_USE_FOUNDRY"] = "1"
+        out["ANTHROPIC_FOUNDRY_API_KEY"] = key
+        if base:
+            out["ANTHROPIC_FOUNDRY_BASE_URL"] = base.rstrip("/")
+        if res:
+            out["ANTHROPIC_FOUNDRY_RESOURCE"] = res
+    elif prov == "google":
+        # Só Claude no Model Garden dirige o CLI — Gemini fala outro protocolo (o slot segue
+        # válido para os agents, que usam o SDK OpenAI contra a Gemini API).
+        if "claude" not in model.lower():
+            return None
+        proj = (llm.get("vertex_project_id") or "").strip()
+        sa = (llm.get("vertex_service_account_json") or "").strip()
+        if not proj or not sa or not creds_dir:
+            return None
+        try:
+            sa_path = Path(creds_dir) / "vertex-sa.json"
+            sa_path.write_text(sa, encoding="utf-8")
+            os.chmod(sa_path, 0o600)
+        except Exception as e:
+            log.error(f"[slot] falha ao materializar service account do Vertex: {type(e).__name__}")
+            return None
+        out.update({"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": proj,
+                    "CLOUD_ML_REGION": (llm.get("vertex_location") or "us-east5").strip(),
+                    "GOOGLE_APPLICATION_CREDENTIALS": str(sa_path)})
+    else:
+        return None
+    out["ANTHROPIC_MODEL"] = model
+    out["CLAUDE_MODEL"] = model
+    # O CLI usa um modelo "pequeno e rápido" para tarefas internas (resumo de contexto etc.).
+    # Herdar o do host apontaria para um id que a conta do TENANT não serve — e o job morreria
+    # no meio, não na largada. Sem fallback declarado, o próprio modelo principal serve.
+    small = (fallback_id or "").strip() or model
+    out["ANTHROPIC_SMALL_FAST_MODEL"] = small
+    out["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = small
+    out["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
+    return out
+
+
+def _slot_cli_attempts(payload: dict, creds_dir: str = "") -> list:
+    """Fila `[(slot_env, rótulo), …]` na ordem do tenant: o slot escolhido e depois as
+    contingências. Lista VAZIA ⇒ o payload não trouxe slot (chamador legado).
+
+    O rótulo (`provider/modelo`) é o que vai para o log: nunca contém credencial.
+    """
+    brutos = []
+    principal = payload.get("llm_config")
+    if isinstance(principal, dict) and principal:
+        brutos.append((principal, (payload.get("model_id") or "").strip(),
+                       (payload.get("model_id_fallback") or "").strip()))
+    for c in (payload.get("llm_candidates") or []):
+        if isinstance(c, dict) and c:
+            brutos.append((c, "", (c.get("model_rework") or "").strip()))
+    out, vistos = [], set()
+    for llm, model_id, fb in brutos:
+        prov = (llm.get("provider") or "").strip().lower()
+        model = (model_id or llm.get("model") or "").strip()
+        chave = (prov, model)
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        env = _cli_env_from_slot(llm, model, fb, creds_dir)
+        if env is None:
+            log.warning(f"[slot] {prov or '?'}/{model or '?'} não dirige o executor — pulado")
+            continue
+        out.append((env, f"{prov}/{model}"))
+    return out
+
+
+def _scrub_cli_secrets(text: str, env: dict) -> str:
+    """Remove do texto qualquer valor secreto do env — mensagens de erro do CLI chegam ao portal."""
+    for k in ("AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN",
+              "ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "ANTHROPIC_FOUNDRY_API_KEY",
+              "GENESIS_API_TOKEN", "GENESIS_TOKEN"):
+        v = (env.get(k) or "").strip()
+        if len(v) >= 8:
+            text = text.replace(v, "***")
+    return text
+
+
+def _classify_cli_failure(text: str) -> str:
+    """Falha DO SLOT (credencial/modelo/cota/rede) → o nome dela; falha do trabalho → "".
+
+    Só falha de slot autoriza tentar o próximo: repetir noutro provider um erro de tarefa paga
+    duas vezes pelo mesmo defeito.
+    """
+    t = (text or "").lower()
+    if any(s in t for s in ("accessdenied", "not authorized", "unauthorizedoperation", "401",
+                            "403", "invalid api key", "invalid_api_key", "invalid x-api-key",
+                            "authenticationerror", "expiredtoken", "credential")):
+        return "auth"
+    if any(s in t for s in ("throttl", "429", "too many requests", "quota", "rate limit",
+                            "resource_exhausted", "serviceunavailable", "overloaded")):
+        return "quota"
+    if any(s in t for s in ("model_not_found", "does not exist", "deploymentnotfound",
+                            "could not find model", "invalid model", "validationexception")):
+        return "model"
+    if any(s in t for s in ("connection refused", "econnrefused", "getaddrinfo", "enotfound",
+                            "network error", "timed out", "etimedout")):
+        return "network"
+    return ""
+
+
+def _probe_cli_slot(claude_bin: str, env: dict, cwd: str, timeout: int = 120) -> tuple:
+    """Testa o slot com uma chamada REAL mínima. `(ok, motivo_higienizado)`.
+
+    ⚖️ *"sempre testando se funciona"*. Custa alguns tokens e vale a pena: sem o teste, um slot
+    com credencial vencida só se revela depois de o Cyborg reservar o job pesado e queimar a
+    janela de 60 min — e aí não sobra tempo para a contingência.
+
+    Mesmas flags da sessão real de propósito: um probe sem `--dangerously-skip-permissions`
+    poderia passar num ambiente onde a sessão real trava pedindo permissão.
+    """
+    try:
+        r = subprocess.run([claude_bin, "--dangerously-skip-permissions", "-p"],
+                           cwd=cwd, env=env, input="Responda apenas: OK",
+                           capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"sem resposta em {timeout}s"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+    if r.returncode == 0 and (r.stdout or "").strip():
+        return True, ""
+    detalhe = ((r.stderr or "") + " " + (r.stdout or "")).strip()[-400:]
+    return False, _scrub_cli_secrets(detalhe or f"rc={r.returncode} sem saída", env)
+
+
+def _run_claude_cli(cmd: list, cwd: str, env: dict, entrada: str, timeout: int) -> dict:
+    """Executa o CLI e normaliza o resultado — inclusive timeout/exceção — num dict só."""
+    t0 = time.time()
+    try:
+        r = subprocess.run(cmd, cwd=cwd, env=env, input=entrada,
+                           capture_output=True, text=True, timeout=timeout)
+        return {"ok": True, "stdout": r.stdout or "", "stderr": r.stderr or "",
+                "rc": r.returncode, "duration_s": int(time.time() - t0)}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "timeout": True, "error": f"timeout {timeout}s",
+                "stdout": "", "stderr": "", "rc": -1, "duration_s": int(time.time() - t0)}
+    except Exception as e:
+        import traceback
+        log.error(f"[cli] subprocess exception: {e}\n{traceback.format_exc()}")
+        return {"ok": False, "error": f"{type(e).__name__}: {e}",
+                "stdout": "", "stderr": "", "rc": -1, "duration_s": int(time.time() - t0)}
+
+
+def _slot_envs(payload: dict, project_id: str, prod_id: str, model_id: str,
+               scoped_token: str, creds_dir: str, com_wrappers: bool = True) -> list:
+    """Envs COMPLETOS de sandbox, um por slot utilizável, na ordem do tenant.
+
+    Três saídas distintas, de propósito:
+    - **fila não-vazia** — o caminho da LEI: cada env roda na identidade de um slot.
+    - **lista vazia** — o payload trouxe slot(s), mas nenhum dirige o CLI. Fail-closed: melhor o
+      job falhar dizendo o motivo do que rodar de graça na conta da Zentriz.
+    - **[(env_legado, "")]** — payload SEM slot (Cyborg V2, chamadores antigos): comportamento
+      de hoje preservado, com aviso no log para que a dívida seja visível.
+
+    `com_wrappers=False` é o TSK-FULL-TEST: aquele job não usa os wrappers `zentriz-*` nem token
+    de projeto, e ganhá-los agora seria mudança de comportamento sem pedido.
+    """
+    def _montar(slot_env: dict | None = None) -> dict:
+        if com_wrappers:
+            return _build_cyborg_sandbox_env(project_id, prod_id, model_id, scoped_token,
+                                             slot_env=slot_env)
+        env = _sanitized_base_env(slot_bound=bool(slot_env))
+        if slot_env:
+            env.update(slot_env)
+        return env
+
+    tentativas = [(_montar(slot_env), label)
+                  for slot_env, label in _slot_cli_attempts(payload, creds_dir)]
+    if tentativas:
+        return tentativas
+    if payload.get("llm_config"):
+        return []
+    log.warning(f"[slot] {project_id[:8]}: payload sem slot de LLM — o executor vai rodar na "
+                "identidade do HOST (conta da Zentriz), contrariando a LEI de 2026-09-10")
+    return [(_montar(), "")]
+
+
+def _rodar_com_cascata_de_slots(payload: dict, project_id: str, prod_id: str, model_id: str,
+                                scoped_token: str, creds_dir: str, claude_bin: str, cmd: list,
+                                cwd: str, entrada: str, timeout: int, tag: str) -> tuple:
+    """Testa e roda o executor slot a slot. Devolve `(http_code, corpo)`.
+
+    ⚖️ *"sempre testando se funciona e em caso de nao funcionar testa o proximo"*.
+    """
+    tentativas = _slot_envs(payload, project_id, prod_id, model_id, scoped_token, creds_dir)
+    falhas: list = []
+    for i, (env, label) in enumerate(tentativas):
+        ultimo = (i == len(tentativas) - 1)
+        if label:
+            ok, motivo = _probe_cli_slot(claude_bin, env, cwd)
+            if not ok:
+                falhas.append(f"{label}: {motivo}")
+                log.warning(f"[{tag}] {project_id[:8]}: slot {label} reprovou no teste "
+                            f"({motivo[:200]}) — tentando o próximo")
+                continue
+            log.info(f"[{tag}] {project_id[:8]}: slot {label} passou no teste")
+        log.info(f"[{tag}] {project_id[:8]}: sessão iniciada (env sandbox). cwd={cwd} "
+                 f"slot={label or 'host (legado)'} timeout={timeout}s")
+        r = _run_claude_cli(cmd, cwd, env, entrada, timeout)
+        if r.get("timeout"):
+            return 408, {"ok": False, "error": r["error"], "stdout": "", "stderr": "",
+                         "llm_slot": label}
+        if not r["ok"]:
+            return 500, {"ok": False, "error": r["error"], "llm_slot": label}
+        stderr = _scrub_cli_secrets(r["stderr"], env)
+        classe = _classify_cli_failure(stderr) if r["rc"] != 0 else ""
+        # Cascata pós-execução SÓ quando o slot morreu na largada (rc≠0 e nenhuma saída). Uma
+        # sessão que produziu saída já mexeu no repositório: repetir noutro slot duplicaria
+        # commits e gastaria outra janela de 60 min pelo mesmo defeito.
+        if classe and not (r["stdout"] or "").strip() and label and not ultimo:
+            falhas.append(f"{label}: {classe}")
+            log.warning(f"[{tag}] {project_id[:8]}: slot {label} caiu na largada ({classe}) — "
+                        "tentando o próximo")
+            continue
+        log.info(f"[{tag}] {project_id[:8]}: concluído em {r['duration_s']}s (rc={r['rc']}, "
+                 f"stdout={len(r['stdout'])} chars, slot={label or 'host (legado)'})")
+        return 200, {"ok": True, "stdout": r["stdout"], "stderr": stderr[-4000:], "rc": r["rc"],
+                     "duration_s": r["duration_s"], "llm_slot": label,
+                     "llm_slots_descartados": falhas}
+    return 502, {"ok": False, "llm_slots_descartados": falhas,
+                 "error": "nenhum slot de LLM do tenant conseguiu rodar o executor — "
+                          "revise Configurações → LLM (provider, modelo e credencial)"}
 
 # Mapeamento group → RUNBOOK file (derivado do prefixo do project_type)
 RUNBOOK_MAP = {
@@ -843,41 +1162,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not scoped_token:
             self._json(502, {"ok": False, "error": "sandbox: falha ao obter token de projeto escopado (fail-closed)"})
             return
-        env = _build_cyborg_sandbox_env(project_id, prod_id, model_id, scoped_token)
-
-        log.info(f"[cyborg-engineer] {project_id[:8]}: sessão longa iniciada (env sandbox). cwd={cwd} model={model_id} timeout={timeout}s")
 
         # Executar Claude Code com system prompt + user prompt via stdin
         cmd = [_claude_bin, "--dangerously-skip-permissions", "-p"]
         if system_prompt:
             cmd.extend(["--append-system-prompt", system_prompt])
 
-        t0 = time.time()
+        creds_dir = tempfile.mkdtemp(prefix="cyborg-slot-")
         try:
-            r = subprocess.run(cmd, cwd=cwd, env=env, input=user_prompt,
-                              capture_output=True, text=True, timeout=timeout)
-            claude_stdout = r.stdout or ""
-            claude_stderr = r.stderr or ""
-            claude_rc = r.returncode
-        except subprocess.TimeoutExpired:
-            self._json(408, {"ok": False, "error": f"timeout {timeout}s", "stdout": "", "stderr": ""})
-            return
-        except Exception as e:
-            import traceback
-            log.error(f"[cyborg-engineer] {project_id[:8]}: subprocess exception: {e}\n{traceback.format_exc()}")
-            self._json(500, {"ok": False, "error": f"{type(e).__name__}: {e}"})
-            return
-
-        duration_s = int(time.time() - t0)
-        log.info(f"[cyborg-engineer] {project_id[:8]}: concluído em {duration_s}s (rc={claude_rc}, stdout={len(claude_stdout)} chars)")
-
-        self._json(200, {
-            "ok": True,
-            "stdout": claude_stdout,
-            "stderr": claude_stderr[-4000:],
-            "rc": claude_rc,
-            "duration_s": duration_s,
-        })
+            code, body = _rodar_com_cascata_de_slots(
+                payload, project_id, prod_id, model_id, scoped_token, creds_dir,
+                _claude_bin, cmd, cwd, user_prompt, timeout, tag="cyborg-engineer")
+        finally:
+            shutil.rmtree(creds_dir, ignore_errors=True)
+        self._json(code, body)
 
     # ── /cyborg-claude-code — spawn Claude Code CLI para aplicar 1 ação do Cyborg ─
     def _handle_cyborg_claude_code(self):
@@ -919,7 +1217,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(502, {"action_id": action_id, "status": "FAILED",
                              "error": "sandbox: falha ao obter token de projeto escopado (fail-closed)"})
             return
-        env = _build_cyborg_sandbox_env(project_id, prod_id, model_id, scoped_token)
         # FT-18 fix (2026-07-02): CLAUDE_BIN precisa apontar para binário real.
         # Default do módulo era ~/.local/bin/claude (root não tem); host usa /usr/bin/claude.
         _claude_bin = CLAUDE_BIN
@@ -936,6 +1233,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                              "Defina CLAUDE_BIN=<path> no genesis-fts.service.",
                 })
                 return
+
+        # ⚖️ LEI dos slots: identidade/credencial/modelo vêm do tenant, e o slot é TESTADO antes
+        # de a ação rodar — reprovado, cai para a próxima contingência. Sem slot no payload
+        # (Cyborg V2 antigo), `_slot_envs` devolve o env legado e nada muda.
+        creds_dir = tempfile.mkdtemp(prefix="cyborg-slot-")
+        env, slot_label, slot_falhas = None, "", []
+        for _env, _label in _slot_envs(payload, project_id, prod_id, model_id, scoped_token, creds_dir):
+            if _label:
+                _ok, _motivo = _probe_cli_slot(_claude_bin, _env, cwd)
+                if not _ok:
+                    slot_falhas.append(f"{_label}: {_motivo}")
+                    log.warning(f"[cyborg-cc] {action_id}: slot {_label} reprovou no teste "
+                                f"({_motivo[:200]}) — tentando o próximo")
+                    continue
+            env, slot_label = _env, _label
+            break
+        if env is None:
+            shutil.rmtree(creds_dir, ignore_errors=True)
+            self._json(502, {"action_id": action_id, "status": "FAILED",
+                             "llm_slots_descartados": slot_falhas,
+                             "error": "nenhum slot de LLM do tenant conseguiu rodar o executor — "
+                                      "revise Configurações → LLM (provider, modelo e credencial)"})
+            return
 
         # FT-18 F8: snapshot antes das mudanças — usado depois para detectar refator suspeito.
         # Estratégia sem git: hash + tamanho de cada arquivo dentro de apps/src/. Se após execução
@@ -963,19 +1283,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cmd.extend(["--append-system-prompt", system_prompt])
             log.info(f"[cyborg-cc] {action_id}: system_prompt injetado ({len(system_prompt)} chars)")
         prompt_text = prompt_file.read_text(encoding="utf-8")
-        log.info(f"[cyborg-cc] {action_id}: cwd={cwd} model={model_id or 'default'} bin={_claude_bin} timeout={timeout}s")
+        log.info(f"[cyborg-cc] {action_id}: cwd={cwd} model={model_id or 'default'} "
+                 f"slot={slot_label or 'host (legado)'} bin={_claude_bin} timeout={timeout}s")
         t0 = time.time()
         try:
             r = subprocess.run(cmd, cwd=cwd, env=env, input=prompt_text,
                               capture_output=True, text=True, timeout=timeout)
             claude_stdout = (r.stdout or "")[-8000:]
-            claude_stderr = (r.stderr or "")[-2000:]
+            claude_stderr = _scrub_cli_secrets(r.stderr or "", env)[-2000:]
             claude_rc     = r.returncode
         except subprocess.TimeoutExpired:
+            shutil.rmtree(creds_dir, ignore_errors=True)
             self._json(408, {"action_id": action_id, "status": "FAILED", "error": f"timeout {timeout}s"})
             return
         except Exception as e:
             import traceback
+            shutil.rmtree(creds_dir, ignore_errors=True)
             log.error(f"[cyborg-cc] {action_id}: subprocess exception: {e}\n{traceback.format_exc()}")
             self._json(500, {"action_id": action_id, "status": "FAILED", "error": f"{type(e).__name__}: {e}"})
             return
@@ -1044,9 +1367,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 f"Ações cirúrgicas não criam route groups nem reorganizam estrutura. FAILED forçado."
             )
 
+        # A service account do Vertex (quando houver) vive só enquanto o job roda.
+        shutil.rmtree(creds_dir, ignore_errors=True)
+
         self._json(200, {
             "action_id": action_id,
             "status": status,
+            "llm_slot": slot_label,
+            "llm_slots_descartados": slot_falhas,
             "refactor_suspect": refactor_suspect,
             "files_changed": total_changed,
             "files_added": added[:20],
@@ -1290,34 +1618,60 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
         wrapper_prompt = f"Você está em: {apps_path}\nDiretório de projeto: {project_path}\n\n{prompt}"
 
         # Lei 8 (Fase 2): SANDBOX por-job — env mínimo, SEM segredos do FTS. Este path
-        # (full-test interno) não usa wrappers/token Genesis; usa a api_key do payload.
-        subprocess_env = _sanitized_base_env()
-        if api_key:
-            subprocess_env["ANTHROPIC_API_KEY"] = api_key
-            subprocess_env["CLAUDE_API_KEY"]     = api_key
-            log.info("[FT-13] api_key injetada no subprocess claude (len=%d)", len(api_key))
-
+        # (full-test interno) não usa wrappers/token Genesis.
+        # ⚖️ LEI dos slots: quando o runner manda o envelope (`llm_config`), o TSK-FULL-TEST roda
+        # na identidade do tenant e o slot é testado antes. Sem envelope, cai no `api_key` do
+        # payload como sempre — comportamento antigo preservado para chamadores que não migraram.
+        creds_dir = tempfile.mkdtemp(prefix="fulltest-slot-")
         try:
-            result = subprocess.run(
-                [CLAUDE_BIN, "--print", "--dangerously-skip-permissions", wrapper_prompt],
-                capture_output=True, text=True, timeout=3600, cwd=str(apps_path),
-                env=subprocess_env,
-            )
-            output   = (result.stdout or "") + (result.stderr or "")
-            approved = any(w in output.upper() for w in
-                           ["APROVADO", "ALL CHECKS", "QA_PASS", "PASSED", "ALL PASS",
-                            "STATUS FINAL: APROVADO", "✅ APROVADO", "APPROVED"])
-            log.info("Concluída: approved=%s rc=%d len=%d", approved, result.returncode, len(output))
-            out_excerpt = output[:8000] + "\n...\n" + output[-4000:] if len(output) > 12000 else output
-            self._json(200, {"status": "ok", "output": out_excerpt,
-                             "approved": approved, "returncode": result.returncode})
-        except subprocess.TimeoutExpired:
-            self._json(200, {"status": "timeout", "output": "Timeout após 3600s", "approved": False})
-        except FileNotFoundError:
-            self._json(500, {"status": "error",
-                             "output": f"claude CLI não encontrado: {CLAUDE_BIN}", "approved": False})
-        except Exception as e:
-            self._json(500, {"status": "error", "output": str(e), "approved": False})
+            subprocess_env, slot_label, slot_falhas = None, "", []
+            for _env, _label in _slot_envs(body, project_id, "", body.get("model_id", ""), "",
+                                           creds_dir, com_wrappers=False):
+                if _label:
+                    _ok, _motivo = _probe_cli_slot(CLAUDE_BIN, _env, str(apps_path))
+                    if not _ok:
+                        slot_falhas.append(f"{_label}: {_motivo}")
+                        log.warning("[full-test] slot %s reprovou no teste (%s) — próximo",
+                                    _label, _motivo[:200])
+                        continue
+                subprocess_env, slot_label = _env, _label
+                break
+            if subprocess_env is None:
+                self._json(502, {"status": "error", "approved": False,
+                                 "llm_slots_descartados": slot_falhas,
+                                 "output": "nenhum slot de LLM do tenant conseguiu rodar o "
+                                           "TSK-FULL-TEST — revise Configurações → LLM"})
+                return
+            if not slot_label and api_key:
+                subprocess_env["ANTHROPIC_API_KEY"] = api_key
+                subprocess_env["CLAUDE_API_KEY"]     = api_key
+                log.info("[FT-13] api_key injetada no subprocess claude (len=%d)", len(api_key))
+
+            try:
+                result = subprocess.run(
+                    [CLAUDE_BIN, "--print", "--dangerously-skip-permissions", wrapper_prompt],
+                    capture_output=True, text=True, timeout=3600, cwd=str(apps_path),
+                    env=subprocess_env,
+                )
+                output   = _scrub_cli_secrets((result.stdout or "") + (result.stderr or ""),
+                                              subprocess_env)
+                approved = any(w in output.upper() for w in
+                               ["APROVADO", "ALL CHECKS", "QA_PASS", "PASSED", "ALL PASS",
+                                "STATUS FINAL: APROVADO", "✅ APROVADO", "APPROVED"])
+                log.info("Concluída: approved=%s rc=%d len=%d slot=%s", approved,
+                         result.returncode, len(output), slot_label or "host (legado)")
+                out_excerpt = output[:8000] + "\n...\n" + output[-4000:] if len(output) > 12000 else output
+                self._json(200, {"status": "ok", "output": out_excerpt, "llm_slot": slot_label,
+                                 "approved": approved, "returncode": result.returncode})
+            except subprocess.TimeoutExpired:
+                self._json(200, {"status": "timeout", "output": "Timeout após 3600s", "approved": False})
+            except FileNotFoundError:
+                self._json(500, {"status": "error",
+                                 "output": f"claude CLI não encontrado: {CLAUDE_BIN}", "approved": False})
+            except Exception as e:
+                self._json(500, {"status": "error", "output": str(e), "approved": False})
+        finally:
+            shutil.rmtree(creds_dir, ignore_errors=True)
 
     # ── /launch-cyborg (validação externa autônoma) ────────────────────────────
 

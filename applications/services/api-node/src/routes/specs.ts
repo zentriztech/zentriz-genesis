@@ -13,6 +13,7 @@ import { enrichSpecs, type SpecForEnrichment } from "../services/specEnrichment.
 import { computeFactoryCertificate, computeFactoryCertificates, factoryCertificateEnabled } from "../services/factoryCertificate.js";
 import { validateIntake } from "../services/intakeGate.js";
 import { checkSpecIsMinimallyValid } from "../services/specSemanticGate.js";
+import { resolveWorkbenchLlm, agentsLlmFields } from "../services/tenantLlmConfig.js";
 import { recordSelfApproval } from "../services/governanceAudit.js";
 import {
   ZIP_TEXT_EXTS,
@@ -763,10 +764,18 @@ export async function specRoutes(app: FastifyInstance) {
       });
     }
 
+    // 🔴 GRUPO C (2026-09-10): o gate semântico rodava SEM a config de LLM do tenant — num tenant
+    // que não é Bedrock ele pedia um id do Bedrock, falhava e, sendo fail-open, passava tudo sem
+    // juiz. A resolução falha silenciosa de propósito: o gate é acessório do intake, não pode
+    // derrubar o envio de spec por causa de um slot mal configurado.
+    const gateLlm = await resolveWorkbenchLlm({ tenantId: getUser(request).tenantId ?? null })
+      .then(agentsLlmFields)
+      .catch(() => ({} as Record<string, unknown>));
     const semantic = await checkSpecIsMinimallyValid({
       title: intake.title,
       projectType: intake.projectType,
       content: gateContent,
+      llm: gateLlm,
     });
     if (!semantic.ok) {
       request.log.warn(

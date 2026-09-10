@@ -36,6 +36,7 @@ import GitHubIcon from "@mui/icons-material/GitHub";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import PsychologyIcon from "@mui/icons-material/Psychology";
+import SmartToyIcon from "@mui/icons-material/SmartToy";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import CloudIcon from "@mui/icons-material/Cloud";
 import DesignServicesIcon from "@mui/icons-material/DesignServices";
@@ -130,6 +131,11 @@ const navZentriz: NavEntry[] = [
   { label: "Apps (todos os tenants)", href: "/zentriz/projects", icon: <FolderIcon />, color: "#F59E0B" },
   { label: "Planos",        href: "/zentriz/plans",     icon: <SettingsIcon />,       color: "#64748B" },
   { label: "Financeiro",    href: "/zentriz/finance",   icon: <AccountBalanceIcon />, color: "#22C55E" },
+  // ⚖️ Conta de GESTÃO (Jean, 2026-09-10): LLM próprio, custeado pela Zentriz, para os agentes
+  // internos — e o agente de operações que o consome. Ficam no topo, com as demais visões globais,
+  // porque existem justamente quando NÃO há tenant selecionado (não entram em HIDE_WHEN_NO_TENANT).
+  { label: "LLM da Zentriz",       href: "/zentriz/llm",       icon: <PsychologyIcon />, color: "#6366F1" },
+  { label: "Agente de operações",  href: "/zentriz/ops-agent", icon: <SmartToyIcon />,   color: "#0EA5E9" },
   { label: "Auto Care",     href: "/autocare",          icon: <HealthAndSafetyIcon />, color: "#EF4444" },
   {
     group: "Configuração",

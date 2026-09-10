@@ -2853,22 +2853,14 @@ def _project_id() -> str | None:
     return os.environ.get("PROJECT_ID")
 
 
-def _build_message_envelope(
-    request_id: str,
-    agent: str,
-    variant: str,
-    mode: str,
-    task_id: str | None,
-    task: str,
-    inputs: dict,
-    existing_artifacts: list | None = None,
-    limits: dict | None = None,
-) -> dict:
-    """Monta MessageEnvelope completo para o Enforcer (project_id, mode, task_id, inputs, existing_artifacts, limits)."""
-    project_id = _project_id() or "default"
-    # FT-13: propaga provider, model e credenciais para o agents container via envelope.
-    # Credenciais AWS são seguras neste contexto: chamada interna container-to-container.
-    # api_key OpenAI/Anthropic também incluída para tenants com provider não-Bedrock.
+def _llm_envelope_do_run() -> dict:
+    """Envelope de LLM DESTE run — provider, modelo e credencial.
+
+    O env do processo runner é escrito por `runner_server` a partir do SLOT do tenant (⚖️ LEI
+    2026-09-10), então ler daqui é ler o slot. Extraído de `_build_message_envelope` porque o
+    TSK-FULL-TEST precisa do MESMO envelope: ele roda `claude` no host e, sem isto, o executor
+    caía na identidade da EC2 da Zentriz enquanto o resto do run rodava na conta do tenant.
+    """
     _llm_config: dict = {}
     _provider = os.environ.get("GENESIS_LLM_PROVIDER", "").strip()
     _model    = os.environ.get("CLAUDE_MODEL", "").strip()
@@ -2885,10 +2877,58 @@ def _build_message_envelope(
             _llm_config["aws_access_key_id"]     = _ak
             _llm_config["aws_secret_access_key"] = _sk
             _llm_config["aws_region"]            = _rg
-    elif _provider in ("anthropic", "openai", "azure_openai"):
+    elif _provider == "google":
+        # Gemini pelo endpoint OpenAI-compatível: nomes que `_build_google_client` procura.
+        _gk = os.environ.get("GOOGLE_API_KEY", "").strip()
+        _gb = os.environ.get("GOOGLE_BASE_URL", "").strip()
+        if _gk: _llm_config["google_api_key"]  = _gk
+        if _gb: _llm_config["google_base_url"] = _gb
+        for _src, _dst in (("GOOGLE_VERTEX_PROJECT", "vertex_project_id"),
+                           ("GOOGLE_VERTEX_LOCATION", "vertex_location"),
+                           ("GOOGLE_SERVICE_ACCOUNT_JSON", "vertex_service_account_json")):
+            _v = os.environ.get(_src, "").strip()
+            if _v: _llm_config[_dst] = _v
+    elif _provider == "azure_openai":
+        for _src, _dst in (("AZURE_OPENAI_API_KEY", "api_key"),
+                           ("AZURE_OPENAI_ENDPOINT", "azure_endpoint"),
+                           ("AZURE_OPENAI_DEPLOYMENT", "azure_deployment"),
+                           ("AZURE_OPENAI_API_VERSION", "azure_api_version")):
+            _v = os.environ.get(_src, "").strip()
+            if _v: _llm_config[_dst] = _v
+    elif _provider == "foundry":
+        # Azure AI Foundry: `_build_foundry_client` procura estes nomes no envelope antes
+        # de cair no env do container. Propagá-los é o que faz o slot do tenant valer para
+        # a Fábrica (BYOC); ausentes, o agents usa a identidade do próprio host.
+        _fk = os.environ.get("ANTHROPIC_FOUNDRY_API_KEY", "").strip()
+        _fr = os.environ.get("ANTHROPIC_FOUNDRY_RESOURCE", "").strip()
+        _fb = os.environ.get("ANTHROPIC_FOUNDRY_BASE_URL", "").strip()
+        if _fk: _llm_config["foundry_api_key"]  = _fk
+        if _fr: _llm_config["foundry_resource"] = _fr
+        if _fb: _llm_config["foundry_base_url"] = _fb
+    elif _provider in ("anthropic", "openai"):  # azure_openai tem ramo próprio acima
         _api_key = os.environ.get("CLAUDE_API_KEY", "").strip()
         if _api_key:
             _llm_config["api_key"] = _api_key
+    return _llm_config
+
+
+def _build_message_envelope(
+    request_id: str,
+    agent: str,
+    variant: str,
+    mode: str,
+    task_id: str | None,
+    task: str,
+    inputs: dict,
+    existing_artifacts: list | None = None,
+    limits: dict | None = None,
+) -> dict:
+    """Monta MessageEnvelope completo para o Enforcer (project_id, mode, task_id, inputs, existing_artifacts, limits)."""
+    project_id = _project_id() or "default"
+    # FT-13: propaga provider, model e credenciais para o agents container via envelope.
+    # Credenciais AWS são seguras neste contexto: chamada interna container-to-container.
+    # api_key OpenAI/Anthropic também incluída para tenants com provider não-Bedrock.
+    _llm_config = _llm_envelope_do_run()
 
     return {
         "request_id": request_id,
@@ -4869,11 +4909,17 @@ Execute agora sem pedir confirmação.
                                 Path(_host_root) / project_id / "project" / "full-test-prompt.md"
                             ) if _host_root else ""
                             # FT-13: incluir api_key do projeto para que o full-test-server use a chave correta
+                            # ⚖️ LEI 2026-09-10: `api_key` só cobria slot anthropic/openai — com
+                            # slot bedrock/foundry/vertex o executor caía no IMDS do host (conta
+                            # da Zentriz). O envelope inteiro resolve os cinco providers e ainda
+                            # deixa o FTS TESTAR o slot antes de gastar a sessão.
                             _ft_payload = {
                                 "project_id":   project_id or "",
                                 "project_path": str(_proj_host_dir),
                                 "prompt_path":  _host_prompt_path,
                                 "api_key":      os.environ.get("CLAUDE_API_KEY", ""),
+                                "llm_config":   _llm_envelope_do_run(),
+                                "model_id":     os.environ.get("CLAUDE_MODEL", ""),
                             }
                             _post_step("🤖 TASK-FULL-TEST: Claude Code Agent iniciado via full-test-server.", request_id)
                             _update_task(project_id, "TSK-FULL-TEST", status="IN_PROGRESS")

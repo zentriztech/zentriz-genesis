@@ -24,10 +24,12 @@ FLUXO
 CONFIGURAÇÃO
 ────────────
 - CYBORG_V3_TIMEOUT_SEC (default 3600 = 1h)
-- CYBORG_V3_MODEL (default us.anthropic.claude-opus-4-7)
+- CYBORG_V3_MODEL — **desativado** (2026-09-10). O modelo é sempre o mais forte entre os SLOTS
+  do tenant; um valor aqui só gera aviso no log. Para trocar o modelo, cadastre-o como slot.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -52,7 +54,14 @@ FTS_URL           = os.environ.get("FULL_TEST_SERVER_URL", "http://host.docker.i
 API_BASE_URL      = os.environ.get("API_BASE_URL", "http://api:3000").rstrip("/")
 API_TOKEN         = os.environ.get("GENESIS_API_TOKEN", "")
 V3_TIMEOUT        = int(os.environ.get("CYBORG_V3_TIMEOUT_SEC", "3600"))
-V3_MODEL          = os.environ.get("CYBORG_V3_MODEL", "us.anthropic.claude-opus-4-8")
+# ⚖️ LEI 2026-09-10 (Jean): *"todo o Tenant precisa realmente configurar em `Configuração de LLM`
+# seus slots"*. `CYBORG_V3_MODEL` tinha `us.anthropic.claude-opus-4-8` como default: um Opus escolhido
+# pela Zentriz, invocado com a identidade do CONTAINER, na fatura de quem estivesse rodando. Pior,
+# o Cyborg era o único plano que NUNCA consultava `tenant_llm_configs` — nem modelo, nem credencial.
+# 2026-09-10 (Jean): *"cyborg usa sempre o melhor modelo entre os cadastrados nos slots"* — nem
+# como override o env decide mais. Lido só para AVISAR que está sendo ignorado: uma env esquecida
+# num compose de prod, sumindo em silêncio, é indistinguível de uma env que funcionou.
+V3_MODEL          = os.environ.get("CYBORG_V3_MODEL", "").strip()
 ANALYSIS_TIMEOUT  = int(os.environ.get("CYBORG_ANALYSIS_TIMEOUT_SEC", "180"))
 
 
@@ -154,6 +163,113 @@ def _http(method: str, url: str, body: dict | None = None, timeout: int = 60) ->
         return e.code, e.read().decode("utf-8", errors="replace")
     except Exception as e:
         return 0, f"error: {e}"
+
+
+# ⚖️ LEI 2026-09-10 — envelope de LLM do RUN, resolvido dos slots do tenant.
+# `ContextVar` (e não global simples) porque o Cyborg roda runs em threads: um global vazaria o
+# envelope — e portanto a CREDENCIAL — de um tenant para o run de outro.
+_SLOT_LLM: "contextvars.ContextVar[dict]" = contextvars.ContextVar("cyborg_slot_llm", default={})
+
+
+def _resolve_slot_llm(project_id: str) -> dict:
+    """Resolve provider/modelo/credenciais do projeto pelos SLOTS do tenant.
+
+    Mesma fonte que a Fábrica usa (`GET /api/internal/project-llm-config/:id`, o resolvedor
+    `resolveProjectLlmConfig` do api-node). Devolve o shape que os agents esperam:
+    `{"model_id", "model_id_fallback", "llm_config"}`. LEVANTA quando não há slot utilizável —
+    sob a LEI não existe mais cair no env do container, que é a conta da Zentriz.
+
+    ⚖️ Jean, 2026-09-10: *"cyborg usa sempre o melhor modelo entre os cadastrados nos slots"*.
+    Daí o `?strategy=strongest`: aqui — e SÓ aqui — a escolha não é o 1º slot da fila, é o mais
+    forte entre os utilizáveis. Bancada e Fábrica continuam em `priority`, a ordem que o tenant
+    cadastrou. A diferença é de papel: o Cyborg é o engenheiro final, roda uma vez por projeto
+    quando o pipeline já falhou; modelo fraco ali custa a ENTREGA, não token.
+    """
+    status, text = _http(
+        "GET", f"{API_BASE_URL}/api/internal/project-llm-config/{project_id}?strategy=strongest",
+        timeout=15)
+    if status != 200:
+        raise RuntimeError(
+            f"config de LLM do projeto não resolvida ({status}): {text[:300]} — "
+            "cadastre um slot com credenciais próprias em Configurações → LLM"
+        )
+    cfg = json.loads(text)
+    model = (cfg.get("modelId") or "").strip()
+    provider = (cfg.get("provider") or "").strip().lower()
+    if not model or not provider:
+        raise RuntimeError(
+            "slot de LLM do tenant sem provider/modelo — configure em Configurações → LLM"
+        )
+    llm = _envelope_from_api(cfg)
+    _sel = cfg.get("selection") or {}
+    # ⚖️ Jean, 2026-09-10: *"em caso de nao funcionar testa o proximo"*. A fila completa (campo
+    # aditivo `candidates`, do mesmo endpoint) viaja junto, cada item com a credencial DO SEU slot —
+    # é `/invoke/raw` quem cascateia. Sem isto, o Cyborg tinha as contingências do tenant no banco
+    # e continuava morrendo no primeiro slot ruim.
+    cands: list[dict] = []
+    for c in (cfg.get("candidates") or []):
+        if not isinstance(c, dict):
+            continue
+        env = _envelope_from_api(c)
+        if env.get("model") and env.get("provider"):
+            _fb = (c.get("fallbackModelId") or "").strip()
+            if _fb:
+                env["model_rework"] = _fb
+            cands.append(env)
+    return {
+        "model_id": model,
+        "model_id_fallback": (cfg.get("fallbackModelId") or "").strip(),
+        "llm_config": llm,
+        "llm_candidates": cands if len(cands) > 1 else [],
+        # Auditoria da escolha (sem credencial): QUAL slot venceu, por quê, e a lista de ids
+        # cadastrados. `slot_models` é o que autoriza (ou não) o override `CYBORG_V3_MODEL`.
+        "selection_why": str(_sel.get("why") or ""),
+        "slot_models": [str(m) for m in (_sel.get("slotModels") or []) if str(m).strip()],
+    }
+
+
+def _envelope_from_api(cfg: dict) -> dict:
+    """Traduz um slot como o api-node devolve (camelCase) para o envelope que `runtime.py` procura.
+
+    Nomes EXATOS de `_build_foundry_client`, `_build_google_client`,
+    `_build_vertex_anthropic_client`, `_build_anthropic_direct_client` e do ramo bedrock.
+    """
+    llm: dict = {"provider": (cfg.get("provider") or "").strip().lower(),
+                 "model": (cfg.get("modelId") or "").strip()}
+    for _src, _dst in (
+        ("apiKey", "api_key"),
+        ("awsAccessKeyId", "aws_access_key_id"), ("awsSecretAccessKey", "aws_secret_access_key"),
+        ("awsRegion", "aws_region"),
+        ("foundryApiKey", "foundry_api_key"), ("foundryResource", "foundry_resource"),
+        ("foundryBaseUrl", "foundry_base_url"),
+        ("googleApiKey", "google_api_key"), ("googleBaseUrl", "google_base_url"),
+        ("vertexProjectId", "vertex_project_id"), ("vertexLocation", "vertex_location"),
+        ("vertexServiceAccountJson", "vertex_service_account_json"),
+        ("azureEndpoint", "azure_endpoint"), ("azureDeployment", "azure_deployment"),
+        ("azureApiVersion", "azure_api_version"),
+    ):
+        _v = (cfg.get(_src) or "")
+        if isinstance(_v, str) and _v.strip():
+            llm[_dst] = _v.strip()
+    return llm
+
+
+def _slot_body_fields(model_id: str = "") -> dict:
+    """Campos de LLM a espalhar no corpo de `/invoke/raw` — modelo E credenciais do slot."""
+    env = _SLOT_LLM.get() or {}
+    out: dict = {}
+    if env.get("llm_config"):
+        out["llm_config"] = env["llm_config"]
+    _m = (model_id or env.get("model_id") or "").strip()
+    if _m:
+        out["model_id"] = _m
+    if env.get("model_id_fallback"):
+        out["model_id_fallback"] = env["model_id_fallback"]
+    # Fila de contingências: quem cascateia é o `/invoke/raw` (mesma cascata da Bancada). Só vai
+    # quando há mais de um slot utilizável — com um só, o corpo fica idêntico ao de antes.
+    if env.get("llm_candidates"):
+        out["llm_candidates"] = env["llm_candidates"]
+    return out
 
 
 def _post_dialogue(project_id: str, message: str) -> None:
@@ -466,13 +582,10 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
 
 
 def _call_bedrock(prompt: str, ctx: dict, model_id: str) -> str:
-    # Fallback compatível com o provider ativo: em Foundry, ids us.anthropic.* dão 404
-    # (DeploymentNotFound) — usar claude-sonnet-5. (achado #7 da fatia vertical)
-    _fallback = (
-        "claude-sonnet-5"
-        if os.environ.get("GENESIS_LLM_PROVIDER", "").strip().lower() == "foundry"
-        else "us.anthropic.claude-sonnet-4-6"
-    )
+    # ⚖️ LEI 2026-09-10: o fallback era escolhido por NÓS conforme o provider do env
+    # ("claude-sonnet-5" no Foundry, "us.anthropic.claude-sonnet-4-6" fora) — achado #7 da fatia
+    # vertical. Hoje o fallback é o `model_id_fallback` DO SLOT (2º modelo que o tenant cadastrou);
+    # sem ele, não há degradação: a chamada usa só o modelo principal do slot.
     # Claude 5 (Foundry) faz thinking extenso: com contexto grande (60KB) e max_tokens baixo
     # (6000), o output real estoura o budget e volta VAZIO → parse "substring not found" →
     # score 0/blockers aleatórios. Elevar max_tokens e conter o contexto. (achado #12)
@@ -517,9 +630,10 @@ def _call_bedrock(prompt: str, ctx: dict, model_id: str) -> str:
     body = {
         "prompt_override": prompt,
         "user_message": json.dumps({"context": _ordered}, ensure_ascii=False)[:_ctx_cap],
-        "model_id": model_id,
-        "model_id_fallback": _fallback,
         "max_tokens": _max_toks,
+        # Modelo E credenciais do slot do tenant — antes só o `model_id` viajava, e a chamada
+        # rodava na identidade do container (a conta da Zentriz).
+        **_slot_body_fields(model_id),
     }
     status, text = _http("POST", f"http://agents:8000/invoke/raw", body, timeout=ANALYSIS_TIMEOUT)
     if status != 200:
@@ -780,9 +894,14 @@ Comece analisando o audit (via `zentriz-audit {project_id}`) e o estado atual do
         "prod_id": prod_id or "",
         "system_prompt": engineer_prompt,
         "user_prompt": user_briefing,
-        "model_id": model_id,
         "timeout": V3_TIMEOUT,
         "cwd_hint": "apps",  # trabalhar dentro de apps/
+        # ⚖️ Jean, 2026-09-10: *"todos devem usar identidade, credencial e modelos dos slots
+        # INCLUSIVE spawn_engineer"*. Antes só o `model_id` viajava: o executor recebia o NOME do
+        # modelo do tenant e o rodava com a identidade do host (instance role da EC2 da Zentriz).
+        # Agora vai o envelope inteiro — provider, credencial e a fila de contingências —, e é o
+        # FTS quem testa slot a slot antes de gastar a sessão longa.
+        **_slot_body_fields(model_id),
     }
 
     # Fase 3 (rota B): sessão longa do `claude` = código não-confiável → roteia p/ executor.
@@ -1404,8 +1523,10 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
         # tentativa real de correção — foi o que travou a onda 0 (SPEC-00 e SPEC-20).
         # Agora: reintenta a chamada dentro da mesma rodada, escalando para o modelo mais
         # capaz (CLAUDE_MODEL_REWORK/opus) a partir da 2ª tentativa, antes de desistir.
-        _fallback_model = ("claude-opus-5" if os.environ.get("GENESIS_LLM_PROVIDER","").lower()=="foundry"
-                           else os.environ.get("CLAUDE_MODEL_REWORK", "us.anthropic.claude-opus-4-6-v1"))
+        # ⚖️ LEI 2026-09-10: o modelo de escalonamento é o 2º modelo DO SLOT (`model_id_fallback`),
+        # não um Opus escolhido por nós conforme o provider do env. Sem 2º modelo cadastrado não há
+        # escalonamento — a rodada repete no modelo principal do tenant, que é a escolha dele.
+        _fallback_model = (_SLOT_LLM.get() or {}).get("model_id_fallback", "") or model_id
         _max_llm_attempts = max(1, int(os.environ.get("CYBORG_REWORK_LLM_ATTEMPTS", "3")))
         _obj = None
         resp = ""
@@ -1420,9 +1541,10 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
             _use_model = _start_model if _att == 0 else _fallback_model
             body = {
                 "prompt_override": _fix_prompt, "user_message": _fix_user[:45000],
-                "model_id": _use_model,
-                "model_id_fallback": _fallback_model,
                 "max_tokens": _rework_max_tokens,
+                # Credenciais do slot + o modelo desta tentativa (o `_slot_body_fields` já traz o
+                # `model_id_fallback` do slot).
+                **_slot_body_fields(_use_model),
             }
             # Timeout largo: /invoke/raw pode encadear principal→fallback (sonnet→opus)
             # DENTRO de uma única request quando o principal volta vazio (achado #30). 300s
@@ -1687,7 +1809,23 @@ def parse_cyborg_done(stdout: str) -> dict:
 # ── Orquestrador V3 ───────────────────────────────────────────────────────────
 
 def run_cyborg_v3(project_id: str, tenant_id: str | None, prod_id: str | None) -> CyborgV3Run:
-    model_id = V3_MODEL
+    # ⚖️ LEI 2026-09-10 — o Cyborg passa a nascer do SLOT do tenant (provider + modelo +
+    # credencial), como a Bancada e a Fábrica. Antes ele era o único plano 100% env: modelo literal
+    # da Zentriz invocado com a identidade do container. Falha alto: sem slot, não há run.
+    _slot = _resolve_slot_llm(project_id)
+    _SLOT_LLM.set(_slot)
+    # ⚖️ "sempre o melhor **entre os cadastrados nos slots**" (Jean, 2026-09-10) — sem exceção de
+    # env. `CYBORG_V3_MODEL` (que já não tinha default) morreu aqui: um id vindo do env não é do
+    # tenant, e pior, viajaria com o ENVELOPE do slot vencedor — se o provider desse slot não
+    # servisse esse id, seria 400 no último recurso do projeto. Se um id precisa ser usado, ele
+    # precisa estar cadastrado como slot; é lá que se declara também de quem é a fatura.
+    model_id = _slot["model_id"]
+    if V3_MODEL:
+        logger.warning(
+            "[cyborg] CYBORG_V3_MODEL=%s IGNORADO — o modelo sai dos slots do tenant (%s). "
+            "Escolhido: %s", V3_MODEL,
+            ", ".join(_slot.get("slot_models") or []) or "nenhum", model_id)
+    logger.info("[cyborg] modelo por slot (%s): %s", _slot.get("selection_why") or "?", model_id)
     run = CyborgV3Run(
         project_id=project_id, tenant_id=tenant_id, prod_id=prod_id,
         started_at=time.time(), model_id=model_id,

@@ -24,13 +24,31 @@ vi.mock("../middleware/auth.js", () => ({
   authMiddleware: async (request: { user?: unknown }) => { (request as { user: unknown }).user = currentUser; },
 }));
 
-// pool.connect().query → devolve a linha do projeto (tenant do usuário → acesso ok).
+// pool.connect().query → devolve a linha do projeto (tenant do usuário → acesso ok) e um slot de LLM.
+// ⚖️ LEI 2026-09-10: sem slot utilizável a resolução LANÇA — um tenant sem linha em
+// `tenant_llm_configs` não roda mais nada. Por isso o mock precisa ter o slot que a realidade tem.
+export const TEST_SLOT = {
+  provider: "bedrock",
+  model_id: "us.anthropic.claude-opus-5",
+  model_id_fallback: null,
+  credentials: { aws_access_key_id: "AKIATEST", aws_secret_access_key: "secret", aws_region: "us-east-1" },
+  max_concurrent_projects: 3,
+  daily_token_quota: null,
+  deadpool_token_reserve: 0,
+  priority: 0,
+  byoc_exempt: false,
+};
 let queryHandler: (sql: string, params: unknown[]) => { rows: unknown[]; rowCount?: number } =
   (sql) => (sql.includes("FROM projects") ? { rows: [{ tenant_id: TENANT, created_by: USER_ID }] } : { rows: [] });
+// O slot é servido ANTES de delegar ao `queryHandler`: dezenas de testes substituem esse handler para
+// exercitar findings/árvore/produto e nenhum deles trata de LLM — sem isto, cada override reintroduzia
+// "tenant sem slot" e derrubaria a rota por um motivo que o teste não está medindo.
+const query = async (sql: string, params: unknown[] = []) =>
+  sql.includes("FROM tenant_llm_configs") ? { rows: [TEST_SLOT] } : queryHandler(sql, params);
 vi.mock("../db/client.js", () => ({
   pool: {
-    query: async (sql: string, params: unknown[] = []) => queryHandler(sql, params),
-    connect: async () => ({ query: async (sql: string, params: unknown[] = []) => queryHandler(sql, params), release: () => {} }),
+    query,
+    connect: async () => ({ query, release: () => {} }),
   },
 }));
 

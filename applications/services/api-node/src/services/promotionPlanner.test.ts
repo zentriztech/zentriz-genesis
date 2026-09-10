@@ -9,6 +9,7 @@ vi.mock("./tenantLlmConfig.js", () => ({
   agentsLlmFields: vi.fn(() => ({})),
 }));
 
+import { agentsLlmFields } from "./tenantLlmConfig.js";
 import {
   orderIntoWaves,
   buildPromotionPlan,
@@ -269,5 +270,39 @@ describe("buildPromotionPlan — vetos antes de gastar LLM", () => {
       code: "TOO_MANY_PROJECTS",
     });
     expect(httpPostMock).not.toHaveBeenCalled();
+  });
+
+  // ── GRUPO C (2026-09-10): o `model_id` do planejador vinha ANTES do spread do tenant ───────────
+  // Efeito real, oposto ao nome da constante: o modelo do tenant sobrescrevia o planejador barato e
+  // `PROMOTION_PLANNER_MODEL` não fazia nada. Agora ele vem DEPOIS — mas só se o provider do tenant
+  // conseguir servi-lo, senão pediríamos um id do Bedrock a um tenant que está no Foundry.
+  const ordemValida = () => JSON.stringify({
+    response: JSON.stringify({
+      order: [{ project_id: DB, position: 1, depends_on: [] }, { project_id: API, position: 2, depends_on: [DB] }],
+    }),
+  });
+  const doisProjetos = () => planDb({ projects: [{ id: DB, title: "Banco" }, { id: API, title: "Backend" }] });
+  const corpoEnviado = () => JSON.parse(httpPostMock.mock.calls[0][1] as string) as Record<string, unknown>;
+
+  // ⚖️ LEI 2026-09-10: não existe mais "modelo do planejador". Era o literal
+  // `us.anthropic.claude-haiku-4-5-20251001-v1:0` (`PROMOTION_PLANNER_MODEL` nunca esteve setada em
+  // prod), escolhido pela Zentriz e cobrado no tenant. Agora vale o modelo do slot, sem sobrescrita.
+  it("o modelo E as credenciais do tenant vão íntegros — nada nosso sobrescreve o slot", async () => {
+    vi.mocked(agentsLlmFields).mockReturnValueOnce({
+      model_id: "us.anthropic.claude-opus-5", llm_config: { provider: "bedrock", api_key: "k" },
+    });
+    httpPostMock.mockResolvedValueOnce(ordemValida());
+    await buildPromotionPlan(doisProjetos(), ARGS);
+    expect(corpoEnviado().model_id).toBe("us.anthropic.claude-opus-5");
+    expect(corpoEnviado().llm_config).toEqual({ provider: "bedrock", api_key: "k" });
+  });
+
+  it("tenant no Foundry: o id do Bedrock NÃO é imposto — vale o modelo do tenant, não um 400", async () => {
+    vi.mocked(agentsLlmFields).mockReturnValueOnce({
+      model_id: "claude-opus-5", llm_config: { provider: "foundry", foundry_api_key: "k" },
+    });
+    httpPostMock.mockResolvedValueOnce(ordemValida());
+    await buildPromotionPlan(doisProjetos(), ARGS);
+    expect(corpoEnviado().model_id).toBe("claude-opus-5");
   });
 });

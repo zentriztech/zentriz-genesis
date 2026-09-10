@@ -64,6 +64,7 @@ import type { Archetype } from "./archetypeCatalog.js";
 import { evidenceIsVerbatim } from "./crossFamilyAudit.js";
 import type { Db } from "./findingTriage.js";
 import { parseCountField, parseListResponse } from "./gapPromotionVerdict.js";
+import { agentsLlmFields, resolveReviewerLlmForProject } from "./tenantLlmConfig.js";
 
 /** Onde a constraint é verificável. `spec` é o único julgável na Bancada (Mistral B2). */
 export type VerifiableAt = "spec" | "build" | "runtime";
@@ -89,8 +90,12 @@ export function policyGateConfig() {
     maxConstraints: num(process.env.SPEC_POLICY_MAX_CONSTRAINTS, 40),
     maxTokens: num(process.env.SPEC_POLICY_MAX_TOKENS, 6_000),
     timeoutMs: num(process.env.SPEC_POLICY_TIMEOUT_MS, 180_000),
-    /** Auditor da DERIVAÇÃO: outra família (Mistral B5). Mesma lista calibrada do cross-family. */
-    auditModel: (process.env.SPEC_POLICY_AUDIT_MODEL ?? "amazon.nova-pro-v1:0").trim(),
+    /**
+     * ⚖️ LEI 2026-09-10 — vazio de propósito: o auditor da DERIVAÇÃO sai do slot do tenant
+     * (`resolveReviewerLlmForProject`), resolvido no ponto de uso. Era `amazon.nova-pro-v1:0` por
+     * literal, cobrado na credencial do tenant — mesmo defeito de `crossFamilyAudit`.
+     */
+    auditModel: "",
     /** Teto do texto de spec que vai ao derivador. O dossiê já garante mapa de 100% dos arquivos. */
     specChars: num(process.env.SPEC_POLICY_SPEC_CHARS, 120_000),
     /**
@@ -1127,11 +1132,18 @@ async function policyGateOnce(
   const acusadas = base.filter((v) => v.status === "violated").map((v) => v.constraintKey);
   if (acusadas.length > 0) {
     const alvo = constraints.filter((c) => acusadas.includes(c.constraintKey));
-    const res = await callPolicyAgent({
-      system: AUDIT_CONSTRAINT_SYSTEM,
-      user: alvo.map((c) => `- ${c.constraintKey}: ${c.assertion}\n  prova esperada: ${c.evidenceHint}\n  trecho da spec: ${c.sourceAnchor}`).join("\n\n"),
-      maxTokens: 2_000, modelId: cfg.auditModel,
-    });
+    // ⚖️ LEI 2026-09-10: o auditor é um SLOT do tenant de outra família que o juiz — com o envelope
+    // dele (provider + credencial), porque o revisor pode morar em outro provider. Sem slot viável a
+    // auditoria simplesmente não roda, e o comentário abaixo já diz o que isso significa.
+    const revisor = await resolveReviewerLlmForProject({ projectId: args.projectId, executorModel: judgeModel });
+    if (!revisor.ok) console.warn(`[specPolicyGate] auditoria de constraint não roda — ${revisor.alert}`);
+    const res = revisor.ok
+      ? await callPolicyAgent({
+          system: AUDIT_CONSTRAINT_SYSTEM,
+          user: alvo.map((c) => `- ${c.constraintKey}: ${c.assertion}\n  prova esperada: ${c.evidenceHint}\n  trecho da spec: ${c.sourceAnchor}`).join("\n\n"),
+          maxTokens: 2_000, modelId: revisor.model, llm: agentsLlmFields(revisor.llm),
+        })
+      : { ok: false as const, why: revisor.alert };
     const raw = res.ok ? parseListResponse(res.text, "audits") ?? [] : [];
     // Auditor ausente NÃO absolve e NÃO condena: sem parecer a constraint segue com poder de
     // bloquear, que é o estado anterior a esta frente.

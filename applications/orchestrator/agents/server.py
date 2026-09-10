@@ -52,7 +52,9 @@ AGENT_LABELS = {
 
 
 def _env_diagnostic() -> None:
-    model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+    # ⚖️ LEI 2026-09-10: nem no diagnóstico existe modelo default — quem define é o slot do tenant.
+    # Um literal aqui fazia o log/health ANUNCIAR um modelo que ninguém escolheu.
+    model = os.environ.get("CLAUDE_MODEL", "").strip() or "(não definido — vem do slot do tenant)"
     key_set = bool(os.environ.get("CLAUDE_API_KEY", "").strip())
     key_preview = "(definida)" if key_set else "(NÃO DEFINIDA — chamadas à Claude falharão)"
     show_tb = "ativado" if SHOW_TRACEBACK else "desativado"
@@ -96,7 +98,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.get("/health")
 def health():
-    model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+    model = os.environ.get("CLAUDE_MODEL", "").strip() or "(não definido — vem do slot do tenant)"
     key_ok = bool(os.environ.get("CLAUDE_API_KEY", "").strip())
     return {"status": "ok", "claude_model": model, "claude_configured": key_ok, "show_traceback": SHOW_TRACEBACK}
 
@@ -415,8 +417,59 @@ def _wrap_with_llm_config(body: dict) -> dict:
     message = {"request_id": body.get("request_id", "http"), "input": body}
     llm_cfg = body.get("llm_config")
     if isinstance(llm_cfg, dict) and llm_cfg:
-        message["llm_config"] = llm_cfg
+        # ⚖️ LEI 2026-09-10: o `model_id_rework` (= `model_id_fallback` do SLOT) viajava ao lado do
+        # `llm_config` e MORRIA aqui — nenhum ponto do Python o lia. Com o literal de rework morto no
+        # runtime, ele é a única fonte de escalonamento do lado da Bancada; dobrado para dentro do
+        # `llm_config` porque é lá que o runtime procura o envelope do tenant.
+        rework = str(body.get("model_id_rework") or "").strip()
+        message["llm_config"] = {**llm_cfg, "model_rework": rework} if rework else llm_cfg
+    # Mesmo lift para a lista de contingências (`llm_candidates`): sem ela no topo, `_slot_cascade`
+    # não a enxerga e o tenant volta a ter um slot só — que é o defeito que a cascata fecha.
+    cands = body.get("llm_candidates")
+    if isinstance(cands, list) and cands:
+        message["llm_candidates"] = cands
     return message
+
+
+def _slot_cascade(message: dict, fn):
+    """⚖️ Jean, 2026-09-10: *"sempre testando se funciona e em caso de não funcionar testa o próximo"*.
+
+    Roda `fn(message)` com o slot escolhido; se a falha for **do slot** (credencial, modelo
+    indisponível, cota, rede), refaz com o próximo slot do tenant — na ordem que ele cadastrou.
+    Erro de PEDIDO (prompt grande demais, resposta inválida) propaga na hora: tentar outro provider
+    pagaria o dobro pelo mesmo erro.
+
+    Envelope antigo (sem `llm_candidates`) ⇒ exatamente uma tentativa, byte por byte o que já
+    acontecia hoje. Nenhuma funcionalidade regride por existir contingência.
+    """
+    from orchestrator.agents.runtime import (
+        llm_candidates, is_slot_failure, classify_llm_error, _scrub_secrets,
+    )
+    cands = llm_candidates({
+        "llm_config": message.get("llm_config") or {},
+        "llm_candidates": (message.get("llm_candidates")
+                           or (message.get("input") or {}).get("llm_candidates") or []),
+    })
+    if len(cands) <= 1:
+        return fn(message)
+    for i, cand in enumerate(cands):
+        cfg = dict(cand["llm_cfg"] or {})
+        cfg["model"] = cand["model"]
+        if cand["fallback"]:
+            cfg.setdefault("model_rework", cand["fallback"])
+        tentativa = dict(message)
+        tentativa["llm_config"] = cfg
+        try:
+            return fn(tentativa)
+        except Exception as exc:
+            ultimo = i == len(cands) - 1
+            if ultimo or not is_slot_failure(exc):
+                raise
+            logger.warning(
+                "[cascata-slot] slot %d/%d (%s · %s) falhou por '%s' — tentando o próximo slot do "
+                "tenant. Detalhe: %s", i + 1, len(cands), cfg.get("provider") or "?", cand["model"],
+                classify_llm_error(exc), _scrub_secrets(exc, cfg))
+    raise RuntimeError("cascata de slots terminou sem resposta")  # inalcançável (o último re-lança)
 
 
 def _invoke_agent(body: dict, system_prompt, role: str) -> dict:
@@ -426,7 +479,8 @@ def _invoke_agent(body: dict, system_prompt, role: str) -> dict:
         message = body if "input" in body else _wrap_with_llm_config(body)
         message = _resolve_llm_api_key(message)  # FT-13: resolve api_key para providers não-bedrock
         logger.info("[%s] Recebeu solicitação. Processando...", agent_name)
-        response = run_agent(system_prompt_path=system_prompt, message=message, role=role)
+        response = _slot_cascade(
+            message, lambda m: run_agent(system_prompt_path=system_prompt, message=m, role=role))
         logger.info("[%s] Solicitação processada com sucesso.", agent_name)
         if role == "CTO":
             _persist_cto_response_json(message, response)
@@ -462,7 +516,8 @@ def _invoke_parametrized(body: dict, get_path_fn, role: str) -> dict:
         skill_path = ctx.get("skill_path")
         prompt_path = get_path_fn(skill_path)
         logger.info("[%s] Recebeu solicitação (skill_path=%s). Processando...", agent_name, skill_path or "default")
-        response = run_agent(system_prompt_path=prompt_path, message=message, role=role)
+        response = _slot_cascade(
+            message, lambda m: run_agent(system_prompt_path=prompt_path, message=m, role=role))
         logger.info("[%s] Solicitação processada com sucesso.", agent_name)
         if role == "PM":
             _persist_pm_response_json(message, response)
@@ -582,7 +637,15 @@ def _run_splitter_async(job_id: str, body: dict) -> None:
         document = (body.get("document") or body.get("master_md") or "").strip()
         if not document:
             raise ValueError("document (o texto do produto) é obrigatório")
-        model_id = body.get("model_id") or os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-sonnet-4-6")
+    # ⚖️ LEI 2026-09-10 (Jean): o modelo vem do SLOT do tenant — via `model_id` no corpo (Bancada,
+    # `agentsLlmFields`) ou via `CLAUDE_MODEL` do env DO RUN (Fábrica, injetado por `runner_server`
+    # a partir de `tenant_llm_configs`). O literal que estava aqui era a Zentriz escolhendo modelo na
+    # fatura do tenant; sem modelo declarado a chamada FALHA em vez de escolher por ele.
+        model_id = (body.get("model_id") or os.environ.get("CLAUDE_MODEL", "")).strip()
+        if not model_id:
+            raise ValueError(
+                "nenhum modelo de LLM declarado: configure um slot em Configurações → LLM"
+            )
         llm_cfg = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else None
         result = _run_splitter(document, model_id,
                                usage_project_id=(body.get("originProjectId") or None),
@@ -674,7 +737,15 @@ def _run_spec_split_async(job_id: str, body: dict) -> None:
         spec_md = (body.get("spec_md") or body.get("spec_text") or "").strip()
         if not spec_md:
             raise ValueError("spec_md (o texto da spec atual) é obrigatório")
-        model_id = body.get("model_id") or os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-sonnet-4-6")
+    # ⚖️ LEI 2026-09-10 (Jean): o modelo vem do SLOT do tenant — via `model_id` no corpo (Bancada,
+    # `agentsLlmFields`) ou via `CLAUDE_MODEL` do env DO RUN (Fábrica, injetado por `runner_server`
+    # a partir de `tenant_llm_configs`). O literal que estava aqui era a Zentriz escolhendo modelo na
+    # fatura do tenant; sem modelo declarado a chamada FALHA em vez de escolher por ele.
+        model_id = (body.get("model_id") or os.environ.get("CLAUDE_MODEL", "")).strip()
+        if not model_id:
+            raise ValueError(
+                "nenhum modelo de LLM declarado: configure um slot em Configurações → LLM"
+            )
         llm_cfg = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else None
         result = _run_spec_split(spec_md, model_id,
                                  usage_project_id=(body.get("originProjectId") or None),
@@ -944,7 +1015,16 @@ def invoke_raw(body: dict):
 
     system_prompt = body.get("prompt_override", "")
     user_message  = body.get("user_message", "")
-    model_id      = body.get("model_id") or os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-opus-4-8")
+    # ⚖️ LEI 2026-09-10 (Jean): o modelo vem do SLOT do tenant — via `model_id` no corpo (Bancada,
+    # `agentsLlmFields`) ou via `CLAUDE_MODEL` do env DO RUN (Fábrica, injetado por `runner_server`
+    # a partir de `tenant_llm_configs`). O literal que estava aqui era a Zentriz escolhendo modelo na
+    # fatura do tenant; sem modelo declarado a chamada FALHA em vez de escolher por ele.
+    model_id      = (body.get("model_id") or os.environ.get("CLAUDE_MODEL", "")).strip()
+    if not model_id:
+        raise HTTPException(
+            status_code=422,
+            detail="nenhum modelo de LLM declarado: configure um slot em Configurações → LLM",
+        )
     fallback_id   = body.get("model_id_fallback")
     max_tokens    = int(body.get("max_tokens", 8000))
     # Bancada = mesma config da fábrica: credenciais do tenant (se vieram) em vez do env do container.
@@ -1028,31 +1108,99 @@ def invoke_raw(body: dict):
     # o Foundry às vezes devolve content vazio (stop precoce/streaming interrompido) sem lançar
     # exceção. Antes só o `except` acionava o fallback → o Cyborg recebia "" e desistia do rework.
     # Agora tratamos resposta vazia como falha e escalamos para o modelo de reforço também.
-    try:
-        resp = call_bedrock_direct(system=system_prompt, user=user_message,
-                                    model_id=model_id, max_tokens=max_tokens, temperature=_temp_for(model_id),
-                                    llm_cfg=llm_cfg)
-        if resp and resp.strip():
-            return {"response": resp, "model_used": _effective(model_id), "model_requested": model_id, **_outcome()}
-        logger.warning(f"[/invoke/raw] Principal ({model_id}) retornou resposta VAZIA — escalando para fallback")
-    except Exception as e:
-        logger.warning(f"[/invoke/raw] Principal falhou ({model_id}): {e}")
-        resp = ""
-        if not fallback_id:
-            raise HTTPException(status_code=500, detail=str(e))
-    # Chega aqui em 2 casos: exceção no principal OU resposta vazia do principal.
-    if fallback_id:
+    #
+    # ⚖️ Jean, 2026-09-10 — CASCATA DE SLOTS por cima disso: o par (principal, fallback) sempre foi
+    # DENTRO de um slot só. Se a credencial daquele slot fosse recusada, os dois modelos morriam
+    # juntos e as contingências do tenant ficavam paradas na tela. Agora, esgotado o par, tenta-se o
+    # PRÓXIMO SLOT — mas só quando a falha é do slot (`is_slot_failure`): erro de pedido propaga na
+    # hora, porque repetir noutro provider paga o dobro pelo mesmo erro.
+    from orchestrator.agents.runtime import (
+        llm_candidates as _cands_fn, is_slot_failure as _is_slot_fail,
+        classify_llm_error as _kind_of, _scrub_secrets as _scrub,
+    )
+    _cands = _cands_fn(body) or [{"model": model_id, "fallback": fallback_id or "", "llm_cfg": llm_cfg}]
+
+    def _tentar(_model: str, _fb: str, _cfg: dict | None) -> dict | None:
+        """Um slot: principal e, se ele falhar/vier vazio, o fallback DELE. `None` = slot esgotado."""
         try:
             resp = call_bedrock_direct(system=system_prompt, user=user_message,
-                                        model_id=fallback_id, max_tokens=max_tokens,
-                                        temperature=_temp_for(fallback_id), llm_cfg=llm_cfg)
-            return {"response": resp, "model_used": _effective(fallback_id), "model_requested": model_id,
+                                       model_id=_model, max_tokens=max_tokens,
+                                       temperature=_temp_for(_model), llm_cfg=_cfg)
+            if resp and resp.strip():
+                return {"response": resp, "model_used": _effective(_model),
+                        "model_requested": model_id, **_outcome()}
+            logger.warning(f"[/invoke/raw] Principal ({_model}) retornou resposta VAZIA — escalando para fallback")
+            resp = ""
+        except Exception as e:
+            logger.warning(f"[/invoke/raw] Principal falhou ({_model}): {_scrub(e, _cfg)}")
+            if not _fb:
+                raise
+            resp = ""
+        if _fb:
+            resp2 = call_bedrock_direct(system=system_prompt, user=user_message,
+                                        model_id=_fb, max_tokens=max_tokens,
+                                        temperature=_temp_for(_fb), llm_cfg=_cfg)
+            return {"response": resp2, "model_used": _effective(_fb), "model_requested": model_id,
                     "fallback": True, **_outcome()}
-        except Exception as e2:
-            raise HTTPException(status_code=500,
-                                detail=f"Principal ({model_id}) e fallback ({fallback_id}) falharam: {e2}")
-    # Sem fallback configurado e principal veio vazio → devolve o vazio (comportamento antigo).
-    return {"response": resp, "model_used": _effective(model_id), "model_requested": model_id, **_outcome()}
+        # Sem fallback e principal veio vazio → devolve o vazio (comportamento antigo, preservado).
+        return {"response": resp, "model_used": _effective(_model), "model_requested": model_id,
+                **_outcome()}
+
+    _ultimo_erro: Exception | None = None
+    for _i, _c in enumerate(_cands):
+        _cfg = _c["llm_cfg"]
+        try:
+            # `llm_candidates` já preenche o fallback do 1º candidato a partir de `model_id_fallback`.
+            _out = _tentar(_c["model"], _c["fallback"], _cfg)
+            if _out is not None:
+                if _i > 0:
+                    _out["slot_cascade"] = _i  # quantos slots foram queimados antes deste
+                return _out
+        except Exception as _e:
+            _ultimo_erro = _e
+            if _i < len(_cands) - 1 and _is_slot_fail(_e):
+                logger.warning("[cascata-slot] /invoke/raw: slot %d/%d (%s · %s) falhou por '%s' — "
+                               "próximo slot do tenant. Detalhe: %s", _i + 1, len(_cands),
+                               (_cfg or {}).get("provider") or "?", _c["model"], _kind_of(_e),
+                               _scrub(_e, _cfg))
+                continue
+            raise HTTPException(status_code=500, detail=_scrub(_e, _cfg))
+    raise HTTPException(status_code=500, detail=_scrub(_ultimo_erro or "falha desconhecida", llm_cfg))
+
+
+# ── ⚖️ Probe de slot — "o ideal é testar no momento que é adicionado" (Jean, 2026-09-10) ──────────
+# Chamado pelo api-node ao SALVAR um slot (`routes/llm.ts`) e pelo botão "Testar" da tela.
+# Fica nos agents, e não no api-node, por um motivo só: é aqui que vivem os clientes de TODOS os
+# providers. Um teste escrito noutro lugar testaria um caminho diferente do que a produção usa —
+# e um verde assim não vale nada (foi o que o GOTCHA do entitlement Bedrock ensinou: o catálogo
+# listava um modelo que o `invoke` recusava).
+@app.post("/llm/probe")
+def llm_probe(body: dict):
+    """{llm_config, model_id} → {ok, kind, message, latency_ms}. NUNCA ecoa credencial."""
+    from orchestrator.agents.runtime import probe_slot
+    cfg = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else {}
+    model = str(body.get("model_id") or (cfg or {}).get("model") or "").strip()
+    r = probe_slot(cfg, model)
+    logger.info("[llm-probe] provider=%s model=%s ok=%s kind=%s %dms",
+                r.get("provider"), r.get("model"), r.get("ok"), r.get("kind") or "-",
+                int(r.get("latency_ms") or 0))
+    return r
+
+
+# ── ⚖️ Catálogo dinâmico de modelos (Jean, 2026-09-10) ───────────────────────────────────────────
+# "a lista de modelos disponíveis deve ser obtida de forma dinâmica baseado no provider e
+# credenciais informadas". Mora aqui pelo mesmo motivo do probe: é onde vivem os clientes de todos
+# os providers — e porque a lista só vale depois de INVOCAR cada id (catálogo ≠ entitlement).
+@app.post("/llm/models")
+def llm_models(body: dict):
+    """{llm_config, refresh?} → {models:[{id,ok,kind,message}], source, usable, total, cached}."""
+    from orchestrator.agents.runtime import list_models_verified
+    cfg = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else {}
+    r = list_models_verified(cfg, usar_cache=not bool(body.get("refresh")))
+    logger.info("[llm-models] provider=%s source=%s %d/%d utilizáveis cached=%s %dms",
+                r.get("provider"), r.get("source"), int(r.get("usable") or 0),
+                int(r.get("total") or 0), r.get("cached"), int(r.get("elapsed_ms") or 0))
+    return r
 
 
 if __name__ == "__main__":

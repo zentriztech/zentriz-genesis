@@ -138,6 +138,7 @@ import { FINDING_CATEGORIES, type Db } from "./findingTriage.js";
 import { parseListResponse } from "./gapPromotionVerdict.js";
 import { callPolicyAgent, sha256Hex } from "./specPolicyGate.js";
 import type { ValidationFinding } from "./specValidation.js";
+import { agentsLlmFields, rankReviewerSlotsForProject } from "./tenantLlmConfig.js";
 
 function num(raw: string | undefined, fallback: number): number {
   const n = Number((raw ?? "").trim());
@@ -183,10 +184,20 @@ export function recallConfig() {
   return {
     /** Quem INJETA. Vazio = modelo do tenant. */
     injectModel: (process.env.SPEC_RECALL_INJECT_MODEL ?? "").trim(),
-    /** GAP-93: quem CASA finding↔defeito. Tem de ser de outra família que o juiz. */
-    matchModel: (process.env.SPEC_RECALL_MATCH_MODEL ?? "amazon.nova-pro-v1:0").trim(),
-    /** GAP-93: o terceiro modelo que recasa a AMOSTRA, para medir a discordância entre casadores. */
-    auditModel: (process.env.SPEC_RECALL_AUDIT_MODEL ?? "mistral.mistral-large-3-675b-instruct").trim(),
+    /**
+     * ⚖️ LEI 2026-09-10 — vazios de propósito: casador e terceiro casador saem dos SLOTS do tenant
+     * (`rankReviewerSlotsForProject`), resolvidos dentro de `runJudgeRecall`.
+     *
+     * Eram `amazon.nova-pro-v1:0` e `mistral.mistral-large-3-675b-instruct` por literal, cobrados na
+     * credencial do slot do tenant. E `SPEC_JUDGE_RECALL=on` em prod (medido 2026-09-10), então isso
+     * não era teoria: a medição rodava todo ciclo com dois modelos escolhidos por nós.
+     *
+     * GAP-93 continua valendo e agora é atendido pelos slots: o casador tem de ser de outra família
+     * que o juiz, e o terceiro de outra família que o casador — senão a "discordância entre
+     * casadores" mede a consistência de uma família consigo mesma.
+     */
+    matchModel: "",
+    auditModel: "",
     /** Quantos defeitos por gold set. Poucos = recall com intervalo de confiança inútil. */
     defects: num(process.env.SPEC_RECALL_DEFECTS, 10),
     /** Fração da amostra recasada pelo terceiro modelo (0 = não audita). */
@@ -1040,7 +1051,7 @@ export async function runJudgeRecall(db: Db, args: {
   const cfg = recallConfig();
   const empty = (reason: string, extra: Partial<JudgeRecallResult> = {}): JudgeRecallResult => ({
     ran: false, reason, goldSetVersion: "", defects: [], rejectedInjections: [], items: [],
-    tally: emptyTally(), findingsCount: 0, judgedFiles: [], judgeModel: "", matchModel: cfg.matchModel,
+    tally: emptyTally(), findingsCount: 0, judgedFiles: [], judgeModel: "", matchModel: "",
     auditModel: "", sameFamily: false, matcherSample: 0, matcherDisagreement: null,
     matcherNoOpinion: null, limitations: [], note: reason, judgeThinking: false,
     ...extra,
@@ -1102,21 +1113,34 @@ export async function runJudgeRecall(db: Db, args: {
     }
 
     // 3. O CASADOR (outra família) e a estimativa do erro dele.
+    //
+    // ⚖️ LEI 2026-09-10: os dois saem dos SLOTS do tenant, não de literal nosso. O casador é o 1º
+    // slot viável contra o JUIZ; o terceiro é o 1º viável de família DIFERENTE do casador — sem
+    // isso a discordância mediria uma família contra ela mesma (GAP-93/98).
+    const { picks: revisores, alert: semRevisor } = await rankReviewerSlotsForProject({
+      projectId: args.projectId,
+      executorModel: judgeModel || String((args.llm as { model_id?: unknown } | undefined)?.model_id ?? ""),
+    });
+    const casador = revisores[0] ?? null;
+    // Sem casador cross-family a medição INTEIRA é inválida — não existe recall medido por
+    // auto-casamento. Falhar aqui é mais honesto que publicar um número que não mede nada.
+    if (!casador) return empty(`sem casador cross-family — ${semRevisor}`);
+    const terceiro = revisores.find((r) => r.family !== casador.family) ?? null;
     const cas = await callPolicyAgent({
       system: MATCH_SYSTEM, user: matchUserMessage(usados, juiz.findings),
-      maxTokens: cfg.matchTokens, modelId: cfg.matchModel, llm: args.llm,
+      maxTokens: cfg.matchTokens, modelId: casador.model, llm: agentsLlmFields(casador.llm),
     });
     // GAP-98: a família sai do modelo que RESPONDEU, nunca do que foi pedido. A primeira medição em prod
     // pediu Nova Pro, rodou opus-5 (o modelo do juiz) e publicou `same_family = false` — a única coisa
     // que a frente inteira precisa garantir, negada pelos próprios bytes e afirmada pelo relatório.
-    const matchModel = cas.ok ? (cas.modelUsedRaw || cfg.matchModel) : cfg.matchModel;
+    const matchModel = cas.ok ? (cas.modelUsedRaw || casador.model) : casador.model;
     const familia = sameFamily(judgeModel, matchModel);
     const rawMatches = cas.ok ? (parseListResponse(cas.text, "matches") ?? []) : [];
     const items = normalizeMatches(rawMatches, usados, juiz.findings, input.full);
     const tally = recallTally(items);
     const auditoria = await auditMatches({
       items, defects: usados, findings: juiz.findings, judgedFiles: input.full,
-      model: cfg.auditModel, llm: args.llm, cfg,
+      model: terceiro?.model ?? "", llm: terceiro ? agentsLlmFields(terceiro.llm) : null, cfg,
     }).catch((e) => ({ sample: 0, disagreement: null as number | null, noOpinion: null as number | null, why: String(e).slice(0, 200), modelUsed: "" }));
 
     const limitations = recallLimitations({
@@ -1132,7 +1156,7 @@ export async function runJudgeRecall(db: Db, args: {
     const res: JudgeRecallResult = {
       ran: true, goldSetVersion: version, defects: usados, rejectedInjections: recusados, items, tally,
       findingsCount: juiz.findings.length, judgedFiles: input.full,
-      judgeModel: judgeModel || "modelo do tenant", matchModel: cas.ok ? cas.model : cfg.matchModel,
+      judgeModel: judgeModel || "modelo do tenant", matchModel: cas.ok ? cas.model : casador.model,
       auditModel: auditoria.modelUsed,
       sameFamily: familia, matcherSample: auditoria.sample, matcherDisagreement: auditoria.disagreement,
       matcherNoOpinion: auditoria.noOpinion,

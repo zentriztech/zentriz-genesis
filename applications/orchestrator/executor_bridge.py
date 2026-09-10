@@ -220,8 +220,11 @@ def dispatch_full_test(base_payload: dict, project_id: str, prod_id: str | None,
     layout prod_id/project_id do cyborg). No caminho REMOTO (Host B): embarca os arquivos,
     usa o `target` devolvido pelo /ingest-project como `project_path`, reescreve o
     `prompt_path` para <target>/<prompt_rel>, injeta o token escopado e REMOVE credenciais
-    que não devem viajar (api_key — o Host B usa Bedrock via instance role). No caminho
-    co-locado: NO-OP (payload byte-idêntico ao legado)."""
+    que não devem viajar (`api_key` é chave do CONTROL PLANE — nunca ao Host B). No caminho
+    co-locado: NO-OP (payload byte-idêntico ao legado).
+
+    ⚖️ LEI 2026-09-10: `llm_config` (o SLOT do tenant) viaja de propósito — é a credencial que
+    faz o executor rodar na conta de quem contratou, no lugar da instance role da Zentriz."""
     if not executor_is_remote():
         return _post(f"{executor_url()}/run-full-test", base_payload, timeout)
     target = ship_project(project_id, prod_id, proj_dir)

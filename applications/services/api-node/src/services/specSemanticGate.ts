@@ -19,6 +19,7 @@
 
 import { httpPost } from "../routes/specs.js";
 import { cutEvidence, cutList, listCutMarker } from "./evidenceCut.js";
+import { specializedModelFor } from "./reviewerModel.js";
 
 export interface SemanticBlock {
   code: "SPEC_NOT_A_SPEC";
@@ -39,14 +40,23 @@ const MISSING_MAX = 8;
 /** Timeout curto: é um check de intake, não pode segurar o request. */
 const TIMEOUT_MS = Number(process.env.SPEC_GATE_TIMEOUT_MS ?? "45000");
 /**
- * Modelo barato/rápido. Sobrescrevível por env.
+ * ⚖️ LEI 2026-09-10 — vazio de propósito: quem escolhe o modelo é o SLOT do tenant.
  *
- * ⚠️ ID **COM VERSÃO**. Medido em prod 2026-09-06: o apelido `us.anthropic.claude-haiku-4-5` (sem
- * `-20251001-v1:0`) devolve `400 The provided model identifier is invalid` no Bedrock. Como este gate
- * é fail-open, o defeito era INVISÍVEL — toda submissão passava sem juiz nenhum. O apelido curto
- * existe na tabela de contexto do `runtime.py`, o que não o torna um inference profile válido.
+ * Aqui havia `process.env.SPEC_GATE_MODEL ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0"` — um id
+ * do Bedrock escolhido pela Zentriz e cobrado na credencial do tenant. Em prod a env NUNCA esteve
+ * setada (medido 2026-09-10 em `/opt/zentriz-genesis/.env`), então o literal era o que rodava; para
+ * tenant no Foundry ele já morria em `servableBy` e caía no modelo do slot — este passa a ser o
+ * comportamento único, sem depender de acidente de provider.
+ *
+ * ⚠️ Consequência declarada: o gate deixa de ser haiku-class por decreto e passa a usar o modelo do
+ * slot. Se o tenant quiser economia aqui, isso precisa virar um CAMPO do slot ("modelo econômico"),
+ * não um literal nosso — é escolha dele, porque a fatura é dele.
+ *
+ * ⚠️ Histórico que não pode se perder: id do Bedrock exige VERSÃO. Medido em prod 2026-09-06, o
+ * apelido `us.anthropic.claude-haiku-4-5` (sem `-20251001-v1:0`) devolve `400 The provided model
+ * identifier is invalid`. Como este gate é fail-open, o defeito era INVISÍVEL.
  */
-const SPEC_GATE_MODEL = process.env.SPEC_GATE_MODEL ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+const SPEC_GATE_MODEL = "";
 /** Máximo de conteúdo enviado ao LLM (corta specs enormes; suficiente para julgar). */
 const MAX_CONTENT_CHARS = 12_000;
 
@@ -104,6 +114,14 @@ export async function checkSpecIsMinimallyValid(input: {
   title: string;
   projectType: string;
   content: string;
+  /**
+   * 🔴 GRUPO C (2026-09-10): este gate mandava `model_id` e NENHUM campo de `llm` — ignorava o
+   * tenant inteiro, inclusive as credenciais. Num tenant que não é Bedrock, ele pedia um id do
+   * Bedrock, tomava erro e, sendo **fail-open**, deixava passar TODA submissão sem juiz nenhum, em
+   * silêncio. Agora o `llm_config` do tenant viaja; o modelo barato só é imposto se o provider dele
+   * conseguir servi-lo. Opcional de propósito: o intake também roda sem tenant resolvido.
+   */
+  llm?: Record<string, unknown> | null;
 }): Promise<SemanticResult> {
   const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim().replace(/\/$/, "");
   const content = (input.content ?? "").trim();
@@ -120,6 +138,16 @@ export async function checkSpecIsMinimallyValid(input: {
   // Usa httpPost (http/https nativo, sem AbortController) — o mesmo helper que o resto
   // do arquivo usa de propósito: fetch()+AbortController sofre abort prematuro dentro do
   // Docker no Node 20 (ver specs.ts httpPost), o que faria o gate falhar-aberto em prod.
+  const llmFields = input.llm ?? {};
+  const provider = String(
+    (llmFields.llm_config as { provider?: unknown } | undefined)?.provider ?? process.env.GENESIS_LLM_PROVIDER ?? "",
+  );
+  // `SPEC_GATE_MODEL` é vazio desde a LEI 2026-09-10 (ver a constante). O seletor continua no
+  // caminho para o dia em que o modelo econômico for um CAMPO do slot: aí ele volta a ter o que
+  // servir, e a checagem de `servableBy` já estará aqui.
+  const especializado = specializedModelFor({ provider, model: SPEC_GATE_MODEL });
+  if (SPEC_GATE_MODEL && !especializado.model) console.warn(`[specSemanticGate] ${especializado.why}`);
+
   let text: string;
   try {
     const raw = await httpPost(
@@ -127,9 +155,10 @@ export async function checkSpecIsMinimallyValid(input: {
       JSON.stringify({
         prompt_override: SYSTEM_PROMPT,
         user_message: userMessage,
-        model_id: SPEC_GATE_MODEL,
         max_tokens: 512,
         temperature: 0,
+        ...llmFields,
+        ...(especializado.model ? { model_id: especializado.model } : {}),
       }),
       TIMEOUT_MS,
     );

@@ -369,6 +369,12 @@ def run(body: RunBody):
             "GENESIS_API_TOKEN": body.token,
         }
 
+        # ⚖️ LEI 2026-09-10 — prova de que o LLM deste run veio do SLOT do tenant, e não do env do
+        # CONTAINER. `env` nasce de `**os.environ`, então em prod ele JÁ traz
+        # GENESIS_LLM_PROVIDER=foundry + CLAUDE_MODEL=claude-opus-5 da plataforma: checar só
+        # "o env tem valor?" continuaria aprovando um run pago pela Zentriz. Só esta flag prova.
+        _slot_resolved = False
+
         # FT-13: Resolver credenciais LLM pela autoridade do projeto (zentriz_admin vs tenant)
         # T1: PREFERIR o token do run (body.token) — escopado a ESTE projeto (claim projectId) —
         # em vez do GENESIS_API_TOKEN estático do container (onipotente, lê qualquer tenant).
@@ -392,6 +398,18 @@ def run(body: RunBody):
                 def _is_compatible(prov: str, m: str) -> bool:
                     ml = m.lower()
                     if prov == "bedrock"     and ml.startswith("us.anthropic"): return True
+                    # provider=foundry (Azure AI Foundry, 2026-09-09): serve Claude por IDs BARE
+                    # (`claude-opus-5`), e REJEITA o prefixo `us.anthropic.` do Bedrock. Sem este
+                    # ramo, o slot Foundry do tenant caía em "incompatível" e era reescrito para
+                    # provider `anthropic` — que chama a API pública da Anthropic sem chave.
+                    if prov == "foundry"     and any(x in ml for x in ("claude", "sonnet", "opus", "haiku")) and not ml.startswith("us.anthropic"): return True
+                    # provider=google (Gemini pelo endpoint OpenAI-compatível): família NÃO-Claude.
+                    # provider=google: o crédito cobre o Vertex, cujo Model Garden revende
+                    # Claude/Llama/Mistral/Qwen além do Gemini nativo. Só `us.anthropic.*`
+                    # (formato exclusivo do Bedrock) fica de fora.
+                    if prov == "google" and not ml.startswith("us.anthropic") and any(
+                        x in ml for x in ("gemini", "claude", "llama", "mistral", "qwen", "gemma")
+                    ): return True
                     if prov == "anthropic"   and any(x in ml for x in ("claude", "sonnet", "opus", "haiku")) and not ml.startswith("us.anthropic"): return True
                     if prov == "openai"      and any(x in ml for x in ("gpt", "o1", "o3", "o4", "composer", "davinci")): return True
                     if prov == "azure_openai" and any(x in ml for x in ("gpt", "o1", "o3", "davinci")): return True
@@ -402,7 +420,9 @@ def run(body: RunBody):
                 if _model_id and not _is_compatible(_raw_provider, _model_id):
                     # Inferir provider correto para o modelo
                     ml = _model_id.lower()
-                    if ml.startswith("us.anthropic"):
+                    if "gemini" in ml:
+                        _corrected = "google"
+                    elif ml.startswith("us.anthropic"):
                         _corrected = "bedrock"
                     elif any(x in ml for x in ("claude", "sonnet", "opus", "haiku")):
                         _corrected = "anthropic"
@@ -426,6 +446,43 @@ def run(body: RunBody):
                     env["CLAUDE_API_KEY"] = _api_key
                 elif _effective_provider == "anthropic" and _api_key:
                     env["CLAUDE_API_KEY"] = _api_key
+                elif _effective_provider == "google":
+                    # BYOC: chave do slot vence a do container; ausente ⇒ herda a do host.
+                    if _llm_cfg.get("googleApiKey"):
+                        env["GOOGLE_API_KEY"]  = _llm_cfg["googleApiKey"]
+                    if _llm_cfg.get("googleBaseUrl"):
+                        env["GOOGLE_BASE_URL"] = _llm_cfg["googleBaseUrl"]
+                    if _llm_cfg.get("vertexProjectId"):
+                        env["GOOGLE_VERTEX_PROJECT"] = _llm_cfg["vertexProjectId"]
+                    if _llm_cfg.get("vertexLocation"):
+                        env["GOOGLE_VERTEX_LOCATION"] = _llm_cfg["vertexLocation"]
+                    if _llm_cfg.get("vertexServiceAccountJson"):
+                        env["GOOGLE_SERVICE_ACCOUNT_JSON"] = _llm_cfg["vertexServiceAccountJson"]
+                    env.pop("CLAUDE_API_KEY", None)
+                elif _effective_provider == "foundry":
+                    # BYOC: se o slot do tenant traz credencial própria, ela VENCE a do container.
+                    # Ausente ⇒ mantém a do env (identidade do host), que é o caso do slot Padrão
+                    # da ZFactory. Nunca logar o valor da chave.
+                    if _llm_cfg.get("foundryApiKey"):
+                        env["ANTHROPIC_FOUNDRY_API_KEY"]  = _llm_cfg["foundryApiKey"]
+                    if _llm_cfg.get("foundryResource"):
+                        env["ANTHROPIC_FOUNDRY_RESOURCE"] = _llm_cfg["foundryResource"]
+                    if _llm_cfg.get("foundryBaseUrl"):
+                        env["ANTHROPIC_FOUNDRY_BASE_URL"] = _llm_cfg["foundryBaseUrl"]
+                    # Foundry não usa CLAUDE_API_KEY; limpar para não vazar chave de outro provider.
+                    env.pop("CLAUDE_API_KEY", None)
+                elif _effective_provider == "azure_openai":
+                    # A chamada é endereçada por endpoint + deployment + api-version. Sem eles o
+                    # slot existia só na tela: o dispatch caía no ramo Anthropic (API pública).
+                    if _api_key:
+                        env["AZURE_OPENAI_API_KEY"] = _api_key
+                    if _llm_cfg.get("azureEndpoint"):
+                        env["AZURE_OPENAI_ENDPOINT"] = _llm_cfg["azureEndpoint"]
+                    if _llm_cfg.get("azureDeployment"):
+                        env["AZURE_OPENAI_DEPLOYMENT"] = _llm_cfg["azureDeployment"]
+                    if _llm_cfg.get("azureApiVersion"):
+                        env["AZURE_OPENAI_API_VERSION"] = _llm_cfg["azureApiVersion"]
+                    env.pop("CLAUDE_API_KEY", None)
                 elif _effective_provider == "bedrock":
                     # Bedrock usa credenciais AWS do env — não sobrescrever com OpenAI key
                     if _llm_cfg.get("awsAccessKeyId"):
@@ -446,13 +503,48 @@ def run(body: RunBody):
                     # Se não há fallback explícito, remover override para usar o default do runner
                     env.pop("CLAUDE_MODEL_REWORK", None)
 
+                _slot_resolved = bool(_model_id) and bool(_effective_provider)
                 _is_default = _llm_cfg.get("isDefault", True)
                 logger.info("[FT-13] LLM config resolvida: provider=%s model=%s fallback=%s isDefault=%s",
                             _effective_provider, _model_id, _fallback_model or "none", _is_default)
+        except HTTPException:
+            raise
         except Exception as _llm_err:
-            logger.warning("[FT-13] Não foi possível resolver LLM config via API (%s) — usando env atual", _llm_err)
+            # ⚖️ LEI 2026-09-10 (Jean): *"todo o Tenant precisa realmente configurar em Configuração
+            # de LLM seus slots"*. Aqui estava escrito "usando env atual" — o run seguia na conta da
+            # ZENTRIZ sempre que a resolução falhasse (inclusive no 422 novo da api, que é
+            # justamente "este tenant não tem slot utilizável"). Falhar alto é o ponto da lei.
+            logger.error("[FT-13] LLM config do projeto não resolvida (%s) — run RECUSADO", _llm_err)
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Não foi possível resolver a configuração de LLM deste projeto. "
+                    "Cadastre ao menos um slot com credenciais próprias em Configurações → LLM "
+                    f"(motivo: {_llm_err})."
+                ),
+            )
 
-        if not env.get("CLAUDE_API_KEY") and env.get("GENESIS_LLM_PROVIDER", "bedrock") != "bedrock":
+        # ⚖️ LEI 2026-09-10: sem default `"bedrock"`. O provider tem de ter vindo do SLOT logo acima;
+        # vazio significa que nada foi resolvido e o run rodaria na identidade do container.
+        _prov_now = env.get("GENESIS_LLM_PROVIDER", "").strip()
+        if not _slot_resolved or not _prov_now or not env.get("CLAUDE_MODEL", "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Este projeto não tem provider/modelo de LLM resolvido a partir dos slots do "
+                    "tenant. Cadastre um slot em Configurações → LLM antes de iniciar o run."
+                ),
+            )
+        if _prov_now == "foundry":
+            if not env.get("ANTHROPIC_FOUNDRY_API_KEY"):
+                logger.warning("ANTHROPIC_FOUNDRY_API_KEY não definida; o runner falhará ao chamar os agentes")
+        elif _prov_now == "google":
+            if not (env.get("GOOGLE_API_KEY") or env.get("GOOGLE_VERTEX_PROJECT")):
+                logger.warning("provider=google sem GOOGLE_API_KEY nem GOOGLE_VERTEX_PROJECT; o runner falhará")
+        elif _prov_now == "azure_openai":
+            if not (env.get("AZURE_OPENAI_API_KEY") and env.get("AZURE_OPENAI_ENDPOINT")):
+                logger.warning("provider=azure_openai sem API Key/Endpoint; o runner falhará")
+        elif not env.get("CLAUDE_API_KEY") and _prov_now != "bedrock":
             logger.warning("CLAUDE_API_KEY não definida; o runner pode falhar ao chamar os agentes")
 
         # Runtime Config: sobrescreve env com valores da tabela genesis_runtime_config

@@ -1,6 +1,8 @@
 // Endpoint interno — resolvido pelo runner_server (não exposto ao portal)
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { resolveProjectLlmConfig } from "../services/tenantLlmConfig.js";
+import {
+  resolveProjectLlmCandidates, LlmSlotNotConfiguredError, type LlmSelectionStrategy,
+} from "../services/tenantLlmConfig.js";
 import { verifyToken, signTokenWithExpiry, type TokenPayload } from "../auth.js";
 import { pool } from "../db/client.js";
 
@@ -47,7 +49,7 @@ function authenticateInternal(request: FastifyRequest): { ok: true; payload: Tok
 export async function internalLlmRoutes(app: FastifyInstance): Promise<void> {
   // FT-13: GET /api/internal/project-llm-config/:projectId
   // Autenticado via token interno estático OU JWT válido (fail-closed em prod).
-  app.get<{ Params: { projectId: string } }>(
+  app.get<{ Params: { projectId: string }; Querystring: { strategy?: string } }>(
     "/api/internal/project-llm-config/:projectId",
     async (request, reply) => {
       const auth = authenticateInternal(request);
@@ -91,12 +93,36 @@ export async function internalLlmRoutes(app: FastifyInstance): Promise<void> {
         }
       }
 
+      // `?strategy=strongest` — o Cyborg pede o modelo MAIS FORTE entre os slots do tenant
+      // (Jean, 2026-09-10), em vez do 1º da fila. Qualquer outro valor cai no padrão `priority`:
+      // um typo aqui não pode silenciosamente mudar QUAL slot (logo, qual credencial) roda.
+      const strategy: LlmSelectionStrategy =
+        (request.query?.strategy ?? "").trim() === "strongest" ? "strongest" : "priority";
+
       try {
-        const cfg = await resolveProjectLlmConfig(projectId);
+        // ⚖️ Jean, 2026-09-10: *"em caso de não funcionar testa o próximo"*. O corpo continua sendo
+        // o slot ESCOLHIDO no topo (nenhum consumidor existente muda), com a fila completa em
+        // `candidates` — campo aditivo que o Cyborg e o runner usam para cair para a contingência
+        // sem voltar aqui. Cada item traz o envelope INTEIRO: trocar de slot troca de credencial.
+        const [cfg, ...contingencias] = await resolveProjectLlmCandidates(projectId, { strategy });
         // Nunca retornar api_key completa — runner_server injeta via env, não via response body
         // Mas aqui sim retornamos tudo pois é chamada interna server-to-server (não browser)
-        return reply.send({ ok: true, ...cfg });
+        return reply.send({
+          ok: true, ...cfg,
+          ...(contingencias.length ? { candidates: [cfg, ...contingencias] } : {}),
+        });
       } catch (err) {
+        // ⚖️ LEI 2026-09-10: "este tenant não tem slot utilizável" é uma condição de NEGÓCIO, não
+        // uma falha do servidor. Como 422 o `runner_server` recusa o run com a mensagem certa; como
+        // 500 ele caía no `except` genérico, que até hoje dizia "usando env atual" — o vazamento.
+        if (err instanceof LlmSlotNotConfiguredError) {
+          return reply.status(422).send({
+            code: err.code,
+            message:
+              "Nenhum slot de LLM utilizável para este projeto. Cadastre um slot com credenciais " +
+              "próprias em Configurações → LLM.",
+          });
+        }
         return reply.status(500).send({ code: "INTERNAL_ERROR", message: String(err) });
       }
     }
@@ -208,16 +234,27 @@ export async function internalLlmRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(401).send({ code: "UNAUTHORIZED" });
     }
     const body = request.body as Record<string, unknown>;
+    // ⚖️ LEI 2026-09-10: nem a config global tem modelo por omissão. Aqui havia
+    // `?? "us.anthropic.claude-sonnet-4-6"` — salvar sem `model_id` gravava um modelo que ninguém
+    // escolheu e que depois apareceria como "escolha da Zentriz" em runs de tenant.
+    const provider = String(body.provider ?? "").trim();
+    const modelId = String(body.model_id ?? "").trim();
+    if (!provider || !modelId) {
+      return reply.status(400).send({
+        code: "BAD_REQUEST",
+        message: "provider e model_id são obrigatórios (sem default de plataforma).",
+      });
+    }
+    // ⚠️ 2026-09-10 (migration 126): a tabela deixou de ser singleton — o índice `((TRUE))` foi
+    // dropado para caber a fila 0..3 da conta de gestão. Sem esta reescrita o `ON CONFLICT ((TRUE))`
+    // passaria a dar "no unique or exclusion constraint matching" e este endpoint quebraria.
+    // Este caminho legado escreve sempre o slot PRINCIPAL (priority 0).
     await pool.query(
-      `INSERT INTO zentriz_llm_config (provider, model_id, credentials, is_active, updated_at)
-       VALUES ($1, $2, $3, true, now())
-       ON CONFLICT ((TRUE)) DO UPDATE SET
+      `INSERT INTO zentriz_llm_config (priority, provider, model_id, credentials, is_active, updated_at)
+       VALUES (0, $1, $2, $3, true, now())
+       ON CONFLICT (priority) DO UPDATE SET
          provider=$1, model_id=$2, credentials=$3, is_active=true, updated_at=now()`,
-      [
-        String(body.provider ?? "anthropic"),
-        String(body.model_id ?? "us.anthropic.claude-sonnet-4-6"),
-        JSON.stringify(body.credentials ?? {}),
-      ]
+      [provider, modelId, JSON.stringify(body.credentials ?? {})]
     );
     return reply.send({ ok: true });
   });
