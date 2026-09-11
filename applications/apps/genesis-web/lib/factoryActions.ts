@@ -27,6 +27,11 @@ export const FACTORY_LABEL = {
   unpromote: "Devolver à Bancada",
   /** `POST /api/projects/:id/stop` — SIGTERM→SIGKILL; não existe parada graciosa. */
   stopRun: "Interromper execução",
+  /** `POST /api/products/:id/normalize` — gera/atualiza os documentos de decisão e DESTRAVA o promover. */
+  normalize: "Normalizar",
+  normalizing: "Normalizando…",
+  /** Mesma ação com a normalização já em dia — o clique refaz por cima. */
+  renormalize: "Normalizar de novo",
 } as const;
 
 /** `POST /api/products/:id/start` dispara SÓ a onda pendente mais baixa — o rótulo diz qual. */
@@ -48,7 +53,93 @@ export const FACTORY_TOOLTIP = {
   unpromote:
     "Devolve o produto e seus projetos à Bancada (a spec volta a ser editável). " +
     "Recusado se a fábrica já começou.",
+  normalize:
+    "Gera/atualiza os documentos de decisão do produto (RFC, ADR e o índice Connect) a partir da " +
+    "spec vigente — sem inventar requisito. É o que destrava a promoção à fábrica.",
+  /** Escopo de UMA spec (`POST /api/projects/:id/normalize`) — o caso do rascunho no INBOX. */
+  normalizeSpec:
+    "Escreve o RFC e o registro de decisão desta spec (modelo Zentriz Connect), a partir do que ela " +
+    "já diz — sem inventar requisito. É o que faz o botão de promover aparecer.",
 } as const;
+
+/**
+ * Linha que ocupa o lugar do botão de promover enquanto a spec não está normalizada.
+ *
+ * Pedido do Jean (2026-09-11): *"melhor é que promover só apareça depois de normalizado"*. Botão que
+ * some sem explicação é pior que botão desabilitado (revisão adversarial R2) — então o lugar dele
+ * nunca fica mudo.
+ */
+export const PROMOTE_HIDDEN_UNTIL_NORMALIZED =
+  "Promover aparece depois de normalizar.";
+
+/**
+ * Veredito de promovibilidade COMO O SERVIDOR MANDA (`services/promotability.ts`).
+ *
+ * Achado do Jean (2026-09-11): três telas decidiam sozinhas "posso promover?" e divergiram — em
+ * `/spec` o botão aparecia habilitado num produto `running`, onde o clique só podia dar 409. Agora
+ * a decisão é uma só, do servidor, e a tela apenas renderiza o motivo que ele mandou.
+ */
+export interface PromotionVerdict {
+  /** `true` pode · `false` não pode · `null` o servidor NÃO conferiu (botão continua visível). */
+  canPromote: boolean | null;
+  /** `NOT_ON_WORKBENCH` (já saiu da Bancada) · `NOT_NORMALIZED` (falta doc) · `null`. */
+  reason: string | null;
+  message: string | null;
+  normalized: boolean | null;
+}
+
+/**
+ * O que a tela desenha no lugar do botão de promover.
+ *
+ * `show: false` só acontece quando o servidor disse `canPromote === false` — nunca por dedução da
+ * tela e nunca por erro nosso: sem veredito (`null`, payload antigo, falha de rede) o botão FICA e
+ * quem recusa é o `/promote`, com a mensagem certa. `normalizedFallback` atende o ambiente que
+ * ainda não devolve `promotion` no payload.
+ */
+export function promoteGate(
+  promotion: PromotionVerdict | null | undefined,
+  normalizedFallback?: boolean | null,
+): { show: boolean; message: string | null } {
+  if (promotion && promotion.canPromote === false) {
+    return { show: false, message: promotion.message ?? PROMOTE_HIDDEN_UNTIL_NORMALIZED };
+  }
+  if (!promotion && normalizedFallback === false) {
+    return { show: false, message: PROMOTE_HIDDEN_UNTIL_NORMALIZED };
+  }
+  return { show: true, message: null };
+}
+
+/**
+ * Normalizar só faz sentido enquanto ele DESTRAVA alguma coisa. Num produto que já saiu da Bancada
+ * (`NOT_ON_WORKBENCH`) documentar continua valendo — o que não vale é prometer que isso libera o
+ * promover. O rótulo muda para não mentir.
+ */
+export function normalizeLabel(promotion: PromotionVerdict | null | undefined, normalized: boolean | null): string {
+  const done = promotion?.normalized ?? normalized;
+  return done === true ? FACTORY_LABEL.renormalize : FACTORY_LABEL.normalize;
+}
+
+/** Resultado de `POST /projects/:id/normalize` (uma spec). */
+export function normalizedSpecNotice(documents: number): string {
+  return `Spec normalizada: ${documents} arquivo(s) de documentação gravados. Promover já aparece no card.`;
+}
+
+/**
+ * Resultado de `POST /products/:id/normalize`.
+ *
+ * `unlocksPromote=false` para produto que já saiu da Bancada: documentar continua valendo (é o
+ * único jeito de ele ter RFC/ADR), mas prometer que isso "liberou o promover" seria mentira — o
+ * promover daquele produto está fechado por ESTADO, não por falta de documento.
+ */
+export function normalizedProductNotice(documents: number, skipped: number, unlocksPromote = true): string {
+  const tail = unlocksPromote
+    ? "Promover está liberado."
+    : "O produto já saiu da Bancada — a documentação fica em dia, mas não há promoção a destravar.";
+  const base = `Produto normalizado: ${documents} arquivo(s) de documentação gravados. ${tail}`;
+  return skipped > 0
+    ? `${base} ${skipped} projeto(s) ficaram de fora (spec editada após a aprovação) — veja os detalhes.`
+    : base;
+}
 
 /** Rótulo do botão de promoção da Bancada — o escopo pode ser desconhecido até carregar o dono. */
 export function promoteButtonLabel(scope: PromoteScope | null): string {

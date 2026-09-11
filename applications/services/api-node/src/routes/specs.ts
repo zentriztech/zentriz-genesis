@@ -27,6 +27,8 @@ import {
   type ExtractedFile,
 } from "../services/specTextExtract.js";
 import { createRateLimiter, clientIp } from "../services/rateLimit.js";
+import { isProjectNormalized, type Queryable } from "../services/productNormalizer.js";
+import { decideSpecPromotability } from "../services/promotability.js";
 
 const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
 
@@ -35,6 +37,40 @@ const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
 // com o enum de status em db/migrations/001_initial_schema.sql.
 const SPEC_LISTING_STATUSES = ["draft", "spec_submitted", "pending_conversion"];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// RFC-0008 emenda 01: quantas specs por listagem podem ter o carimbo CONFERIDO contra o disco. Só
+// entra na conta quem já tem `extra.normalized_hash` (o caso dominante é nenhuma ⇒ zero I/O). Acima
+// do teto o campo vai `null` = "não sei" — e `null` NUNCA esconde o botão (quem decide é o servidor,
+// na hora do promote).
+const NORMALIZED_CHECK_MAX_SPECS = 40;
+
+/**
+ * Diz, por spec, se a documentação de decisão está EM DIA com a spec que ela tem agora. É o que a
+ * Bancada usa para mostrar (ou não) o botão de promover. Falha de leitura ⇒ `null`, nunca `false`:
+ * esconder o botão por erro nosso deixaria o usuário sem saída aparente.
+ */
+async function attachNormalized(
+  client: Queryable,
+  rows: Array<Record<string, unknown>>,
+  log: { warn: (obj: unknown, msg?: string) => void },
+): Promise<Map<string, boolean | null>> {
+  const out = new Map<string, boolean | null>();
+  let checked = 0;
+  for (const r of rows) {
+    const id = String(r.id);
+    const extra = (r.extra ?? {}) as Record<string, unknown>;
+    const stamp = typeof extra.normalized_hash === "string" ? extra.normalized_hash : "";
+    if (!stamp) { out.set(id, false); continue; }
+    if (checked >= NORMALIZED_CHECK_MAX_SPECS) { out.set(id, null); continue; }
+    checked++;
+    try {
+      out.set(id, (await isProjectNormalized(client, id)).normalized);
+    } catch (err) {
+      log.warn({ err, projectId: id }, "[specs] carimbo de normalização não pôde ser conferido");
+      out.set(id, null);
+    }
+  }
+  return out;
+}
 /** 🔴 GAP-130: teto da triagem em lote. Existe (anti-abuso), mas o excedente é RECUSADO, não sumido. */
 const TRIAGE_BULK_MAX = 200;
 
@@ -464,12 +500,25 @@ export async function specRoutes(app: FastifyInstance) {
         // Certificado Genesis Factory (flag OFF por padrão): só ANEXA um campo — com a flag
         // desligada o payload é byte-idêntico ao legado. O escopo de tenant vem de `rows`
         // (já filtrado acima), nunca de parâmetro do cliente (A8 / P0 de vazamento 2026-09-03).
+        const normalizedById = await attachNormalized(client, rows as Array<Record<string, unknown>>, request.log);
+        // ⚠️ `??` NÃO serve aqui: `null` é valor legítimo ("não conferido") e `?? false` o
+        // converteria em "não documentado" — erro nosso escondendo o botão, exatamente o que a
+        // revisão adversarial proibiu. Ausente no mapa (só se a spec sumir entre as duas listas) = false.
+        const normOf = (id: string): boolean | null =>
+          normalizedById.has(id) ? (normalizedById.get(id) as boolean | null) : false;
+        // `promotion` = o MESMO veredito das outras telas, montado aqui sem I/O extra (status já
+        // veio na listagem). Sem isto, cada tela volta a inventar a sua regra — foi assim que o
+        // Promover apareceu habilitado numa spec que a API só podia recusar.
+        const statusById = new Map(rows.map((r) => [String((r as Record<string, unknown>).id), (r as Record<string, unknown>).status as string | null]));
+        const promotionOf = (id: string) => decideSpecPromotability(statusById.get(id) ?? null, normOf(id));
         if (factoryCertificateEnabled()) {
           const certs = await computeFactoryCertificates(client as unknown as { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> }, enriched.map((s) => s.id))
             .catch((err) => { request.log.warn({ err }, "factory certificate failed; specs sem selo"); return new Map(); });
-          return reply.send(enriched.map((s) => ({ ...s, factoryCertificate: certs.get(s.id) ?? null })));
+          return reply.send(enriched.map((s) => ({
+            ...s, factoryCertificate: certs.get(s.id) ?? null, normalized: normOf(s.id), promotion: promotionOf(s.id),
+          })));
         }
-        return reply.send(enriched);
+        return reply.send(enriched.map((s) => ({ ...s, normalized: normOf(s.id), promotion: promotionOf(s.id) })));
       } catch (err) {
         request.log.warn({ err }, "spec enrichment failed; returning bare specs");
         return reply.send(rows);

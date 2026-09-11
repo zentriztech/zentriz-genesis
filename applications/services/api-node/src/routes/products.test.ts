@@ -225,18 +225,44 @@ describe("POST /api/products/:id/promote — o PRODUTO TODO, na ORDEM, SEM inici
     outputTokens: 300,
   });
 
-  // Roteia as queries do promote: SELECT produto, UPDATE lifecycle, UPDATE dos projetos.
+  /**
+   * RFC-0008 Emenda 01 — o produto do duplo TEM projetos, então o promote passa de verdade pela
+   * trava [Normalizar]. O hash semeado sai do MESMO serviço que a rota usa (não de uma cópia da
+   * fórmula no teste): o que se prova aqui é a TRAVA (409 vs 202), não a fórmula — essa está
+   * coberta em productNormalizer.test.ts.
+   */
+  const productProjects = [
+    { id: R1, title: "DB", status: "draft", extra: {}, project_type: null },
+    { id: R2, title: "API", status: "draft", extra: {}, project_type: null },
+  ];
+  async function normalizedHashFor(name = "Produto X", systemId: string | null = null): Promise<string> {
+    const { computeProductSpecHash } = await import("../services/productNormalizer.js");
+    const db = { query: async () => ({ rows: [] as Record<string, unknown>[] }) };
+    const projs = productProjects.map((p) => ({
+      projectId: p.id, title: p.title, status: p.status, projectType: null, extra: {},
+    }));
+    return (await computeProductSpecHash(db, { id: PROD_ID, systemId, name }, projs)).hash;
+  }
+
+  // Roteia as queries do promote: SELECT produto, projetos do produto, UPDATE lifecycle, UPDATE dos projetos.
   function promoteHandler(opts: {
     tenant?: string | null; lifecycle?: string; updRowCount?: number; promotedIds?: string[];
-    pendingWave?: Array<{ project_id: string; wave: number }>;
+    pendingWave?: Array<{ project_id: string; wave: number }>; normalizedHash?: string | null;
   }) {
     const {
       tenant = TENANT, lifecycle = "draft", updRowCount = 1, promotedIds = [R1, R2],
       pendingWave = [{ project_id: R1, wave: 1 }, { project_id: R2, wave: 2 }],
+      normalizedHash = null,
     } = opts;
     return (sql: string) => {
       if (sql.includes("lifecycle_status, is_inbox FROM products WHERE id")) {
-        return { rows: [{ id: PROD_ID, tenant_id: tenant, name: "Produto X", lifecycle_status: lifecycle, is_inbox: false }] };
+        return { rows: [{
+          id: PROD_ID, tenant_id: tenant, name: "Produto X", system_id: null,
+          normalized_hash: normalizedHash, lifecycle_status: lifecycle, is_inbox: false,
+        }] };
+      }
+      if (sql.includes("FROM projects p") && sql.includes("p.product_id = $1")) {
+        return { rows: productProjects };
       }
       if (sql.includes("UPDATE products SET lifecycle_status = 'promoted'")) {
         return { rows: [], rowCount: updRowCount } as { rows: unknown[]; rowCount: number };
@@ -252,7 +278,7 @@ describe("POST /api/products/:id/promote — o PRODUTO TODO, na ORDEM, SEM inici
   beforeEach(() => { plannerResult = async () => twoWavePlan(); plannerSpy.mockClear(); });
 
   it("promove TODOS os projetos do plano e NÃO inicia nenhum (requisito do Jean)", async () => {
-    queryHandler = promoteHandler({ tenant: OTHER_TENANT });
+    queryHandler = promoteHandler({ tenant: OTHER_TENANT, normalizedHash: await normalizedHashFor() });
     const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
     expect(res.statusCode).toBe(202);
     const body = JSON.parse(res.body);
@@ -275,7 +301,7 @@ describe("POST /api/products/:id/promote — o PRODUTO TODO, na ORDEM, SEM inici
   });
 
   it("com {start:true} dispara SOMENTE a onda 1 (barreira entre ondas)", async () => {
-    queryHandler = promoteHandler({});
+    queryHandler = promoteHandler({ normalizedHash: await normalizedHashFor() });
     const res = await app.inject({
       method: "POST", url: `/api/products/${PROD_ID}/promote`, payload: { start: true },
     });
@@ -287,7 +313,7 @@ describe("POST /api/products/:id/promote — o PRODUTO TODO, na ORDEM, SEM inici
   });
 
   it("planejador recusa (ciclo/id inválido/sem spec) → 422 e NADA muda de estado", async () => {
-    queryHandler = promoteHandler({});
+    queryHandler = promoteHandler({ normalizedHash: await normalizedHashFor() });
     plannerResult = null; // planejador lança PromotionPlanError
     const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
     expect(res.statusCode).toBe(422);
@@ -308,7 +334,7 @@ describe("POST /api/products/:id/promote — o PRODUTO TODO, na ORDEM, SEM inici
   });
 
   it("dupla promoção concorrente (UPDATE rowCount 0) → 409 ALREADY_PROMOTED com ROLLBACK", async () => {
-    queryHandler = promoteHandler({ updRowCount: 0 });
+    queryHandler = promoteHandler({ updRowCount: 0, normalizedHash: await normalizedHashFor() });
     const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
     expect(res.statusCode).toBe(409);
     expect(JSON.parse(res.body).code).toBe("ALREADY_PROMOTED");
@@ -316,6 +342,68 @@ describe("POST /api/products/:id/promote — o PRODUTO TODO, na ORDEM, SEM inici
     expect(captured.some((q) => q.sql.includes("INSERT INTO product_promotions"))).toBe(false);
     await flushImmediate();
     expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  // ── TRAVA [Normalizar] (RFC-0008 Emenda 01) ────────────────────────────────
+  it("produto nunca normalizado → 409 NOT_NORMALIZED, sem gastar o planejador", async () => {
+    queryHandler = promoteHandler({ normalizedHash: null });
+    const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).code).toBe("NOT_NORMALIZED");
+    await flushImmediate();
+    expect(plannerSpy).not.toHaveBeenCalled();
+    expect(captured.some((q) => /UPDATE products SET lifecycle_status|UPDATE projects SET status/.test(q.sql))).toBe(false);
+    expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it("spec editada DEPOIS de normalizar (hash velho) → 409 NOT_NORMALIZED dizendo que mudou", async () => {
+    queryHandler = promoteHandler({ normalizedHash: "hash-de-uma-spec-anterior" });
+    const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
+    expect(res.statusCode).toBe(409);
+    const body = JSON.parse(res.body);
+    expect(body.code).toBe("NOT_NORMALIZED");
+    expect(body.message).toMatch(/spec mudou/i);
+    expect(body.currentHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(plannerSpy).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Revisão adversarial pós-implementação (2026-09-11): a versão anterior da trava fazia
+   * `loadProductProjects(...).catch(() => [])` — e um banco intermitente virava promoção SEM
+   * documentação, calada. A trava tem de falhar ALTO: erro de infraestrutura nunca promove.
+   */
+  it("falha ao avaliar a trava (banco intermitente) NÃO promove — nunca degrada em silêncio", async () => {
+    const base = promoteHandler({ normalizedHash: await normalizedHashFor() });
+    queryHandler = (sql: string) => {
+      if (sql.includes("FROM projects p") && sql.includes("p.product_id = $1")) {
+        throw new Error("connection terminated unexpectedly");
+      }
+      return base(sql);
+    };
+    const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
+    expect(res.statusCode).toBeGreaterThanOrEqual(500);
+    await flushImmediate();
+    expect(plannerSpy).not.toHaveBeenCalled();
+    expect(captured.some((q) => /UPDATE products SET lifecycle_status|UPDATE projects SET status/.test(q.sql))).toBe(false);
+    expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it("produto acima do teto do normalizador → 409 declarado (não passa batido)", async () => {
+    const many = Array.from({ length: 61 }, (_, i) => ({
+      id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+      title: `P${i}`, status: "draft", extra: {}, project_type: null,
+    }));
+    const base = promoteHandler({ normalizedHash: await normalizedHashFor() });
+    queryHandler = (sql: string) => {
+      if (sql.includes("FROM projects p") && sql.includes("p.product_id = $1")) return { rows: many };
+      return base(sql);
+    };
+    const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
+    expect(res.statusCode).toBe(409);
+    const body = JSON.parse(res.body);
+    expect(body.code).toBe("NOT_NORMALIZED");
+    expect(body.reason).toBe("TOO_MANY_PROJECTS");
+    expect(plannerSpy).not.toHaveBeenCalled();
   });
 
   it("id não-UUID → 400 sem tocar o banco", async () => {

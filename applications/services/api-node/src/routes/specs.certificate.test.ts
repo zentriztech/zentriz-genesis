@@ -22,6 +22,8 @@ vi.mock("../middleware/auth.js", () => ({
 }));
 
 const captured: Array<{ sql: string; params: unknown[] }> = [];
+// `extra` das specs devolvidas pela listagem — o carimbo `normalized_hash` mora aqui.
+let specExtra: Record<string, unknown> = {};
 vi.mock("../db/client.js", () => ({
   pool: {
     connect: async () => ({
@@ -30,8 +32,8 @@ vi.mock("../db/client.js", () => ({
         const s = sql.replace(/\s+/g, " ");
         if (s.includes("FROM projects p") && s.includes("p.status = ANY($1)")) {
           return { rows: [
-            { id: SPEC_A, title: "tms", status: "draft", extra: {}, complexity_hint: "medium" },
-            { id: SPEC_B, title: "identity", status: "draft", extra: {}, complexity_hint: "medium" },
+            { id: SPEC_A, title: "tms", status: "draft", extra: specExtra, complexity_hint: "medium" },
+            { id: SPEC_B, title: "identity", status: "draft", extra: specExtra, complexity_hint: "medium" },
           ] };
         }
         return { rows: [] };
@@ -53,9 +55,26 @@ vi.mock("../services/factoryCertificate.js", async (orig) => ({
   computeFactoryCertificates: (db: unknown, ids: string[]) => certSpy(db, ids),
 }));
 
+// Trava de normalização (RFC-0008 emenda 01): a listagem diz, por spec, se os documentos de decisão
+// estão em dia — é isso que faz o botão de promover aparecer ou não na Bancada.
+let normalizedResult: { normalized: boolean; storedHash: string | null; currentHash: string | null } =
+  { normalized: true, storedHash: "h", currentHash: "h" };
+let normalizedThrows = false;
+const normalizedSpy = vi.fn(async () => {
+  if (normalizedThrows) throw new Error("disco fora");
+  return normalizedResult;
+});
+vi.mock("../services/productNormalizer.js", () => ({
+  isProjectNormalized: () => normalizedSpy(),
+}));
+
 let app: FastifyInstance;
 
 beforeEach(async () => {
+  normalizedResult = { normalized: true, storedHash: "h", currentHash: "h" };
+  normalizedThrows = false;
+  specExtra = {};
+  normalizedSpy.mockClear();
   const { specRoutes } = await import("./specs.js");
   app = Fastify();
   await app.register(specRoutes);
@@ -86,6 +105,29 @@ describe("GET /api/specs — Certificado Genesis Factory", () => {
     // O escopo veio da query da listagem (tenant do usuário), não de parâmetro do cliente.
     const listing = captured.find((q) => q.sql.includes("p.status = ANY($1)"));
     expect(listing?.params[1]).toBe(TENANT);
+  });
+
+  it("spec SEM carimbo → normalized:false e ZERO leitura de disco (caso dominante)", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/specs" });
+    const body = res.json() as Array<Record<string, unknown>>;
+    expect(body.map((s) => s.normalized)).toEqual([false, false]);
+    expect(normalizedSpy).not.toHaveBeenCalled();
+  });
+
+  it("spec COM carimbo é conferida contra o disco (o carimbo sozinho não vale)", async () => {
+    specExtra = { normalized_hash: "h" };
+    normalizedResult = { normalized: true, storedHash: "h", currentHash: "h" };
+    const res = await app.inject({ method: "GET", url: "/api/specs" });
+    expect(normalizedSpy).toHaveBeenCalledTimes(2);
+    expect((res.json() as Array<Record<string, unknown>>).map((s) => s.normalized)).toEqual([true, true]);
+  });
+
+  it("falha ao conferir → normalized:null (NUNCA false — erro nosso não esconde o botão)", async () => {
+    specExtra = { normalized_hash: "h" };
+    normalizedThrows = true;
+    const res = await app.inject({ method: "GET", url: "/api/specs" });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as Array<Record<string, unknown>>).map((s) => s.normalized)).toEqual([null, null]);
   });
 
   it("flag ON + falha no cálculo: `factoryCertificate: null` e listagem intacta", async () => {

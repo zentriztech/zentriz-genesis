@@ -15,6 +15,14 @@ import { checkTenantBudget, budgetExceededMessage } from "../services/tenantCost
 // evento de valor Bancada→fábrica — os dois eram exclusivos do /run e da promoção de produto.
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
 import { emitValueEvent } from "../services/valueEvents.js";
+// RFC-0008 emenda 01 (2026-09-11): nada entra na fábrica sem documento de decisão. O `/promote` de
+// PRODUTO já tinha a trava; este caminho atômico não tinha — e é justamente o que o Jean usa.
+import {
+  isProjectNormalized, normalizeProject, NormalizationError, debitNormalizerUsage,
+} from "../services/productNormalizer.js";
+// O veredito de "posso promover?" é do SERVIDOR (achado do Jean 2026-09-11: três telas decidiam
+// sozinhas e divergiram) — ver `services/promotability.ts`.
+import { decideSpecPromotability } from "../services/promotability.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 
@@ -152,6 +160,33 @@ export async function pipelineRoutes(app: FastifyInstance) {
         request.log.warn({ projectId, err: String(err) }, "[Pipeline/promote] gate de conteúdo: falha ao ler spec (ignorado)");
       }
 
+      // ⚠️ TRAVA DE NORMALIZAÇÃO (RFC-0008 emenda 01). O carimbo é `extra.normalized_hash` e vale
+      // para a spec que o projeto tem AGORA: editou depois de normalizar, retrava sozinho. A trava
+      // NUNCA degrada em silêncio — se não der para avaliá-la, o promote falha alto (o `.catch(()=>[])`
+      // do caminho de produto provou que engolir o erro vira promoção sem documento, sem ninguém ver).
+      {
+        let norm: Awaited<ReturnType<typeof isProjectNormalized>>;
+        try {
+          norm = await isProjectNormalized(client, projectId);
+        } catch (err) {
+          request.log.error({ err, projectId }, "[Pipeline/promote] falha ao avaliar a trava de normalização");
+          return reply.status(500).send({
+            code: "NORMALIZATION_CHECK_FAILED",
+            message: "Não foi possível verificar se esta spec está documentada. Tente de novo.",
+          });
+        }
+        if (!norm.normalized) {
+          return reply.status(409).send({
+            code: "NOT_NORMALIZED",
+            message: norm.storedHash
+              ? "A spec mudou depois de normalizada. Clique em Normalizar de novo para atualizar os documentos de decisão."
+              : "Esta spec ainda não foi normalizada. Clique em Normalizar — a Bancada escreve o RFC e o registro de decisão, e só então a promoção libera.",
+            storedHash: norm.storedHash,
+            currentHash: norm.currentHash,
+          });
+        }
+      }
+
       // §4.11 (migração 064): um App que ENTRA na fábrica não pode viver no INBOX. Promover é
       // entrar — então gradua para o produto homônimo aqui, e não só no /run. Falha ⇒ 500 e o
       // projeto continua rascunho (nada meio-promovido).
@@ -184,6 +219,157 @@ export async function pipelineRoutes(app: FastifyInstance) {
       });
       request.log.info({ projectId, productId, graduated: !!graduatedSolo }, "[Pipeline/promote] spec admitida na fábrica (não iniciada)");
       return reply.send({ ok: true, status: "promoted", productId, graduated: !!graduatedSolo });
+    } finally {
+      client.release();
+    }
+  });
+
+  // ── POST /api/projects/:id/normalize — [Normalizar] no escopo de UMA spec ──
+  //
+  // Contraparte do `POST /api/products/:id/normalize` para o caminho atômico. É esta a rota do
+  // rascunho solto no INBOX: o produto "Rascunhos" não é normalizável (os rascunhos não têm relação
+  // entre si), mas a spec É. O carimbo fica em `projects.extra.normalized_hash` e é o mesmo que o
+  // caminho de produto grava — um conceito só de "documentado", escrito pelos dois lados.
+  app.post<{ Params: { id: string }; Body: { force?: boolean } }>(
+    "/api/projects/:id/normalize",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id: projectId } = request.params;
+      const force = (request.body ?? {}).force === true;
+      const client = await pool.connect();
+      try {
+        const allowed = await checkProjectAccess(client, projectId, user);
+        if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        const row = (await client.query(
+          `SELECT p.id, p.status, p.tenant_id, p.product_id, p.title,
+                  pr.name AS product_name, pr.system_id, pr.description
+             FROM projects p LEFT JOIN products pr ON pr.id = p.product_id
+            WHERE p.id = $1`,
+          [projectId],
+        )).rows[0];
+        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        // ⚠️ Documentar NÃO depende de estar na Bancada (achado do Jean, 2026-09-11). O recorte por
+        // status condenava tudo que já tinha saído para a Fábrica a nunca ter RFC/ADR. Normalizar
+        // não muda status — escreve documento. Quem exige `draft` é o promote, que é quem MOVE.
+        //
+        // A única guarda que resta é a corrida com o executor: a escrita em `docs/**` re-carimba
+        // `extra.spec_hash`, e o runner valida esse hash no meio da run (runner.py:5791) — abortaria
+        // com `spec_validation_failed`. Então: run em voo NESTE projeto ⇒ recusa declarada.
+        {
+          const inFlight = (await client.query(
+            "SELECT 1 FROM pipeline_runs WHERE project_id = $1 AND finished_at IS NULL LIMIT 1",
+            [projectId],
+          )).rowCount ?? 0;
+          if (inFlight > 0) {
+            return reply.status(409).send({
+              code: "RUN_IN_FLIGHT",
+              message:
+                "A Fábrica está executando esta spec agora. Normalizar escreveria na spec debaixo " +
+                "da run e a abortaria — espere a execução terminar.",
+            });
+          }
+        }
+        const tenantId = (row.tenant_id as string | null) ?? null;
+        // Orçamento antes de gastar token — normalizar é uma chamada de LLM.
+        if ((process.env.PROPOSAL_BUDGET_GATE ?? "off").toLowerCase() === "on" && tenantId) {
+          const budget = await checkTenantBudget(pool, tenantId);
+          if (!budget.ok) {
+            return reply.status(429).send({ code: "BUDGET_EXCEEDED", message: budgetExceededMessage(budget.spentUsd, budget.budgetUsd) });
+          }
+        }
+        let outcome;
+        try {
+          outcome = await normalizeProject(pool, {
+            projectId,
+            productId: (row.product_id as string | null) ?? projectId,
+            // O INBOX chama-se "Rascunhos" para todo mundo; o nome útil ao agente é o da própria spec.
+            productName: String(row.title ?? row.product_name ?? "Spec"),
+            systemId: (row.system_id as string | null) ?? null,
+            description: (row.description as string | null) ?? null,
+            tenantId,
+            force,
+          });
+        } catch (e) {
+          if (e instanceof NormalizationError) {
+            request.log.warn({ projectId, code: e.code }, "[Pipeline/normalize] normalização recusada");
+            // Mesmo no erro o token já foi gasto — debitar aqui evita o ponto cego do cost cap.
+            if (e.usage) {
+              void debitNormalizerUsage(pool, {
+                productId: (row.product_id as string | null) ?? projectId, projectId: e.usage.projectId,
+                inputTokens: e.usage.inputTokens, outputTokens: e.usage.outputTokens, model: e.usage.model,
+              });
+            }
+            return reply.status(422).send({ code: e.code, message: e.message, details: e.details });
+          }
+          throw e;
+        }
+        if (outcome.status === "already_normalized") {
+          return reply.status(200).send({
+            projectId, status: "already_normalized", normalized: true,
+            message: "A spec não mudou desde a última normalização — nada a refazer.",
+          });
+        }
+        const r = outcome.result!;
+        // O escopo PROJETO não debitava nada (só o de produto debitava) — e é o caminho mais usado.
+        void debitNormalizerUsage(pool, {
+          productId: (row.product_id as string | null) ?? projectId, projectId,
+          inputTokens: r.inputTokens, outputTokens: r.outputTokens, model: r.modelUsed,
+        });
+        void emitValueEvent(pool, {
+          tenantId,
+          eventType: "spec_normalized",
+          metadata: { project_id: projectId, scope: "project", documents: r.written.length, model: r.modelUsed },
+        });
+        return reply.status(200).send({
+          projectId,
+          status: "normalized",
+          normalized: true,
+          summary: r.summary,
+          written: r.written,
+          warnings: r.warnings,
+          truncated: r.truncated,
+          rfcProblems: r.rfcProblems,
+          modelUsed: r.modelUsed,
+        });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  // GET /api/projects/:id/normalized — a UI pergunta ao SERVIDOR se pode mostrar o Promover.
+  //
+  // Devolve o VEREDITO inteiro (`promotion`), não só o carimbo: a tela não tem como saber que
+  // promover uma spec fora de `draft` é impossível, e foi assim que o botão apareceu habilitado
+  // para o Jean num produto `running`. Quem decide é aqui; a tela só mostra o motivo.
+  app.get<{ Params: { id: string } }>("/api/projects/:id/normalized", async (request, reply) => {
+    const user = getUser(request);
+    const { id: projectId } = request.params;
+    const client = await pool.connect();
+    try {
+      const allowed = await checkProjectAccess(client, projectId, user);
+      if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      const row = (await client.query(
+        "SELECT status, extra FROM projects WHERE id = $1", [projectId],
+      )).rows[0] as { status: string | null; extra: Record<string, unknown> | null } | undefined;
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      let st: Awaited<ReturnType<typeof isProjectNormalized>> | null = null;
+      try {
+        st = await isProjectNormalized(client, projectId);
+      } catch (err) {
+        request.log.warn({ err, projectId }, "[Pipeline/normalized] falha ao conferir o carimbo");
+      }
+      // O veredito reaproveita a conferência acima — perguntar de novo leria o disco duas vezes na
+      // MESMA requisição. `st === null` (a conferência falhou) ⇒ `normalized: null` ⇒ `canPromote`
+      // nulo ⇒ a tela mantém o botão: erro nosso não esconde função do usuário.
+      const promotion = decideSpecPromotability(row.status ?? null, st ? st.normalized : null);
+      return reply.send({
+        projectId,
+        normalized: st ? st.normalized : null,
+        storedHash: st?.storedHash ?? null,
+        currentHash: st?.currentHash ?? null,
+        promotion,
+      });
     } finally {
       client.release();
     }

@@ -11,6 +11,7 @@
  * DELETE /api/products/:id/projects/:projectId   — remover projeto do produto
  *
  * GET    /api/products/:id/traceability          — mapeamento da construção (resumido/completo/misto)
+ * POST   /api/products/:id/normalize             — [Normalizar]: gera/atualiza RFC/ADR/decisions e destrava o /promote
  *
  * PATCH  /api/projects/:id/product               — associar projeto a produto (pós-criação)
  *
@@ -50,6 +51,14 @@ import { GATE_TEXT_EXT, extractDocxText, extractPdfTextBestEffort } from "../ser
 import {
   buildPromotionPlan, debitPromotionPlannerUsage, PromotionPlanError, type PromotionPlan,
 } from "../services/promotionPlanner.js";
+import {
+  normalizeProduct, computeProductSpecHash, loadProductProjects, isProductNormalized,
+  debitNormalizerUsage, NormalizationError, type NormalizeOutcome, type ProductProjectRow,
+} from "../services/productNormalizer.js";
+import { evaluateProductPromotability } from "../services/promotability.js";
+
+/** Teto de produtos cujo estado de normalização é recomputado numa listagem (R2 do adversarial). */
+const NORMALIZED_CHECK_MAX_PRODUCTS = 40;
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
 import {
   buildTraceabilityReport, isTraceabilityProfile, TRACEABILITY_PROFILES,
@@ -208,7 +217,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       //  • homônimo solo_app SEM projetos é fantasma (App ainda não graduou) → oculto via HAVING.
       const selectFragment = `
         SELECT p.id, p.name, p.description, p.status, p.lifecycle_status, p.created_at,
-               p.is_inbox, p.solo_app,
+               p.is_inbox, p.solo_app, p.system_id, p.normalized_hash, p.normalized_at,
                COUNT(proj.id)::int AS project_count,
                MIN(proj.created_at) AS oldest_project_at
         FROM products p
@@ -231,6 +240,31 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
                  AND (p.is_inbox = false OR $2::boolean = true)${tail}`,
               [user.tenantId, includeInbox]
             );
+      // RFC-0008 Emenda 01: `normalized` diz se a documentação de decisão está em dia com a spec
+      // ATUAL — é o que destrava o botão "Promover à Fábrica" na Bancada.
+      //   • sem `normalized_hash` ⇒ false, SEM tocar o disco (caso dominante);
+      //   • com hash ⇒ recomputa (I/O barato: a prod inteira tem ~71 spec files);
+      //   • `null` ⇒ "não sei aqui" (produto grande demais, R2 do adversarial) — quem decide é o
+      //     /promote, que sempre computa o hash de verdade.
+      // Teto de produtos checados por listagem para a página nunca virar refém do I/O.
+      //
+      // `promotion` (2026-09-11) é o mesmo veredito do GET de um produto: a tela não repete a regra.
+      let checked = 0;
+      for (const r of res.rows) {
+        const overBudget = !!r.normalized_hash && checked >= NORMALIZED_CHECK_MAX_PRODUCTS;
+        if (r.normalized_hash && !overBudget) checked += 1;
+        const promotion = await evaluateProductPromotability(client, {
+          id: r.id as string,
+          name: String(r.name ?? ""),
+          systemId: (r.system_id as string | null) ?? null,
+          lifecycleStatus: (r.lifecycle_status as string | null) ?? null,
+          normalizedHash: (r.normalized_hash as string | null) ?? null,
+          skipNormalizedCheck: overBudget,
+        });
+        r.normalized = promotion.normalized;
+        r.promotion = promotion;
+      }
+
       // Certificado Genesis Factory por PRODUTO (flag OFF por padrão → payload byte-idêntico).
       // Agregado AND com `n/m` (A6). Escopo: só os projetos que ainda estão na BANCADA — o selo
       // responde "quando promover, há maior garantia?"; projeto já fabricado não está esperando
@@ -978,7 +1012,18 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
          ORDER BY COALESCE(d.depth, 0) ASC, p.created_at ASC`,
         [id]
       );
-      return reply.send({ ...prod.rows[0], projects: projects.rows });
+      // RFC-0008 Emenda 01: estado da normalização para a spec ATUAL (o que destrava o /promote) e,
+      // desde 2026-09-11, o VEREDITO inteiro — normalizar não destrava produto que já saiu da
+      // Bancada, e a tela precisa saber a diferença para não prometer o que não vai acontecer.
+      const prow = prod.rows[0];
+      const promotion = await evaluateProductPromotability(client, {
+        id,
+        name: String(prow.name ?? ""),
+        systemId: (prow.system_id as string | null) ?? null,
+        lifecycleStatus: (prow.lifecycle_status as string | null) ?? null,
+        normalizedHash: (prow.normalized_hash as string | null) ?? null,
+      });
+      return reply.send({ ...prow, normalized: promotion.normalized, promotion, projects: projects.rows });
     } finally { client.release(); }
   });
 
@@ -1106,6 +1151,137 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  // ── POST /api/products/:id/normalize — passo [Normalizar], DESTRAVA o botão de promover ──
+  //
+  // Requisito do Jean (2026-09-11): "se adicionar uma etapa antes de promover (condicionado), tipo:
+  // [Normalizar] e ele cria/atualiza os docs(RFC e os que fizer sentido) possiveis e destrava o botao
+  // de promover para a fabrica".
+  //
+  // Desenho e revisão adversarial: project/docs/rfc/RFC-0008-EMENDA-01-NORMALIZAR-ANTES-DE-PROMOVER.md.
+  // O CONTEÚDO dos documentos é decisão do agente (lei do 100% LLM); o código transporta, veta
+  // corrupção e escreve os índices. Falha do normalizador ⇒ 422 e NADA é escrito — o produto
+  // continua travado, com o motivo na tela.
+  app.post<{ Params: { id: string }; Body: { force?: boolean } }>(
+    "/api/products/:id/normalize",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      if (!UUID_RE.test(id)) return reply.status(400).send({ code: "INVALID_PRODUCT_ID" });
+      const force = (request.body ?? {}).force === true;
+      const row = (await pool.query(
+        `SELECT id, tenant_id, name, description, system_id, lifecycle_status, is_inbox, normalized_hash
+           FROM products WHERE id = $1`,
+        [id],
+      )).rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND" });
+      if (row.is_inbox) {
+        return reply.status(409).send({
+          code: "INBOX_NOT_NORMALIZABLE",
+          message: "O INBOX (Rascunhos) não é um produto — normalize depois de mover a spec para um produto.",
+        });
+      }
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
+        return reply.status(404).send({ code: "NOT_FOUND" });
+      }
+      // ⚠️ Normalizar NÃO é mais exclusivo da Bancada (achado do Jean, 2026-09-11).
+      //
+      // A regra antiga (`lifecycle_status !== 'draft'` ⇒ 409) condenava o parque inteiro: MEDIDO em
+      // prod, 13 de 15 produtos já haviam saído da Bancada (accepted 10, running 1, stalled 1,
+      // ingesting 1) e portanto NUNCA poderiam ganhar RFC/ADR — foi exatamente isso que o Jean viu
+      // ("no produto … não temos RFC/ADR"). Documentar um produto que já está na Fábrica é legítimo;
+      // o que a promoção exige (estar na Bancada) é outra pergunta, respondida por `promotability`.
+      //
+      // A guarda que SOBRA é a corrida com o executor: a normalização escreve `docs/**` na árvore de
+      // spec e re-carimba `extra.spec_hash`; se o runner estiver no meio de uma run daquele projeto,
+      // ele valida o hash (runner.py:5791) e aborta com `spec_validation_failed` — a doc custaria a
+      // run. Por isso a recusa é POR PROJETO com run em voo (o red team do adversarial: "garanta que
+      // nenhum projeto que eu estou executando seja tocado — por projeto, não por produto").
+      {
+        const inFlight = (await pool.query(
+          `SELECT p.id, p.title
+             FROM pipeline_runs r
+             JOIN projects p ON p.id = r.project_id
+            WHERE p.product_id = $1 AND r.finished_at IS NULL
+            GROUP BY p.id, p.title
+            ORDER BY p.title`,
+          [id],
+        )).rows as Array<{ id: string; title: string }>;
+        if (inFlight.length > 0) {
+          return reply.status(409).send({
+            code: "RUN_IN_FLIGHT",
+            message:
+              `A Fábrica está executando ${inFlight.length} projeto(s) deste produto ` +
+              `(${inFlight.map((p) => p.title).join(", ")}). Normalizar agora escreveria na spec ` +
+              "debaixo da run e a abortaria — espere a execução terminar.",
+            projects: inFlight.map((p) => ({ projectId: p.id, title: p.title })),
+          });
+        }
+      }
+      // Orçamento antes de gastar token (o normalizador é uma chamada de LLM por produto).
+      // Mesmo gate (flag OFF por padrão) das demais chamadas de agente da Bancada.
+      if (proposalBudgetGateOn() && row.tenant_id) {
+        const budget = await checkTenantBudget(pool, row.tenant_id as string);
+        if (!budget.ok) {
+          return reply.status(429).send({ code: "BUDGET_EXCEEDED", message: budgetExceededMessage(budget.spentUsd, budget.budgetUsd) });
+        }
+      }
+      let outcome: NormalizeOutcome;
+      try {
+        outcome = await normalizeProduct(pool, {
+          productId: id,
+          productName: String(row.name ?? "Produto"),
+          systemId: (row.system_id as string | null) ?? null,
+          description: (row.description as string | null) ?? null,
+          tenantId: (row.tenant_id as string | null) ?? null,
+          storedHash: (row.normalized_hash as string | null) ?? null,
+          force,
+        });
+      } catch (e) {
+        if (e instanceof NormalizationError) {
+          request.log.warn({ productId: id, code: e.code }, "[products/normalize] normalização recusada");
+          // Recusar não devolve token: se a chamada de LLM chegou a acontecer, o gasto é debitado do
+          // mesmo jeito (senão o caminho de erro fica invisível ao cost cap — família G5).
+          if (e.usage) {
+            void debitNormalizerUsage(pool, {
+              productId: id, projectId: e.usage.projectId,
+              inputTokens: e.usage.inputTokens, outputTokens: e.usage.outputTokens, model: e.usage.model,
+            });
+          }
+          return reply.status(422).send({ code: e.code, message: e.message, details: e.details });
+        }
+        throw e;
+      }
+      if (outcome.status === "already_normalized") {
+        return reply.status(200).send({
+          productId: id, status: "already_normalized", normalized: true,
+          message: "A spec não mudou desde a última normalização — nada a refazer.",
+        });
+      }
+      const r = outcome.result!;
+      void debitNormalizerUsage(pool, {
+        productId: id, projectId: r.anchorProjectId,
+        inputTokens: r.inputTokens, outputTokens: r.outputTokens, model: r.modelUsed,
+      });
+      void emitValueEvent(pool, {
+        tenantId: (row.tenant_id as string | null) ?? null,
+        eventType: "spec_normalized",
+        metadata: { product_id: id, documents: r.written.length, model: r.modelUsed },
+      });
+      return reply.status(200).send({
+        productId: id,
+        status: "normalized",
+        normalized: true,
+        summary: r.summary,
+        written: r.written,
+        skippedProjects: r.skippedProjects,
+        warnings: r.warnings,
+        truncated: r.truncated,
+        rfcProblems: r.rfcProblems,
+        modelUsed: r.modelUsed,
+      });
+    },
+  );
+
   // ── POST /api/products/:id/promote — o PRODUTO TODO entra na fábrica, NA ORDEM, SEM iniciar ──
   //
   // Requisito do Jean (2026-09-06): "a fabrica recebi tudo os arquivos e todos os projetos que compoe
@@ -1132,7 +1308,8 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     // Guardas de leitura ANTES de tomar conexão dedicada: o planejador faz uma chamada de LLM (dezenas
     // de segundos) e segurar um client do pool nesse intervalo esgota o pool sob concorrência.
     const prod = await pool.query(
-      "SELECT id, tenant_id, name, lifecycle_status, is_inbox FROM products WHERE id = $1", [id],
+      "SELECT id, tenant_id, name, system_id, normalized_hash, lifecycle_status, is_inbox FROM products WHERE id = $1",
+      [id],
     );
     const row = prod.rows[0];
     if (!row) return reply.status(404).send({ code: "NOT_FOUND" });
@@ -1156,6 +1333,48 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         message: `Produto não está na Bancada (estado atual: ${row.lifecycle_status}).`,
         lifecycleStatus: row.lifecycle_status,
       });
+    }
+
+    // TRAVA [Normalizar] (RFC-0008 Emenda 01): o produto só entra na Fábrica com a documentação de
+    // decisão gerada PARA A SPEC QUE ELE TEM AGORA. `normalized_hash` é o hash canônico da spec no
+    // ato da normalização — editar qualquer arquivo depois invalida e a trava volta. Aqui o hash é
+    // sempre computado de verdade (o teto de R2 vale só para a listagem, que é caminho de leitura).
+    {
+      // ⚠️ A trava NUNCA degrada em silêncio (revisão adversarial pós-implementação, 2026-09-11):
+      // um `.catch(() => [])` aqui transformaria qualquer falha — banco intermitente, produto acima
+      // do teto do normalizador — em promoção SEM documentação e sem ninguém saber. Falha de
+      // avaliação vira 409 declarado; erro de infraestrutura sobe (500). `length === 0` é passagem
+      // legítima: sem nenhuma spec viva (todas arquivadas/substituídas) não há o que documentar —
+      // e o plano de promoção, que só olha 'draft'/'promoted', também não terá o que promover.
+      let projs: ProductProjectRow[];
+      try {
+        projs = await loadProductProjects(pool, id);
+      } catch (e) {
+        if (e instanceof NormalizationError) {
+          return reply.status(409).send({
+            code: "NOT_NORMALIZED",
+            message: `A trava de normalização não pôde ser avaliada para este produto: ${e.message}`,
+            reason: e.code,
+            details: e.details,
+          });
+        }
+        throw e;
+      }
+      if (projs.length > 0) {
+        const fp = await computeProductSpecHash(pool, {
+          id, systemId: (row.system_id as string | null) ?? null, name: String(row.name ?? "Produto"),
+        }, projs);
+        if (!row.normalized_hash || row.normalized_hash !== fp.hash) {
+          return reply.status(409).send({
+            code: "NOT_NORMALIZED",
+            message: row.normalized_hash
+              ? "A spec mudou depois da última normalização. Rode [Normalizar] de novo antes de promover."
+              : "Este produto ainda não foi normalizado. Rode [Normalizar] para gerar os documentos de decisão e destravar a promoção.",
+            normalizedHash: (row.normalized_hash as string | null) ?? null,
+            currentHash: fp.hash,
+          });
+        }
+      }
     }
 
     // ORDEM = decisão do agente arquiteto. Fora de transação (é uma chamada de LLM). Falha aqui ⇒
