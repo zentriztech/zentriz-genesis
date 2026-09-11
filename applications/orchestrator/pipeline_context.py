@@ -215,6 +215,11 @@ class PipelineContext:
         # mesmo em projeto Web puro (bug reproduzido no projeto 1f5feb4f-6ced-4f3d-9d70-767506bcce9c).
         # None força T10 a chamar infer_pm_module que lê o YAML determinístico.
         self.current_module: "str | None" = None
+        # RFC-0007 F1: TODAS as squads que o Engineer declarou no frontmatter `squads:`.
+        # `current_module` é a squad que ESTA run planeja; esta lista é a decisão do agente
+        # por inteiro. Sem ela, uma proposta de 3 squads virava 1 módulo sem deixar rastro
+        # (medido: 7 de 7 projetos multi-squad entregaram só a primeira, em silêncio).
+        self.squads_declared: list[dict[str, Any]] = []
         self.current_task: dict[str, Any] = {}
         self.artifacts: dict[str, str] = {}  # path -> content
         self.connect_artifacts: dict[str, str] = {}  # project/connect/... -> content
@@ -720,6 +725,7 @@ class PipelineContext:
             "charter": self.charter,
             "backlog": self.backlog,
             "current_module": self.current_module,
+            "squads_declared": self.squads_declared,
             "current_task": self.current_task,
             "artifacts": self.artifacts,
             "connect_artifacts": self.connect_artifacts,
@@ -780,6 +786,8 @@ class PipelineContext:
         # (checkpoints antigos com "backend" hardcoded serão sobrescritos após 1ª inferência real).
         _cm = data.get("current_module")
         ctx.current_module = _cm if _cm in ("web", "backend", "mobile", "fullstack") else None
+        # RFC-0007 F1: checkpoint antigo não tem o campo → lista vazia (comportamento de hoje).
+        ctx.squads_declared = [s for s in (data.get("squads_declared") or []) if isinstance(s, dict)]
         ctx.current_task = data.get("current_task") or {}
         ctx.artifacts = data.get("artifacts") or {}
         ctx.connect_artifacts = data.get("connect_artifacts") or {}

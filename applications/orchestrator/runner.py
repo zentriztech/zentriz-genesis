@@ -1552,6 +1552,44 @@ def _parse_squads_yaml(text: str) -> list[dict]:
         return []
 
 
+def squads_pendentes(squads: list[dict], modulo_planejado: str | None) -> list[dict]:
+    """RFC-0007 F1: squads declaradas pelo Engineer que ESTA run não planeja.
+
+    O workspace de um projeto hospeda UMA aplicação (`apps/` é a raiz do app — medido:
+    52 de 52 workspaces em prod). Logo, uma segunda squad não cabe nesta run: ela é um
+    projeto irmão do mesmo produto. Esta função não decide nada — só nomeia o que ficou
+    de fora, para que o corte deixe de ser silencioso.
+    """
+    if not squads:
+        return []
+    alvo = (modulo_planejado or "").lower().strip()
+    # Case-insensitive dos DOIS lados: o frontmatter é escrito por LLM e já apareceu como
+    # `module: Backend`. Comparar o valor cru contra um alvo normalizado marcaria a própria
+    # squad planejada como pendente — alarme falso no portal.
+    return [s for s in squads if s.get("module") and str(s["module"]).lower().strip() != alvo]
+
+
+def _declarar_squads_pendentes(squads: list[dict], modulo_planejado: str | None, request_id: str) -> list[dict]:
+    """Publica no portal (passo visível) as squads declaradas e não planejadas.
+
+    Não é idempotente: se o runner reiniciar e reexecutar a fase 1, o passo é postado de novo.
+    Repetir a pendência é preferível a escondê-la, e o portal exibe passos em ordem.
+    """
+    pend = squads_pendentes(squads, modulo_planejado)
+    if not pend:
+        return []
+    _nomes = ", ".join(s["module"] for s in pend)
+    _todas = ", ".join(s["module"] for s in squads)
+    _post_step(
+        f"Cobertura de squads: o Engineer declarou {len(squads)} squads ({_todas}). "
+        f"Esta run entrega **{modulo_planejado}**. Ficam PENDENTES: {_nomes} — sem PM, sem backlog "
+        "e sem tasks. O workspace de um projeto hospeda uma única aplicação, então cada squad "
+        "pendente precisa de um projeto irmão neste produto para ser entregue.",
+        request_id,
+    )
+    return pend
+
+
 def infer_pm_module_from_engineer_proposal(engineer_proposal: str, spec_content: str = "", project_type: str = "") -> str:
     """
     Infere o módulo/squad do PM a partir da proposta do Engineer.
@@ -1585,6 +1623,22 @@ def infer_pm_module_from_engineer_proposal(engineer_proposal: str, spec_content:
             "[Pipeline] Módulo via YAML frontmatter: %s (deterministic, %d squad(s) declarada(s))",
             chosen, len(squads),
         )
+        # RFC-0007 F1: o descarte das demais squads era SILENCIOSO. Medido em prod (2026-09-10):
+        # 7 de 26 propostas declararam 2+ squads e nas 7 só a primeira virou backlog/tasks —
+        # a run terminava reportando sucesso sobre 1/3 do produto. O retorno escalar continua
+        # (é o módulo desta run), mas o corte passa a ter rastro alto e estruturado.
+        if len(squads) > 1:
+            _pendentes = [s["module"] for s in squads[1:]]
+            logger.warning(
+                "[RFC-0007] %s",
+                json.dumps({
+                    "event": "squads_declaradas_nao_planejadas",
+                    "metric": "genesis_squads_dropped_total",
+                    "declared": [s["module"] for s in squads],
+                    "planned_this_run": chosen,
+                    "pending": _pendentes,
+                }),
+            )
         return chosen
 
     source_text = (engineer_proposal or "").strip()
@@ -3188,7 +3242,13 @@ def _structural_gate(project_id: str, pm_module: str) -> tuple[bool, str]:
     return True, ""
 
 
-def _run_local_deploy(project_id: str, devops_response: dict, request_id: str, pm_module: str = "web") -> None:
+def _run_local_deploy(
+    project_id: str,
+    devops_response: dict,
+    request_id: str,
+    pm_module: str = "web",
+    squads_pending: list[str] | None = None,
+) -> None:
     """
     Executa o produto localmente após o DevOps gerar os artefatos.
     Lê meta.run_command e meta.app_url do response do DevOps.
@@ -3268,9 +3328,18 @@ def _run_local_deploy(project_id: str, devops_response: dict, request_id: str, p
         host_cmd = f"bash '{host_start_sh}'"
         # Garantir que start.sh instrui a instalar deps — não assume node_modules existentes
         # Use special event_type "product_ready" so the portal highlights this message
+        # RFC-0007 F1: "Produto pronto" não pode omitir que só uma fatia foi entregue.
+        # Quando o Engineer declarou squads que esta run não planejou, o escopo entregue e a
+        # pendência vão na MESMA mensagem que o portal destaca.
+        _escopo = (
+            f"\n\nEscopo entregue: squad **{pm_module}**."
+            f"\nSquads declaradas pelo Engineer e NÃO entregues nesta run: {', '.join(squads_pending)}."
+            "\nElas precisam de um projeto irmão neste produto — este projeto não é o produto completo."
+        ) if squads_pending else ""
         _product_ready_msg = (
             f"Produto pronto. Execute no terminal do host:\n{host_cmd}"
             + (f"\nAcesse: {app_url}" if app_url else "")
+            + _escopo
         )
         _post_dialogue(
             "system", "system", "product_ready",
@@ -3596,14 +3665,32 @@ def _parse_tasks_from_backlog(project_id: str, pm_module: str = "web") -> list[d
                     else:
                         title = title_raw[:120]
                     # Detect owner_role override from line
+                    # RFC-0007 F4: ANTES o override era substring crua na linha inteira do título —
+                    # `if "web" in line_lower` (testado ANTES de backend). Uma task de backend
+                    # chamada "Implementar endpoint de webhooks" virava DEV_WEB e trocava de módulo
+                    # em silêncio. Agora só marcador EXPLÍCITO troca o dono: `DEV_WEB`, `[web]`,
+                    # `(web)` ou `módulo: web` / `module: web` / `squad: web`.
                     _or = owner_role
                     line_lower = line.lower()
-                    if "dev_web" in line_lower or "web" in line_lower:
-                        _or = "DEV_WEB"
-                    elif "dev_backend" in line_lower or "backend" in line_lower:
-                        _or = "DEV_BACKEND"
-                    elif "dev_mobile" in line_lower or "mobile" in line_lower:
-                        _or = "DEV_MOBILE"
+                    _mod_marcado = ""
+                    _m_role = _re.search(r"\bdev_(web|backend|mobile)\b", line_lower)
+                    if _m_role:
+                        _mod_marcado = _m_role.group(1)
+                    else:
+                        _m_rot = _re.search(
+                            r"(?:\[|\()\s*(web|backend|mobile)\s*(?:\]|\))"
+                            r"|\b(?:m[óo]dulo|module|squad)\s*[:=]\s*(web|backend|mobile)\b",
+                            line_lower,
+                        )
+                        if _m_rot:
+                            _mod_marcado = _m_rot.group(1) or _m_rot.group(2) or ""
+                    if _mod_marcado:
+                        _or = f"DEV_{_mod_marcado.upper()}"
+                        if _or != owner_role:
+                            logger.info(
+                                "[RFC-0007] %s: dono da task trocado por marcador explícito (%s → %s)",
+                                tid, owner_role, _or,
+                            )
                     _mod = {"DEV_WEB": "web", "DEV_BACKEND": "backend", "DEV_MOBILE": "mobile"}.get(_or, module)
                     tasks.append({
                         "task_id": tid,
@@ -4680,7 +4767,19 @@ def _run_monitor_loop(
                         _pm_module_for_deploy = (
                             getattr(pipeline_ctx, "current_module", None) if pipeline_ctx else None
                         ) or "web"
-                        _run_local_deploy(project_id, devops_response, request_id, pm_module=_pm_module_for_deploy)
+                        # RFC-0007 F1: as squads declaradas vêm do checkpoint (mesma fonte de
+                        # verdade do módulo) — sobrevivem a restart do runner.
+                        _squads_pend = [
+                            s["module"] for s in squads_pendentes(
+                                getattr(pipeline_ctx, "squads_declared", []) if pipeline_ctx else [],
+                                _pm_module_for_deploy,
+                            )
+                        ]
+                        _run_local_deploy(
+                            project_id, devops_response, request_id,
+                            pm_module=_pm_module_for_deploy,
+                            squads_pending=_squads_pend,
+                        )
 
                     # ── TASK-FULL-TEST — Claude Code Agent (end-to-end) ───────────────────
                     # Seed task no portal
@@ -6508,7 +6607,16 @@ def main() -> int:
                         "Cruze coerência com engineer_stack_proposal.squads[]. "
                         "Se pm_module divergir de squads[*].module OU se backlog tem 0 tasks "
                         "quando Engineer declarou target_tasks>0, retorne status: REVISION "
-                        "com pergunta explícita ao PM (não aprovar por LEI 2/no-invent)."
+                        "com pergunta explícita ao PM (não aprovar por LEI 2/no-invent). "
+                        # RFC-0007 F1: o guarda acima só checava PERTINÊNCIA ("o módulo escolhido
+                        # está entre os declarados?") — e por isso aprovou 7 de 7 entregas parciais
+                        # em prod. Falta a pergunta de COBERTURA.
+                        "[RFC-0007] COBERTURA (obrigatório): declare no seu parecer, em campo próprio, "
+                        "`squads_declaradas` e `squads_cobertas_por_este_backlog`. Se houver squad "
+                        "declarada pelo Engineer que ESTE backlog não cobre, diga isso EXPLICITAMENTE "
+                        "e liste quais — não aprove como se o produto estivesse completo. Um projeto "
+                        "hospeda UMA aplicação, então squad não coberta não é defeito deste backlog: "
+                        "é pendência de produto (projeto irmão). Registre como ressalva, não como bloqueio."
                     ),
                 )
                 cto_backlog_ok = (str(cto_backlog_response.get("status", "")).upper() == "OK")
@@ -6656,6 +6764,22 @@ def main() -> int:
                     return
             except Exception as _e_final:
                 logger.warning("[ACHADO-39] gate pós-loop de backlog vazio falhou (não crítico): %s", _e_final)
+
+        # ── RFC-0007 F1: declarar as squads que ficaram de fora ────────
+        # O módulo desta run já está fechado aqui. Se o Engineer declarou mais de uma squad,
+        # o que não vai ser entregue precisa aparecer ANTES do Monitor Loop — e ficar no
+        # checkpoint, para o `product_ready` repetir a pendência no fim.
+        try:
+            _squads_decl = _parse_squads_yaml(engineer_summary or "")
+            if pipeline_ctx is not None and _squads_decl:
+                pipeline_ctx.squads_declared = _squads_decl
+                try:
+                    pipeline_ctx.save_checkpoint(STATE_DIR)
+                except Exception as _e_sq_ck:
+                    logger.debug("[RFC-0007] save_checkpoint das squads falhou (não crítico): %s", _e_sq_ck)
+            _declarar_squads_pendentes(_squads_decl, pm_module, request_id)
+        except Exception as _e_sq:
+            logger.warning("[RFC-0007] declaração de squads pendentes falhou (não crítico): %s", _e_sq)
 
         # ── Fase 2: Monitor Loop (quando API e PROJECT_ID definidos) ───
         if project_id and _api_available():
