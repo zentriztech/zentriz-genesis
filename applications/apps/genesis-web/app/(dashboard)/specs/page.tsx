@@ -77,9 +77,12 @@ import {
   type PromotionPlanItem, type PromotionPlanMeta, type StartWaveResult,
 } from "@/components/PromotionPlanDialog";
 import { ConfirmActionDialog } from "@/components/ConfirmActionDialog";
+import ActionOverflowBar, { type BarAction } from "@/components/ActionOverflowBar";
 // Padronização 2026-09-06: rótulo/tooltip/texto de resultado das ações de fábrica vêm de UM módulo.
 import {
   FACTORY_LABEL, FACTORY_TOOLTIP, PROMOTED_SPEC_NOTICE, promoteConfirmBody, promotedProductNotice,
+  normalizedSpecNotice, normalizedProductNotice, promoteGate, normalizeLabel,
+  type PromotionVerdict,
 } from "@/lib/factoryActions";
 
 interface SpecItem {
@@ -98,6 +101,14 @@ interface SpecItem {
   // antigos ou falha de enriquecimento degradam para specs sem esses campos.
   readiness?: Readiness | null;
   estimate?: Estimate | null;
+  /**
+   * RFC-0008 emenda 01 — a documentação de decisão está em dia com ESTA spec? `false` esconde o
+   * botão de promover (o servidor recusaria com 409 de qualquer forma); `null`/ausente = o servidor
+   * não conferiu (teto da listagem) e o botão CONTINUA visível — quem decide é o `/promote`.
+   */
+  normalized?: boolean | null;
+  /** Veredito do servidor (`services/promotability.ts`) — é ele que manda; `normalized` é fallback. */
+  promotion?: PromotionVerdict | null;
   // Onda 3 (c) / RFC-0005 — nº de GAPs ATIVOS da última validação (null = nunca validada). >0 → aviso no card.
   gapCount?: number | null;
   gapCountIgnored?: number;
@@ -168,7 +179,13 @@ const CatalogMarkdown = dynamic(
     }),
   { ssr: false },
 );
-interface ProductOption { id: string; name: string; is_inbox?: boolean }
+interface ProductOption {
+  id: string; name: string; is_inbox?: boolean;
+  /** RFC-0008 emenda 01 — documentação de decisão em dia? `null` = não conferido (teto do servidor). */
+  normalized?: boolean | null;
+  /** Veredito do servidor para o PRODUTO (promover produto admite o produto inteiro). */
+  promotion?: PromotionVerdict | null;
+}
 
 function formatDate(s: string): string {
   try { return new Date(s).toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" }); }
@@ -353,14 +370,23 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
     }
   }, [scopeTenantId]);
 
+  // includeInbox=1: o diálogo "Vincular" precisa oferecer o INBOX como destino (devolver à caixa).
+  // O payload traz `promotion` (veredito do servidor) e `normalized` (fallback) — é isso que decide
+  // se o Promover do produto aparece, então precisa ser RECARREGÁVEL (normalizar muda o estado
+  // sem recarregar a página).
+  const loadProducts = useCallback(async () => {
+    try {
+      setProducts(await apiGet<ProductOption[]>(withQuery("/api/products", { tenantId: scopeTenantId, includeInbox: "1" })));
+    } catch { /* a lista de produtos é auxiliar; a Bancada não quebra sem ela */ }
+  }, [scopeTenantId]);
+
   useEffect(() => {
     load();
     loadProposals();
-    // includeInbox=1: o diálogo "Vincular" precisa oferecer o INBOX como destino (devolver à caixa).
-    apiGet<ProductOption[]>(withQuery("/api/products", { tenantId: scopeTenantId, includeInbox: "1" })).then(setProducts).catch(() => {});
+    void loadProducts();
     // Projetos já promovidos alimentam a coluna "Promovido" do board de triagem (E1).
     projectsStore.loadProjects();
-  }, [load, loadProposals, scopeTenantId]);
+  }, [load, loadProposals, loadProducts, scopeTenantId]);
 
   // Enquanto houver proposta em voo, repõe a lista a cada 15 s (e quando terminar, a spec de
   // origem muda de estado → recarrega specs também). Sem voo → nenhum timer (poll que PARA).
@@ -433,6 +459,51 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
       projectsStore.loadProjects();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Falha ao promover à fábrica");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // [Normalizar] no escopo de UMA spec (RFC-0008 emenda 01). A Bancada escreve o RFC e o registro
+  // de decisão no modelo Zentriz Connect e só então o Promover APARECE. É chamada de agente: pode
+  // demorar e pode falhar — falhou, nada foi escrito e a spec continua exatamente como estava.
+  const normalizeSpec = async (id: string) => {
+    setBusyId(id);
+    setError(null);
+    try {
+      const res = await apiPost<{ status: string; written?: Array<{ path: string }>; modelUsed?: string | null }>(
+        `/api/projects/${id}/normalize`, {},
+      );
+      setNotice(res.status === "already_normalized"
+        ? "A spec não mudou desde a última normalização — os documentos já estão em dia."
+        : normalizedSpecNotice(res.written?.length ?? 0));
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Falha ao normalizar a spec");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // [Normalizar] no escopo do PRODUTO (mesma rota da tela "Meus produtos").
+  const normalizeProductDocs = async (productId: string) => {
+    setBusyId(`prod:${productId}`);
+    setError(null);
+    try {
+      const res = await apiPost<{ status: string; written?: Array<{ path: string }>; skippedProjects?: unknown[] }>(
+        `/api/products/${productId}/normalize`, {},
+      );
+      setNotice(res.status === "already_normalized"
+        ? "A spec do produto não mudou desde a última normalização — os documentos já estão em dia."
+        : normalizedProductNotice(
+          res.written?.length ?? 0, res.skippedProjects?.length ?? 0,
+          // Se o produto já saiu da Bancada, normalizar documenta mas não destrava promoção.
+          products.find((p) => p.id === productId)?.promotion?.reason !== "NOT_ON_WORKBENCH",
+        ));
+      await loadProducts();
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Falha ao normalizar o produto");
     } finally {
       setBusyId(null);
     }
@@ -550,13 +621,83 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
   }, [specs]);
   const promoted = projectsStore.list.filter((p) => !PRE_FACTORY_STATUSES.has(p.status));
 
+  /**
+   * As ações de UMA spec, declaradas uma vez (fonte única — `ActionOverflowBar` escolhe a forma).
+   *
+   * UI/UX 2026-09-11: eram cinco botões de mesmo peso lado a lado — medido, quebravam em 4 linhas a
+   * 320 px e 2 linhas a 900 px, e o card ficava com 306 px de altura só para caber comando. Agora:
+   * [✎ Editar] como ícone (a mais frequente, nunca colapsa), UMA primária com rótulo — a próxima
+   * ação do fluxo — e o resto no ⋮. Acima de `lg` a barra completa volta, porque lá os cinco cabem
+   * em uma linha e esconder alvo sem ganhar espaço seria perda pura.
+   */
+  const specCardActions = (s: SpecItem): BarAction[] => {
+    const busy = busyId === s.id;
+    const gate = promoteGate(s.promotion, s.normalized ?? null);
+    const normalizado = (s.promotion?.normalized ?? s.normalized) === true;
+    const acoes: BarAction[] = [
+      {
+        key: "edit", label: "Editar", icon: <EditIcon sx={{ fontSize: "0.9rem" }} />,
+        tooltip: "Abre a spec no editor da Bancada", variant: "outlined", disabled: busy,
+        keepInBar: true,
+        onClick: () => router.push(`/spec?editProjectId=${s.id}`),
+      },
+      {
+        key: "link", label: "Vincular", icon: <LinkIcon sx={{ fontSize: "0.9rem" }} />,
+        tooltip: "Move esta spec para um produto (ou de volta à caixa de entrada)",
+        variant: "outlined", disabled: busy,
+        onClick: () => { setLinkTarget(s); setLinkProductId(s.product_id ?? ""); },
+      },
+    ];
+    // §5.4: Decompor só faz sentido para spec AINDA no INBOX (não organizada num produto).
+    // Uma vez alocada a um produto real, o vínculo é definitivo (backend: 409 se já em produto).
+    if (s.product_is_inbox === true) {
+      acoes.push({
+        key: "decompose", label: "Decompor", icon: <CallSplitIcon sx={{ fontSize: "0.9rem" }} />,
+        tooltip: "Quebra a spec em vários projetos (proposta do Product Architect)",
+        variant: "outlined", color: "secondary", disabled: busy,
+        onClick: () => setDecomposeSpec({ id: s.id, title: s.title }),
+      });
+    }
+    // RFC-0008 emenda 01 — [Normalizar] vem ANTES de promover. Com tudo em dia vira "Normalizar de
+    // novo" (refazer por cima é legítimo: a spec pode ter mudado de intenção) e deixa de ser primária.
+    acoes.push({
+      key: "normalize",
+      label: busy ? FACTORY_LABEL.normalizing : normalizeLabel(s.promotion, s.normalized ?? null),
+      icon: <HandymanIcon sx={{ fontSize: "0.9rem" }} />,
+      tooltip: FACTORY_TOOLTIP.normalizeSpec,
+      variant: normalizado ? "outlined" : "contained", color: "secondary",
+      disabled: busy, busy, primary: !normalizado,
+      onClick: () => { void normalizeSpec(s.id); },
+    });
+    if (gate.show) {
+      acoes.push({
+        key: "promote", label: FACTORY_LABEL.promoteSpec,
+        icon: <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />,
+        tooltip: FACTORY_TOOLTIP.promoteSpec,
+        // Só a primária é `contained`. Enquanto falta normalizar, promover continua disponível (o
+        // servidor não vetou) mas em peso menor — antes os dois eram cheios e verdes, e a tela não
+        // dizia qual vinha primeiro. Isso vale também na barra completa (≥ lg).
+        variant: normalizado ? "contained" : "outlined",
+        color: "success", disabled: busy, busy, primary: normalizado,
+        onClick: () => setPromoteTarget(s),
+      });
+    }
+    return acoes;
+  };
+
   // Card de uma SPEC (reusado em cada grupo).
   const renderSpec = (s: SpecItem) => {
-    const busy = busyId === s.id;
+    // `busy` vive agora em `specCardActions` (cada ação decide o próprio estado de andamento).
+    const gate = promoteGate(s.promotion, s.normalized ?? null);
     return (
       <Card key={s.id} variant="outlined" sx={{ p: 0 }}>
         <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, p: 2, flexWrap: "wrap" }}>
-          <Box sx={{ flexGrow: 1, minWidth: 220 }}>
+          {/* `flex: "1 1 0"` (e não `flexGrow: 1`): com base `auto` a largura natural do título +
+              chips passa a ser a base do item e o flex quebra a linha antes de tentar espremer —
+              medido, a faixa de ações caía para uma segunda linha a 600 e 900 px, onde sobrava
+              espaço. Com base 0 o bloco cresce a partir do zero e `minWidth: 220` ainda garante a
+              quebra quando realmente não cabe (320 px). */}
+          <Box sx={{ flex: "1 1 0", minWidth: 220 }}>
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
               <Typography variant="subtitle2" fontWeight={600}>{s.title}</Typography>
               <Chip label={specStatusLabel(s.status)} size="small" color="default" sx={{ fontSize: "0.62rem", height: 18 }} />
@@ -585,7 +726,9 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                 <Chip
                   icon={<TaskAltRoundedIcon sx={{ fontSize: "0.85rem !important" }} />}
                   label="proposta pronta" size="small" color="success" variant="outlined"
-                  sx={{ fontSize: "0.62rem", height: 18, fontWeight: 700 }}
+                  // 24 quando é CLICÁVEL (reabre a revisão da proposta) — WCAG 2.5.8; para a conta
+                  // de gestão o chip é só rótulo, e aí 18 basta.
+                  sx={{ fontSize: "0.62rem", height: isMaster ? 18 : 24, fontWeight: 700 }}
                   onClick={isMaster ? undefined : () => {
                     const p = readyByOrigin.get(s.id)!;
                     setResumeJob({ jobId: p.id, originProjectId: p.originProjectId, originTitle: p.originTitle ?? s.title });
@@ -601,28 +744,21 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
             </Stack>
           </Box>
           {!isMaster && (
-            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-              <Button size="small" variant="outlined" startIcon={<EditIcon sx={{ fontSize: "0.9rem" }} />}
-                disabled={busy} onClick={() => router.push(`/spec?editProjectId=${s.id}`)}>
-                Editar
-              </Button>
-              <Button size="small" variant="outlined" startIcon={<LinkIcon sx={{ fontSize: "0.9rem" }} />}
-                disabled={busy} onClick={() => { setLinkTarget(s); setLinkProductId(s.product_id ?? ""); }}>
-                Vincular
-              </Button>
-              {/* §5.4: Decompor só faz sentido para spec AINDA no INBOX (não organizada num produto).
-                  Uma vez alocada a um produto real, o vínculo é definitivo (backend: 409 se já em produto). */}
-              {s.product_is_inbox === true && (
-                <Button size="small" variant="outlined" color="secondary" startIcon={<CallSplitIcon sx={{ fontSize: "0.9rem" }} />}
-                  disabled={busy} onClick={() => setDecomposeSpec({ id: s.id, title: s.title })}>
-                  Decompor
-                </Button>
+            // `minWidth: 0` + `maxWidth: 100%`: sem isso a faixa de ações tem a largura do próprio
+            // conteúdo e, quando a primária é o rótulo longo ("Promover esta spec"), passa 5 px
+            // para fora do card a 320 px (medido). Com shrink permitido, quem cede é o rótulo.
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap
+              sx={{ minWidth: 0, maxWidth: "100%", flex: "0 1 auto" }}>
+              <ActionOverflowBar actions={specCardActions(s)} breakpoint="lg"
+                ariaLabel={`Mais ações da spec ${s.title}`} />
+              {/* Pedido do Jean (2026-09-11): promover só APARECE depois de normalizado — e quem
+                  decide é o SERVIDOR (`promotability.ts`), que também distingue "falta doc" de "já
+                  saiu da Bancada". O lugar dele nunca fica mudo: sem botão, fica o motivo. */}
+              {!gate.show && (
+                <Typography variant="caption" color="text.secondary" sx={{ alignSelf: "center" }}>
+                  {gate.message}
+                </Typography>
               )}
-              <Button size="small" variant="contained" color="success"
-                startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
-                disabled={busy} onClick={() => setPromoteTarget(s)}>
-                {FACTORY_LABEL.promoteSpec}
-              </Button>
             </Stack>
           )}
         </Box>
@@ -873,19 +1009,63 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                     {/* Promover produto inteiro — operação; master também pode (C6). Migração 097:
                         entrega TODOS os projetos na ordem de interdependência e NÃO inicia nada. */}
                     <Box sx={{ px: 2, pb: 1.5, pt: 0.25 }}>
-                      <Tooltip title={FACTORY_TOOLTIP.promoteProduct}>
-                        <span>
-                          <Button fullWidth size="small" variant="contained" color="success"
-                            startIcon={busyId === `prod:${g.productId}` ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
-                            disabled={busyId === `prod:${g.productId}`}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setConfirmProduct({ id: g.productId, name: g.name, specs: g.specs.length });
-                            }}>
-                            {FACTORY_LABEL.promoteProduct}
-                          </Button>
-                        </span>
-                      </Tooltip>
+                      {(() => {
+                        const prodBusy = busyId === `prod:${g.productId}`;
+                        // RFC-0008 emenda 01 + veredito único (2026-09-11): quem diz se o Promover
+                        // do produto aparece — e por que não aparece — é o SERVIDOR. No lugar dele
+                        // fica o [Normalizar] e a linha com o motivo REAL ("falta doc" ≠ "já saiu
+                        // da Bancada"), nunca um espaço mudo.
+                        const owner = products.find((p) => p.id === g.productId);
+                        const norm = owner?.promotion?.normalized ?? owner?.normalized ?? null;
+                        const prodGate = promoteGate(owner?.promotion, owner?.normalized ?? null);
+                        // UI/UX 2026-09-11 — o rodapé do card cabia em UMA linha e ocupava DUAS:
+                        // dois botões `fullWidth` `contained` (secondary e success são ambos verdes
+                        // no tema) empilhados, sem hierarquia entre eles. Agora é a próxima ação do
+                        // fluxo como botão + ⋮ com o resto. `breakpoint="always"`: o card da grade
+                        // tem ≈300 px mesmo em 1440 px — quem é estreito é o card, não a janela.
+                        const acoesProduto: BarAction[] = [];
+                        acoesProduto.push({
+                          key: "normalize",
+                          label: prodBusy ? FACTORY_LABEL.normalizing
+                            : (norm === true ? FACTORY_LABEL.renormalize : FACTORY_LABEL.normalize),
+                          icon: <HandymanIcon sx={{ fontSize: "0.9rem" }} />,
+                          tooltip: FACTORY_TOOLTIP.normalize,
+                          color: "secondary", variant: "contained",
+                          disabled: prodBusy, busy: prodBusy,
+                          // Normalizar é a primária enquanto os documentos NÃO estão em dia: é ele
+                          // que destrava o promover. Em dia, vira "de novo" e cai no menu.
+                          primary: norm !== true,
+                          onClick: () => { void normalizeProductDocs(g.productId); },
+                        });
+                        if (prodGate.show) {
+                          acoesProduto.push({
+                            key: "promote",
+                            label: FACTORY_LABEL.promoteProduct,
+                            icon: <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />,
+                            tooltip: FACTORY_TOOLTIP.promoteProduct,
+                            // Só a primária é `contained` — ver o mesmo raciocínio em `specCardActions`.
+                            color: "success", variant: norm === true ? "contained" : "outlined",
+                            disabled: prodBusy, busy: prodBusy,
+                            primary: norm === true,
+                            onClick: () => setConfirmProduct({ id: g.productId, name: g.name, specs: g.specs.length }),
+                          });
+                        }
+                        return (
+                          <Stack spacing={0.75}>
+                            <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, "& > *": { minWidth: 0 } }}>
+                              <ActionOverflowBar actions={acoesProduto} breakpoint="always"
+                                ariaLabel={`Ações do produto ${g.name}`} />
+                            </Box>
+                            {/* O lugar do promover nunca fica mudo: sem ele, o motivo REAL do
+                                servidor ("falta doc" ≠ "já saiu da Bancada") ocupa a linha. */}
+                            {!prodGate.show && (
+                              <Typography variant="caption" color="text.secondary" align="center">
+                                {prodGate.message}
+                              </Typography>
+                            )}
+                          </Stack>
+                        );
+                      })()}
                     </Box>
                   </Card>
                 ))}

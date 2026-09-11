@@ -47,14 +47,32 @@ export interface BarAction {
    * `leading` (ex.: relatórios em PDF) — sem isso, o comando apareceria duas vezes lado a lado.
    */
   mobileOnly?: boolean;
+  /**
+   * NUNCA colapsa: abaixo do breakpoint continua clicável, como ícone (com tooltip e `aria-label`),
+   * fora do menu. Reservado à ação do caminho crítico — colapsar o "Salvar" custaria um clique a
+   * mais na operação mais frequente da tela. Exige `icon`; sem ele, cai no menu como as demais.
+   */
+  keepInBar?: boolean;
+  /**
+   * A ação primária do contexto: colapsada, continua sendo um BOTÃO com rótulo (não vira ícone nem
+   * item de menu). Diferente de `keepInBar`, que preserva o alvo mas troca o rótulo por ícone —
+   * aqui o que importa é o usuário LER qual é o próximo passo (ex.: "Normalizar" antes de
+   * "Promover"). Só faz sentido uma por barra; se houver mais, todas viram botão.
+   */
+  primary?: boolean;
 }
 
 interface Props {
   actions: BarAction[];
   /** Controle com gatilho próprio (ex.: TraceabilityReportsButton), exibido só no desktop. */
   leading?: React.ReactNode;
-  /** Abaixo deste breakpoint tudo colapsa no ícone. */
-  breakpoint?: "sm" | "md" | "lg";
+  /**
+   * Abaixo deste breakpoint tudo colapsa no ícone. `"always"` = colapsado em QUALQUER largura:
+   * é o caso de ação dentro de card de grade, onde a estreiteza vem do card (≈300 px numa grade de
+   * 3 colunas) e não do viewport — esperar o breakpoint do viewport ali empilharia botões
+   * `fullWidth` um por linha mesmo num monitor de 1440 px.
+   */
+  breakpoint?: "sm" | "md" | "lg" | "always";
   ariaLabel?: string;
 }
 
@@ -63,9 +81,18 @@ export default function ActionOverflowBar({
 }: Props) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const naBarra = actions.filter((a) => !a.mobileOnly);
+  // Quando colapsado: estas continuam na barra — `primarias` com rótulo, `fixas` como ícone — e por
+  // isso saem do menu (duplicar o mesmo comando lado a lado é o defeito que este componente existe
+  // para evitar).
+  const primarias = actions.filter((a) => a.primary);
+  const fixas = actions.filter((a) => !a.primary && a.keepInBar && a.icon);
+  const noMenu = actions.filter((a) => !fixas.includes(a) && !primarias.includes(a));
   // Chave computada de breakpoint fora do `sx` — inline, o TS alarga o objeto e recusa o literal.
-  const displayBarra: Record<string, string> = { xs: "none", [breakpoint]: "flex" };
-  const displayIcone: Record<string, string> = { xs: "flex", [breakpoint]: "none" };
+  const sempreColapsado = breakpoint === "always";
+  const displayBarra: Record<string, string> = sempreColapsado
+    ? { xs: "none" } : { xs: "none", [breakpoint]: "flex" };
+  const displayIcone: Record<string, string> = sempreColapsado
+    ? { xs: "flex" } : { xs: "flex", [breakpoint]: "none" };
 
   return (
     <>
@@ -90,8 +117,45 @@ export default function ActionOverflowBar({
         })}
       </Stack>
 
-      {/* < breakpoint: um ícone só. */}
-      <Box sx={{ display: displayIcone, alignItems: "center" }}>
+      {/* < breakpoint: a primária (com rótulo), as fixas como ícone, o resto no ⋮. */}
+      {/* `flex: 1 1 auto` + `maxWidth: 100%`: sem isso a largura da barra é o `max-content` dos
+          filhos e ela ESTOURA o card (medido: 4–5 px para fora do card de spec a 320 px quando a
+          primária vira "Promover esta spec"). Com shrink permitido, quem cede é o rótulo. */}
+      <Box sx={{ display: displayIcone, alignItems: "center", gap: 0.5, minWidth: 0, flex: "1 1 auto", maxWidth: "100%" }}>
+        {/* Ícones primeiro, depois o botão com rótulo, depois o ⋮: a leitura vai do atalho conhecido
+            para a próxima ação do fluxo, e o alvo de "mais" fica sempre no mesmo canto. */}
+        {fixas.map((a) => (
+          <Tooltip key={a.key} title={a.tooltip ? `${a.label} — ${a.tooltip}` : a.label}>
+            {/* `span` porque botão desabilitado não emite eventos de mouse (o tooltip morreria). */}
+            <span>
+              <IconButton
+                size="small" color={a.color ?? "inherit"} aria-label={a.label} disabled={a.disabled}
+                onClick={(e) => a.onClick(e.currentTarget)} sx={{ width: 34, height: 34, mr: 0.25 }}
+              >
+                {a.busy ? <CircularProgress size={16} color="inherit" /> : a.icon}
+              </IconButton>
+            </span>
+          </Tooltip>
+        ))}
+        {primarias.map((a) => (
+          <Tooltip key={a.key} title={a.tooltip ?? ""}>
+            {/* `span` porque botão desabilitado não emite eventos de mouse (o tooltip morreria). */}
+            <span style={{ minWidth: 0, flex: "1 1 auto" }}>
+              <Button
+                fullWidth size="small" variant={a.variant ?? "contained"} color={a.color ?? "primary"}
+                disabled={a.disabled} onClick={(e) => a.onClick(e.currentTarget)}
+                startIcon={a.busy ? <CircularProgress size={14} color="inherit" /> : a.icon}
+                sx={{ textTransform: "none", minWidth: 0 }}
+              >
+                {/* O rótulo encolhe com reticências em vez de empurrar o ⋮ para fora do card. O
+                    texto completo continua no tooltip e no `aria-label` do botão. */}
+                <Box component="span" sx={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {a.label}
+                </Box>
+              </Button>
+            </span>
+          </Tooltip>
+        ))}
         <Tooltip title={ariaLabel}>
           <IconButton size="small" aria-label={ariaLabel} onClick={(e) => setAnchor(e.currentTarget)}>
             <MoreVertIcon sx={{ fontSize: "1.2rem" }} />
@@ -103,13 +167,13 @@ export default function ActionOverflowBar({
           transformOrigin={{ vertical: "top", horizontal: "right" }}
           slotProps={{ paper: { sx: { maxWidth: 320 } } }}
         >
-          {actions.map((a, i) => (
+          {noMenu.map((a, i) => (
             <MenuItem
               key={a.key} disabled={a.disabled}
               // O anchor entregue é o ÍCONE da barra, não o item: o item desaparece com o menu, e um
               // menu ancorado em nó desmontado pula para o canto da tela.
               onClick={() => { setAnchor(null); a.onClick(anchor ?? document.body); }}
-              sx={{ alignItems: "flex-start", py: 1, ...(i > 0 && a.mobileOnly !== actions[i - 1]?.mobileOnly ? { borderTop: "1px solid", borderColor: "divider" } : {}) }}
+              sx={{ alignItems: "flex-start", py: 1, ...(i > 0 && a.mobileOnly !== noMenu[i - 1]?.mobileOnly ? { borderTop: "1px solid", borderColor: "divider" } : {}) }}
             >
               <ListItemIcon sx={{ minWidth: 32, mt: 0.25 }}>
                 {a.busy ? <CircularProgress size={14} color="inherit" /> : a.icon}

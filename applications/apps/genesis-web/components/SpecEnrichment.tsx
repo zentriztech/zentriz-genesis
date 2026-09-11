@@ -60,7 +60,10 @@ export function ReadinessBadge({ readiness, compact = false }: { readiness: Read
         variant={readiness.level === "not_ready" ? "outlined" : "filled"}
         label={compact ? `${readiness.score}%` : `${meta.label} · ${readiness.score}%`}
         onClick={(e) => setAnchor(e.currentTarget)}
-        sx={{ fontSize: "0.62rem", height: 20, fontWeight: 700, cursor: "pointer" }}
+        // `height: 24` e não 20: este chip é CLICÁVEL (abre o pré-flight), então é alvo de ponteiro
+        // e o mínimo do WCAG 2.5.8 se aplica — medido, era 77×20 px. Chip não clicável da mesma
+        // faixa (estimativa, GAPs) segue em 18/20, que é legítimo.
+        sx={{ fontSize: "0.62rem", height: 24, fontWeight: 700, cursor: "pointer" }}
       />
       <Popover
         open={!!anchor}

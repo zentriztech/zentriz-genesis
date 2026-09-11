@@ -113,7 +113,8 @@ export function FactoryCertificateBadge({
           icon={<Icon sx={{ fontSize: "0.85rem !important" }} />}
           label={compact ? meta.label.split(" · ")[0] : meta.label}
           onClick={(e) => setAnchor(e.currentTarget)}
-          sx={{ fontSize: "0.62rem", height: 20, fontWeight: 700, cursor: "pointer", "& .MuiChip-icon": { ml: 0.5 } }}
+          // 24 e não 20: chip CLICÁVEL (abre o certificado) é alvo de ponteiro — mínimo do WCAG 2.5.8.
+          sx={{ fontSize: "0.62rem", height: 24, fontWeight: 700, cursor: "pointer", "& .MuiChip-icon": { ml: 0.5 } }}
         />
       </Tooltip>
       <Popover

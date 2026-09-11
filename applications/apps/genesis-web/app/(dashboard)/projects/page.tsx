@@ -86,8 +86,12 @@ function buildLineageGroups(projects: Project[]): ProjectGroup[] {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+// `promoted` é o estado INERTE entre promover e iniciar: o projeto já apareceu na Fábrica mas
+// ninguém apertou "Iniciar". Pedido do Jean (2026-09-11): "quando aparecer na fabrica e ainda nao
+// foi inicado, o produto deve aparecer com status 'na bancada'". Sem esta chave a tela mostrava o
+// literal `promoted` (o fallback `?? project.status`).
 const STATUS_LABELS: Record<string, string> = {
-  draft: "Rascunho", spec_submitted: "Spec enviada", pending_conversion: "Convertendo",
+  draft: "Rascunho", promoted: "Na Bancada", spec_submitted: "Spec enviada", pending_conversion: "Convertendo",
   cto_charter: "Charter CTO", pm_backlog: "Backlog PM", dev_qa: "Dev/QA",
   devops: "DevOps", running: "Em execução", stopped: "Parado",
   completed: "Concluído", failed: "Falhou", accepted: "Aceito",
@@ -105,7 +109,7 @@ function statusColor(s: string): "default" | "success" | "error" | "info" | "war
 
 // Percentual por fase do pipeline (fallback quando não há contagem de tasks)
 const STATUS_PHASE_PCT: Record<string, number> = {
-  draft: 0, spec_submitted: 10, pending_conversion: 18, cto_charter: 25,
+  draft: 0, promoted: 0, spec_submitted: 10, pending_conversion: 18, cto_charter: 25,
   pm_backlog: 38, dev_qa: 60, devops: 85, running: 50,
   completed: 100, accepted: 100, failed: 0, stopped: 0,
   pending_cyborg: 95, blocked_cyborg: 95,
@@ -154,6 +158,7 @@ function NewVersionButton({ project }: { project: Project }) {
     <Tooltip title="Criar nova versão deste produto">
       <IconButton
         size="small"
+        aria-label="Criar nova versão deste produto"
         disabled={loading}
         onClick={(e) => {
           e.stopPropagation(); // prevent card click from firing
@@ -227,7 +232,10 @@ function ProjectCard({ project, delay = 0, onDelete }: { project: Project; delay
               <IconButton
                 size="small" color="error" aria-label="Excluir projeto"
                 onClick={(e) => { e.stopPropagation(); onDelete(project); }}
-                sx={{ p: 0.25 }}
+                // 26×26 e não 18×18 (medido): é alvo de ponteiro e de DEDO, e o mínimo do
+                // WCAG 2.5.8 é 24×24. O ícone continua do mesmo tamanho — cresce só a área.
+                // A caixa vai explícita porque `p: 0.5` com ícone de 0.9rem dá 22×22.
+                sx={{ p: 0.5, width: 26, height: 26 }}
               >
                 <DeleteOutlineIcon sx={{ fontSize: "0.9rem" }} />
               </IconButton>
@@ -332,7 +340,8 @@ function ProjectRow({ project, delay = 0, onDelete }: { project: Project; delay?
           <DeleteOutlineIcon fontSize="small" />
         </IconButton>
       </Tooltip>
-      <IconButton size="small" onClick={(e) => { e.stopPropagation(); router.push(`/projects/${project.id}`); }}>
+      <IconButton size="small" aria-label={`Abrir ${project.title ?? "projeto"}`}
+        onClick={(e) => { e.stopPropagation(); router.push(`/projects/${project.id}`); }}>
         <ArrowForwardIcon fontSize="small" />
       </IconButton>
     </MotionBox>
@@ -524,8 +533,11 @@ function ProjectsPageInner() {
             value={view} exclusive size="small"
             onChange={(_e, v) => { if (v) setView(v); }}
           >
-            <ToggleButton value="grid"><Tooltip title="Cards"><GridViewIcon fontSize="small" /></Tooltip></ToggleButton>
-            <ToggleButton value="list"><Tooltip title="Lista"><ListIcon fontSize="small" /></Tooltip></ToggleButton>
+            {/* `aria-label` no BOTÃO, não no Tooltip: medido com Playwright, estes dois eram os
+                únicos controles da tela SEM nome acessível — o Tooltip do MUI só descreve quando
+                está aberto (`aria-describedby`), e leitor de tela/voz anunciava "botão". */}
+            <ToggleButton value="grid" aria-label="Ver em cards"><Tooltip title="Cards"><GridViewIcon fontSize="small" /></Tooltip></ToggleButton>
+            <ToggleButton value="list" aria-label="Ver em lista"><Tooltip title="Lista"><ListIcon fontSize="small" /></Tooltip></ToggleButton>
           </ToggleButtonGroup>
           {!authStore.isZentrizAdmin && (
             <Button variant="contained" startIcon={<SendIcon />} onClick={() => router.push("/spec")}>

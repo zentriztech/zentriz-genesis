@@ -32,7 +32,11 @@ import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import AddIcon from "@mui/icons-material/Add";
+// UI/UX 2026-09-11 — os controles usavam emoji como ícone (💾 📐 🧭): não herdam a cor do tema,
+// mudam de desenho por sistema operacional e ficam fora de escala ao lado dos Material Icons.
+import ArchitectureOutlinedIcon from "@mui/icons-material/ArchitectureOutlined";
 import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh";
+import ExploreOutlinedIcon from "@mui/icons-material/ExploreOutlined";
 import CallSplitIcon from "@mui/icons-material/CallSplit";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import CloseIcon from "@mui/icons-material/Close";
@@ -62,6 +66,7 @@ import { tenantScopeStore } from "@/stores/tenantScopeStore";
 // e texto de confirmação vivem em UM lugar — três telas diziam coisas diferentes para a MESMA ação.
 import {
   FACTORY_LABEL, FACTORY_TOOLTIP, PROMOTE_CONFIRM_WORD, PROMOTED_SPEC_NOTICE,
+  PROMOTE_HIDDEN_UNTIL_NORMALIZED, normalizedSpecNotice, normalizedProductNotice,
   promoteButtonLabel, promoteConfirmBody, promotedProductNotice, type PromoteScope,
 } from "@/lib/factoryActions";
 import { DecomposeDialog, describeEstimate, estimateProposal, type DecomposeSpecRef } from "@/components/DecomposeDialog";
@@ -79,7 +84,11 @@ import ProductFolderNav from "@/components/ProductFolderNav";
 // (`ownerProduct`, fonte autoritativa) — o mesmo objeto que a Fábrica reporta em /products.
 import { TraceabilityReportsButton } from "@/components/TraceabilityReports";
 // UI/UX 2026-09-09 (Jean): no mobile a barra de comandos colapsa em um menu de ícone.
-import ActionOverflowBar from "@/components/ActionOverflowBar";
+import { type BarAction } from "@/components/ActionOverflowBar";
+// UI/UX 2026-09-11 — a barra de comando ÚNICA e o centro de avisos moram em arquivos próprios:
+// esta página já tem 4.6k linhas, e a revisão adversarial vetou acrescentar mais condicionais a ela.
+import SpecCommandBar from "@/components/SpecCommandBar";
+import SpecNoticeCenter, { type SpecNotice } from "@/components/SpecNoticeCenter";
 import {
   PromotionPlanDialog, describeStartResult,
   type PromotionPlanItem, type PromotionPlanMeta, type StartWaveResult,
@@ -958,7 +967,8 @@ function SpecEditor({
   value, onChange, fullscreen, onToggleFullscreen,
   onSave, approving, onRegen, regenDisabled,
   projectId = null, isAdmin = false, validationReloadSignal, gapCount = null,
-  onPromote, promoteScope = null, fileExt = "md", onValidationChange, openGapsSignal,
+  onPromote, promoteScope = null, promotion = null, onNormalize, normalizing = false,
+  fileExt = "md", onValidationChange, openGapsSignal,
   activeFilePath = null, onVersionRestored,
   saveLabel = "Salvar rascunho", autonomy = null, onStopAutonomy, openAutonomySignal,
 }: {
@@ -966,7 +976,12 @@ function SpecEditor({
   onChange: (v: string) => void;
   fullscreen: boolean;
   onToggleFullscreen: () => void;
-  onSave: () => void;
+  /**
+   * Salvar o que está no editor. **Opcional desde 2026-09-11**: no modo inline quem salva é a barra
+   * de comando da página (a ~150px daqui), e o mesmo botão duas vezes na mesma tela é ruído, não
+   * redundância útil. Em tela cheia a barra de comando não existe ⇒ o botão volta a ser provido.
+   */
+  onSave?: () => void;
   approving: "save" | "start" | null;
   onRegen?: () => void;
   regenDisabled: boolean;
@@ -983,6 +998,17 @@ function SpecEditor({
   // dentro de um produto promove o produto INTEIRO; uma spec avulsa promove só ela. Escondê-lo fazia
   // o usuário admitir N projetos acreditando ter admitido um.
   promoteScope?: PromoteScope | null;
+  /**
+   * Veredito do SERVIDOR sobre promover (2026-09-11). A tela NÃO decide: ela renderiza.
+   * `canPromote === false` esconde o botão e mostra o motivo no lugar dele; `null` ("o servidor não
+   * conseguiu decidir") mantém o botão — erro nosso não tira função do usuário.
+   */
+  promotion?: {
+    canPromote: boolean | null; reason: string | null; message: string | null; normalized: boolean | null;
+  } | null;
+  /** Escreve RFC/ADR/registro de decisão para esta spec (ou para o produto dono dela). */
+  onNormalize?: () => void;
+  normalizing?: boolean;
   // Onda 3 (d): extensão do arquivo em edição → realce de sintaxe por tipo (default markdown).
   fileExt?: string;
   // Onda 3 — a validação (dentro da aba GAPs) reporta o nº de GAPs ao pai p/ manter o badge
@@ -1083,11 +1109,13 @@ function SpecEditor({
             inteira" — sem este rótulo o usuário não sabe o que o botão Salvar vai gravar. */}
         {activeFilePath && (
           <Tooltip title={activeFilePath}>
+            {/* UI/UX 2026-09-11 — 0,62rem ≈ 10px em fonte monoespaçada: era o menor texto da tela
+                e o que mais importa ler (o arquivo que o Salvar vai gravar). Subiu para 0,72rem. */}
             <Chip size="small" variant="outlined" color="primary" label={activeFilePath.split("/").pop()}
-              sx={{ ml: 1, height: 18, maxWidth: 180, "& .MuiChip-label": { fontFamily: "monospace", fontSize: "0.62rem" } }} />
+              sx={{ ml: 1, height: 22, maxWidth: 180, "& .MuiChip-label": { fontFamily: "monospace", fontSize: "0.72rem" } }} />
           </Tooltip>
         )}
-        <Chip label={`${value.split("\n").length} linhas`} size="small" sx={{ fontSize: "0.65rem", height: 18, ml: 1 }} />
+        <Chip label={`${value.split("\n").length} linhas`} size="small" sx={{ fontSize: "0.72rem", height: 22, ml: 1 }} />
       </Stack>
       <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap sx={{ rowGap: 0.5 }}>
         {onRegen && (
@@ -1102,17 +1130,41 @@ function SpecEditor({
         )}
         {/* Onda 3 (b): a spec APENAS salva aqui — nunca "salva e inicia". A ida à fábrica é
             exclusiva do botão de promoção (abaixo, só no modo edição). */}
-        <Tooltip title="Guardar a spec — promova à fábrica quando estiver pronta">
-          <span>
-            <Button size="small" variant="contained"
-              startIcon={approving === "save" ? <CircularProgress size={12} color="inherit" /> : <span style={{ fontSize: "0.9rem" }}>💾</span>}
-              disabled={approving !== null || !value.trim()} onClick={onSave}
-              sx={{ fontSize: "0.72rem", py: 0.35 }}>
-              {approving === "save" ? "Salvando…" : saveLabel}
-            </Button>
-          </span>
-        </Tooltip>
-        {onPromote && (
+        {onSave && (
+          <Tooltip title="Guardar a spec — promova à fábrica quando estiver pronta">
+            <span>
+              <Button size="small" variant="contained"
+                startIcon={approving === "save" ? <CircularProgress size={12} color="inherit" /> : <SaveOutlinedIcon sx={{ fontSize: "0.95rem !important" }} />}
+                disabled={approving !== null || !value.trim()} onClick={onSave}
+                sx={{ fontSize: "0.72rem", py: 0.35 }}>
+                {approving === "save" ? "Salvando…" : saveLabel}
+              </Button>
+            </span>
+          </Tooltip>
+        )}
+        {/* [Normalizar] — escreve RFC/ADR/registro de decisão a partir do que a spec já diz.
+            Aparece no modo edição: documentar não depende de estar na Bancada (o produto do Jean
+            estava `running` e por isso nunca poderia ganhar documento algum). */}
+        {onNormalize && (
+          <Tooltip title={promoteScope === "spec" ? FACTORY_TOOLTIP.normalizeSpec : FACTORY_TOOLTIP.normalize}>
+            <span>
+              <Button size="small" variant="outlined" color="info"
+                startIcon={normalizing ? <CircularProgress size={12} color="inherit" /> : <ArchitectureOutlinedIcon sx={{ fontSize: "0.95rem !important" }} />}
+                disabled={normalizing || approving !== null} onClick={onNormalize} sx={{ fontSize: "0.72rem", py: 0.35 }}>
+                {normalizing
+                  ? FACTORY_LABEL.normalizing
+                  : (promotion?.normalized === true ? FACTORY_LABEL.renormalize : FACTORY_LABEL.normalize)}
+              </Button>
+            </span>
+          </Tooltip>
+        )}
+        {onPromote && (promotion?.canPromote === false ? (
+          // Pedido do Jean (2026-09-11): o botão SOME quando não vai funcionar — mas o lugar dele
+          // nunca fica mudo, e o motivo é o do servidor (falta normalizar × já saiu da Bancada).
+          <Typography variant="caption" sx={{ color: "text.secondary", alignSelf: "center", maxWidth: 320 }}>
+            {promotion.message ?? PROMOTE_HIDDEN_UNTIL_NORMALIZED}
+          </Typography>
+        ) : (
           // Migração 097: promover ADMITE na fábrica e NÃO inicia. Com produto, entra o produto
           // TODO na ordem de interdependência; o início é um clique separado. B1: o rótulo e o
           // tooltip vêm do escopo real, não de um texto fixo que valia só para um dos dois casos.
@@ -1125,7 +1177,7 @@ function SpecEditor({
               </Button>
             </span>
           </Tooltip>
-        )}
+        ))}
         <Tooltip title={fullscreen ? "Sair de tela cheia" : "Tela cheia"}>
           <IconButton size="small" onClick={onToggleFullscreen}>
             {fullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
@@ -1523,8 +1575,9 @@ function SpecChatPanel({
               <Button fullWidth size="small" variant="contained" color="secondary"
                 disabled={sending}
                 onClick={onEvolvePlan}
+                startIcon={<ExploreOutlinedIcon sx={{ fontSize: "0.95rem !important" }} />}
                 sx={{ mb: 0.75, fontSize: "0.72rem", textTransform: "none" }}>
-                🧭 Gerar RFC / CHANGELOG da evolução
+                Gerar RFC / CHANGELOG da evolução
               </Button>
             </span>
           </Tooltip>
@@ -1686,7 +1739,10 @@ function SpecChatPanel({
             placeholder="Peça um ajuste na spec…"
             sx={{ "& textarea": { fontSize: "0.8rem" } }}
           />
-          <IconButton color="primary" disabled={!input.trim() || sending} onClick={onSend} sx={{ mb: 0.25 }}>
+          {/* Sem rótulo textual e sem tooltip, era o único controle da tela sem nome acessível
+              (medido no DOM): o leitor de tela anunciava só "botão". */}
+          <IconButton color="primary" aria-label="Enviar pedido de ajuste ao arquiteto"
+            disabled={!input.trim() || sending} onClick={onSend} sx={{ mb: 0.25 }}>
             {sending ? <CircularProgress size={18} /> : <SendIcon fontSize="small" />}
           </IconButton>
         </Stack>
@@ -1872,6 +1928,13 @@ export default function SpecPage() {
   const [applyConflict, setApplyConflict] = useState(false);
   const [treeReloadSignal, setTreeReloadSignal] = useState(0);
   const [validationReloadSignal, setValidationReloadSignal] = useState(0);
+  /**
+   * Bump que manda reperguntar ao servidor "posso promover?" — depois de normalizar E depois de
+   * salvar (salvar reescreve a spec no disco, o hash muda e o carimbo de normalização pode deixar
+   * de bater). Fica aqui, junto dos outros sinais, porque `handleSaveSpec`/`handleSpecConflictOverwrite`
+   * são definidos ANTES do bloco de promoção.
+   */
+  const [promotionSignal, setPromotionSignal] = useState(0);
   // Bump para trazer o editor à aba GAPs (pós-salvar rascunho → revalidação ao vivo).
   const [openGapsSignal, setOpenGapsSignal] = useState(0);
   // ── Árvore única (UI/UX 2026-09-06) ────────────────────────────────────────────────────────
@@ -3188,6 +3251,7 @@ export default function SpecPage() {
       setApproveError(null);
       setTreeReloadSignal((n) => n + 1);
       setValidationReloadSignal((n) => n + 1);
+      setPromotionSignal((n) => n + 1);           // gravou por cima ⇒ hash novo ⇒ reavaliar promoção
       setStaleValidation(true);
     } catch (e) {
       setApproveError(e instanceof Error ? e.message : String(e));
@@ -3206,6 +3270,67 @@ export default function SpecPage() {
     if (!owner) return null;                       // lista ainda não carregou → não afirma escopo
     return owner.is_inbox === true ? "spec" : "product";
   }, [editProjectId, ownerProduct, products]);
+
+  /**
+   * ⚖️ Veredito de promoção — vem do SERVIDOR, no escopo que o clique realmente usa.
+   *
+   * Achado do Jean (2026-09-11): aqui o [Promover à Fábrica] aparecia habilitado para uma spec cujo
+   * produto estava `running` — o clique só podia dar 409. A tela não tinha como saber: ela conhecia
+   * o dono, não o estado dele. Agora quem responde "pode promover, e se não, por quê" é a API
+   * (`services/promotability.ts`), no MESMO endpoint que o clique usaria.
+   */
+  type PromotionVerdict = {
+    canPromote: boolean | null; reason: string | null; message: string | null; normalized: boolean | null;
+  };
+  const [promotion, setPromotion] = useState<PromotionVerdict | null>(null);
+  const [normalizing, setNormalizing] = useState(false);
+
+  const loadPromotion = useCallback(async (): Promise<void> => {
+    if (!editProjectId || promoteScope === null) { setPromotion(null); return; }
+    try {
+      if (promoteScope === "product" && ownerProduct?.id) {
+        const p = await apiGet<{ promotion?: PromotionVerdict }>(`/api/products/${ownerProduct.id}`);
+        setPromotion(p.promotion ?? null);
+      } else {
+        const p = await apiGet<{ promotion?: PromotionVerdict }>(`/api/projects/${editProjectId}/normalized`);
+        setPromotion(p.promotion ?? null);
+      }
+    } catch {
+      // "Não consegui perguntar" NÃO é "não pode": sem veredito o botão continua visível e quem
+      // recusa é a API no clique (com a mensagem certa).
+      setPromotion(null);
+    }
+  }, [editProjectId, promoteScope, ownerProduct]);
+
+  useEffect(() => { void loadPromotion(); }, [loadPromotion, promotionSignal]);
+
+  /** [Normalizar] desta tela — escopo igual ao do promover (produto inteiro × esta spec). */
+  const normalizeHere = useCallback(async () => {
+    if (!editProjectId) return;
+    setNormalizing(true);
+    setApproveError(null);
+    try {
+      if (promoteScope === "product" && ownerProduct?.id) {
+        const res = await apiPost<{ written?: unknown[]; skippedProjects?: unknown[] }>(
+          `/api/products/${ownerProduct.id}/normalize`, {},
+        );
+        setStartedNotice(normalizedProductNotice(
+          (res.written ?? []).length, (res.skippedProjects ?? []).length,
+          // Produto já na Fábrica: documenta, mas não há promoção a destravar — não prometer o que
+          // o servidor vai recusar.
+          promotion?.reason !== "NOT_ON_WORKBENCH",
+        ));
+      } else {
+        const res = await apiPost<{ written?: unknown[] }>(`/api/projects/${editProjectId}/normalize`, {});
+        setStartedNotice(normalizedSpecNotice((res.written ?? []).length));
+      }
+      setPromotionSignal((n) => n + 1);
+    } catch (e) {
+      setApproveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNormalizing(false);
+    }
+  }, [editProjectId, promoteScope, ownerProduct, promotion]);
 
   /** Projetos ainda na Bancada no mesmo produto — só para o humano dimensionar o escopo. */
   const promoteSiblings = useMemo(() => {
@@ -3244,6 +3369,9 @@ export default function SpecPage() {
         setOpenGapsSignal((n) => n + 1);            // mostra a aba GAPs (monta o painel de validação)
         try { await apiPost(`/api/specs/${editProjectId}/validate`, {}); } catch { /* dedupe/rate-limit → o reload abaixo mostra o estado */ }
         setValidationReloadSignal((n) => n + 1);    // painel recarrega → vê "validando" → poll ao vivo → atualiza badge/lista
+        // Salvar MUDA o hash da spec no disco ⇒ o carimbo de normalização pode ter deixado de bater.
+        // Sem este bump o botão Promover ficaria visível com base num veredito velho.
+        setPromotionSignal((n) => n + 1);
         return;
       }
 
@@ -3696,6 +3824,11 @@ export default function SpecPage() {
               projectId={editProjectId} isAdmin={authStore.isZentrizAdmin}
               validationReloadSignal={validationReloadSignal} gapCount={gapCount}
               onPromote={editProjectId ? handlePromote : undefined} promoteScope={promoteScope}
+              promotion={promotion}
+              // `promoteScope === null` = ainda não sei quem é o dono. Normalizar com escopo errado
+              // (só a spec, quando o dono é um produto) documentaria a coisa errada — o botão espera.
+              onNormalize={editProjectId && promoteScope !== null ? normalizeHere : undefined}
+              normalizing={normalizing}
               onValidationChange={setGapCount} openGapsSignal={openGapsSignal}
               activeFilePath={activeFile?.path ?? null} onVersionRestored={handleVersionRestored}
               autonomy={autonomy} onStopAutonomy={handleStopAutonomy} openAutonomySignal={openAutonomySignal}
@@ -3896,43 +4029,173 @@ export default function SpecPage() {
     </Dialog>
   );
 
+  // ── UI/UX 2026-09-11 — AÇÕES da spec: declaradas UMA vez, aqui ────────────────────────────────
+  // Este array vivia embutido no cabeçalho do Card. Subiu para cá porque (a) aquele cabeçalho e o
+  // cabeçalho de página viraram UMA barra (`SpecCommandBar`) e (b) ele divergia da toolbar do
+  // editor: não tinha [Normalizar] e ignorava o veredito de promoção do servidor — duas barras com
+  // regras diferentes para a MESMA ação. Agora as duas leem o mesmo `promotion`/`normalizeHere`.
+  const specBarActions: BarAction[] = [
+    // No mobile o gatilho dos relatórios é um item do menu; a lista dos três perfis é a instância
+    // `hosted` passada em `trailing`, ancorada no ícone da barra.
+    ...(ownerProduct?.id
+      ? [{
+        key: "reports", label: "Relatórios (PDF)", mobileOnly: true,
+        icon: <PictureAsPdfOutlinedIcon sx={{ fontSize: "0.95rem" }} />,
+        tooltip: "Resumido, completo ou misto — o mapeamento da construção do produto.",
+        onClick: (el: HTMLElement) => setReportsAnchor(el),
+      } as BarAction]
+      : []),
+    // UI/UX 2026-09-08 (Jean): o laço autônomo em TODOS os arquivos mora AQUI, longe do "Resolver
+    // GAPs deste arquivo", que é a ação vizinha de escopo pequeno. Sempre com N2 (ID digitado).
+    {
+      key: "autonomy",
+      label: autonomyLoopRunning
+        ? "Laço em andamento…"
+        : (gapCount ?? 0) > 0
+          ? `Modo autônomo em todos os arquivos (${gapCount})`
+          : "Modo autônomo",
+      icon: <SmartToyOutlinedIcon sx={{ fontSize: "0.95rem" }} />,
+      tooltip: autonomy?.enabled === false
+        ? "Modo autônomo desligado nesta instalação (SPEC_AUTONOMY=off)"
+        : autonomyLoopRunning
+          ? "Laço autônomo em andamento — acompanhe na aba do laço"
+          : (gapCount ?? 0) > 0
+            ? `O laço percorre a spec INTEIRA resolvendo, salvando e revalidando, até ${autonomy?.maxRoundsAllowed ?? 5} passe(s). Pede confirmação digitada.`
+            : "Nenhum GAP em aberto na spec — rode Validar para (re)avaliar",
+      disabled: autonomyLoopRunning || autonomyStarting || autonomy?.enabled === false || (gapCount ?? 0) === 0,
+      busy: autonomyStarting,
+      variant: "outlined", color: "secondary",
+      onClick: () => { setAutonomyStartText(""); setAutonomyStartOpen(true); },
+    },
+    {
+      key: "discard", label: "Descartar", color: "inherit",
+      onClick: () => router.push(`/projects/${editProjectId}`),
+    },
+    // [Normalizar] — escreve RFC/ADR/registro de decisão a partir do que a spec já diz. Existia só
+    // na toolbar do editor em tela cheia; no modo inline o usuário não tinha como chegar nele.
+    ...(promoteScope !== null
+      ? [{
+        key: "normalize",
+        label: normalizing
+          ? FACTORY_LABEL.normalizing
+          : (promotion?.normalized === true ? FACTORY_LABEL.renormalize : FACTORY_LABEL.normalize),
+        icon: <ArchitectureOutlinedIcon sx={{ fontSize: "0.95rem" }} />,
+        tooltip: promoteScope === "spec" ? FACTORY_TOOLTIP.normalizeSpec : FACTORY_TOOLTIP.normalize,
+        disabled: normalizing || approving !== null,
+        busy: normalizing,
+        variant: "outlined", color: "info",
+        onClick: () => { void normalizeHere(); },
+      } as BarAction]
+      : []),
+    // UI/UX 2026-09-06 — o editor principal edita a spec inteira OU o arquivo escolhido na lista;
+    // o botão salva o que está aberto (PUT com If-Match no caso do arquivo, para não sobrescrever
+    // revisão da IA/laço autônomo).
+    // `keepInBar`: é a ação mais frequente da tela e o editor abaixo não tem mais um Salvar próprio
+    // (era duplicado). Se colapsasse no menu, salvar custaria DOIS cliques em qualquer janela menor
+    // que 1200px — regressão justamente no caminho crítico. Abaixo do breakpoint vira ícone.
+    {
+      key: "save",
+      label: approving === "save" ? "Salvando…" : activeFile ? "Salvar arquivo" : "Salvar rascunho",
+      icon: <SaveOutlinedIcon sx={{ fontSize: "0.95rem" }} />,
+      disabled: !!approving, busy: approving === "save", variant: "outlined",
+      keepInBar: true,
+      onClick: handleSaveCurrent,
+    },
+    // Onda 3 (b): promover ADMITE a spec na fábrica. O rótulo diz o escopo real (produto inteiro ×
+    // só esta spec) — fonte única em factoryActions. 2026-09-11: some quando o SERVIDOR já disse
+    // que não pode; o motivo aparece no centro de avisos, para o lugar não ficar mudo.
+    ...(promotion?.canPromote === false
+      ? []
+      : [{
+        key: "promote",
+        label: approving === "start" ? FACTORY_LABEL.promoting : promoteButtonLabel(promoteScope),
+        icon: <RocketLaunchIcon sx={{ fontSize: "0.95rem" }} />,
+        tooltip: promoteScope === "spec" ? FACTORY_TOOLTIP.promoteSpec : FACTORY_TOOLTIP.promoteProduct,
+        disabled: !!approving, busy: approving === "start",
+        variant: "contained", color: "success",
+        onClick: handlePromote,
+      } as BarAction]),
+  ];
+
+  // ── UI/UX 2026-09-11 — AVISOS da spec, em um lugar só ─────────────────────────────────────────
+  // Eram até cinco <Alert> de altura cheia empilhados acima do editor, com o mesmo peso visual —
+  // no mobile empurravam o editor para fora da tela. Nenhum foi removido: o mais severo mantém a
+  // forma de Alert, os demais viram linha compacta (ver `SpecNoticeCenter`). A ordem abaixo é a
+  // ordem de importância dentro de cada severidade.
+  const editNotices: (SpecNotice | null | false)[] = [
+    !!editLoadError && {
+      key: "load-error", severity: "error" as const, text: editLoadError,
+      onClose: () => setEditLoadError(null),
+    },
+    !!approveError && {
+      key: "approve-error", severity: "error" as const, text: approveError,
+      onClose: () => setApproveError(null),
+    },
+    // Migração 090 — o laço autônomo escreve na MESMA spec. Avisar é mais honesto que travar o
+    // editor: o servidor não sobrescreve edição humana, mas encerra o laço ("stalled") quando ela
+    // aparece no meio da rodada. O relatório por rodada mora na aba "Autonomia".
+    Boolean(!editLoading && specMarkdown !== null && autonomy?.run?.active) && {
+      key: "autonomy-run", severity: "info" as const, live: true,
+      title: autonomy?.run ? autonomyHeadline(autonomy.run) : "Laço autônomo em andamento",
+      text: "o CTO está resolvendo os GAPs, salvando e revalidando no servidor. Evite editar ou salvar agora: uma edição manual no meio da rodada interrompe o laço.",
+      actionLabel: "Ver detalhes", onAction: handleShowAutonomy,
+    },
+    // Uma proposta de divisão pronta não pode ficar escondida atrás de um diálogo fechado.
+    Boolean(!editLoading && specMarkdown !== null && splitState?.awaitingDecision) && {
+      key: "split", severity: "warning" as const,
+      text: "Os agentes propuseram dividir esta spec em arquivos — aguardando a sua decisão.",
+      actionLabel: "Ver proposta", onAction: () => setSplitOpen(true),
+    },
+    !editLoading && specMarkdown !== null && staleValidation && {
+      key: "stale", severity: "warning" as const,
+      text: "O conteúdo da spec mudou (revisão da IA aplicada ou versão restaurada). A validação anterior pode estar desatualizada — revalide na aba GAPs antes de promover à fábrica.",
+      onClose: () => setStaleValidation(false),
+    },
+    // Migração 089 — o corpo de edição é gated em `specMarkdown !== null`. Se a carga da spec
+    // falhou, o estado do job ficaria INVISÍVEL e o usuário concluiria que a revisão sumiu.
+    Boolean(editProjectId && specMarkdown === null && !editLoading && (chatSending || recoveredSpec)) && {
+      key: "cto-review", severity: "info" as const, live: true,
+      text: chatSending
+        ? "Há uma revisão do CTO em andamento no servidor para este projeto — ela não será perdida, mesmo que você feche esta tela."
+        : "Uma revisão do CTO concluída aguarda você neste projeto.",
+      actionLabel: recoveredSpec ? "Recuperar no editor" : undefined,
+      onAction: recoveredSpec ? handleApplyRecovered : undefined,
+    },
+    // O [Promover] sai da barra quando o servidor já disse que não vai funcionar — mas o motivo
+    // tem de estar escrito na tela (pedido do Jean, 2026-09-11).
+    promotion?.canPromote === false && {
+      key: "promote-blocked", severity: "info" as const,
+      text: promotion.message ?? PROMOTE_HIDDEN_UNTIL_NORMALIZED,
+    },
+  ];
+
   // ── Modo edição: renderiza editor diretamente sem tabs ────────────────────
   if (editProjectId) {
     return (
       <Box>
-        <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 3 }}>
-          <EditIcon sx={{ color: "warning.main" }} />
-          <Box sx={{ flexGrow: 1 }}>
-            <Typography variant="h5" fontWeight={700}>Editar Spec</Typography>
-            <Typography variant="body2" color="text.secondary">
-              {treeProductId
-                ? "Edite a spec do produto — escolha o arquivo na lista da pasta, à esquerda."
-                : "Edite a spec antes de iniciar o pipeline — os arquivos ficam na lista à esquerda."}
-            </Typography>
-          </Box>
-          <Button size="small" color="inherit" onClick={() => router.push(`/projects/${editProjectId}`)}>
-            ← Voltar ao projeto
-          </Button>
-        </Stack>
+        {/* UI/UX 2026-09-11 — UMA barra de comando (era: cabeçalho de página + cabeçalho do Card).
+            O título do projeto é o objeto da tela e vive aqui; as ações são declaradas UMA vez e o
+            `ActionOverflowBar` escolhe a forma (botão ≥md, item de menu abaixo disso). */}
+        <SpecCommandBar
+          title={projectTitle}
+          onTitle={setProjectTitle}
+          subtitle={treeProductId
+            ? "Spec do produto — escolha o arquivo na lista da pasta, à esquerda."
+            : "Os arquivos desta spec ficam na lista à esquerda."}
+          onBack={() => router.push(`/projects/${editProjectId}`)}
+          barLeading={<TraceabilityReportsButton productId={ownerProduct?.id ?? null} productName={ownerProduct?.name ?? null} />}
+          trailing={
+            <TraceabilityReportsButton
+              variant="hosted" hostAnchor={reportsAnchor} onHostClose={() => setReportsAnchor(null)}
+              productId={ownerProduct?.id ?? null} productName={ownerProduct?.name ?? null}
+            />
+          }
+          actions={specBarActions}
+        />
 
-        {editLoadError && (
-          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setEditLoadError(null)}>{editLoadError}</Alert>
-        )}
-
-        {/* Migração 089 — todo o corpo de edição (e com ele o painel de chat) é gated em
-            `specMarkdown !== null`. Se o carregamento da spec falhou, o estado do job ficaria
-            INVISÍVEL e o usuário concluiria que a revisão sumiu — exatamente a percepção que esta
-            frente existe para eliminar. Este aviso vive FORA do gate. */}
-        {editProjectId && specMarkdown === null && !editLoading && (chatSending || recoveredSpec) && (
-          <Alert severity="info" sx={{ mb: 2 }} aria-live="polite"
-            action={recoveredSpec
-              ? <Button size="small" color="inherit" onClick={handleApplyRecovered}>Recuperar no editor</Button>
-              : undefined}>
-            {chatSending
-              ? "Há uma revisão do CTO em andamento no servidor para este projeto — ela não será perdida, mesmo que você feche esta tela."
-              : "Uma revisão do CTO concluída aguarda você neste projeto."}
-          </Alert>
-        )}
+        {/* Centro de avisos: o mais severo em destaque, os demais em linha compacta. Nada some —
+            a revisão adversarial vetou esconder "há um laço rodando" atrás de um clique. */}
+        <SpecNoticeCenter notices={editNotices} />
 
         {/* Pivô Bancada (Opção 1): quando aberto de um produto (?productId=…), a árvore da
             PASTA DO PRODUTO fica num rail ESTÁVEL à esquerda de TODO o corpo de edição —
@@ -3968,34 +4231,9 @@ export default function SpecPage() {
             "GAPs" dentro do editor. Aqui sobra só o aviso de validação obsoleta + a árvore. */}
         {!editLoading && specMarkdown !== null && editProjectId && (
           <Box sx={{ mb: 2, "&:empty": { display: "none", mb: 0 } }}>
-            {/* Migração 090 — o laço autônomo escreve na MESMA spec. Avisar é mais honesto que
-                travar o editor: a guarda do servidor não sobrescreve edição humana, mas encerra o
-                laço ("stalled") quando ela aparece no meio da rodada. */}
-            {/* UI/UX 2026-09-06 — uma LINHA, com "ver detalhes" levando à aba "Autonomia" do editor.
-                O relatório por rodada (que enchia a tela, sobretudo no mobile) mora lá agora. O texto
-                sai de `autonomyHeadline`: dizia "rodada 12/5" em runs por arquivo, porque nesse modo
-                `round` conta ARQUIVOS e quem respeita `maxRounds` é `passes`. */}
-            {autonomy?.run?.active && (
-              <Alert severity="info" sx={{ mb: 1 }} aria-live="polite"
-                action={<Button size="small" color="inherit" onClick={handleShowAutonomy}>Ver detalhes</Button>}>
-                <strong>{autonomyHeadline(autonomy.run)}</strong>
-                {" "}— o CTO está resolvendo os GAPs, salvando e revalidando a spec no servidor.
-                Evite editar ou salvar a spec agora: uma edição manual no meio da rodada interrompe o
-                laço (o servidor não sobrescreve o seu texto).
-              </Alert>
-            )}
-            {/* Uma proposta de divisão pronta não pode ficar escondida atrás de um diálogo fechado. */}
-            {splitState?.awaitingDecision && (
-              <Alert severity="warning" sx={{ mb: 1 }}
-                action={<Button size="small" color="inherit" onClick={() => setSplitOpen(true)}>Ver proposta</Button>}>
-                Os agentes propuseram dividir esta spec em arquivos — aguardando a sua decisão.
-              </Alert>
-            )}
-            {staleValidation && (
-              <Alert severity="warning" sx={{ mb: 1 }} onClose={() => setStaleValidation(false)}>
-                O conteúdo da spec mudou (revisão da IA aplicada ou versão restaurada). A validação anterior pode estar desatualizada — revalide na aba GAPs antes de promover à fábrica.
-              </Alert>
-            )}
+            {/* UI/UX 2026-09-11 — os avisos (laço ativo, proposta de divisão, validação obsoleta,
+                erros) saíram daqui e foram para o `SpecNoticeCenter` acima, que lhes dá hierarquia
+                em vez de empilhar <Alert> de altura cheia. Nenhum foi removido: ver `editNotices`. */}
             {/* Item 2 — checklist Connect-ready (determinístico, do spec-tree): o que a spec já tem e o
                 que falta para chegar à fábrica no padrão Genesis › Connect › Auto Care. */}
             {/* GAP-133: a declaração recém-gerada tem de APARECER — recarrega a árvore e abre o arquivo,
@@ -4013,106 +4251,24 @@ export default function SpecPage() {
         {!editLoading && specMarkdown !== null && (
           <Card sx={{ flexGrow: { lg: 1 }, minHeight: { lg: 0 }, display: "flex", flexDirection: "column" }}>
             <CardContent sx={{ p: 0, "&:last-child": { pb: 0 }, flexGrow: { lg: 1 }, minHeight: { lg: 0 }, display: "flex", flexDirection: "column" }}>
-              {approveError && <Alert severity="error" sx={{ m: 2 }} onClose={() => setApproveError(null)}>{approveError}</Alert>}
-              <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" useFlexGap sx={{ px: 2, py: 1.5, rowGap: 1, borderBottom: "1px solid", borderColor: "divider" }}>
-                <Stack direction="row" spacing={1} alignItems="center" sx={{ flexGrow: 1, minWidth: 0 }}>
-                  <CheckCircleIcon sx={{ color: "warning.main", fontSize: "1.1rem", flexShrink: 0 }} />
-                  <TextField
-                    size="small" variant="standard" value={projectTitle}
-                    onChange={(e) => setProjectTitle(e.target.value)}
-                    placeholder="Título do projeto"
-                    InputProps={{ disableUnderline: false, sx: { fontWeight: 600, fontSize: "0.95rem" } }}
-                    sx={{ minWidth: { xs: 140, sm: 260 }, flexGrow: { xs: 1, sm: 0 } }}
-                  />
-                </Stack>
-                {/* UI/UX 2026-09-09 (Jean): no mobile os cinco comandos lado a lado QUEBRAVAM o
-                    layout — abaixo de `md` todos passam a viver no menu de ícone (⋮). Cada ação é
-                    declarada UMA vez aqui; `ActionOverflowBar` escolhe a forma (botão ou item de
-                    menu). Rótulos, tooltips e `disabled` continuam com fonte única. */}
-                <ActionOverflowBar
-                  ariaLabel="Ações da spec"
-                  /* Relatórios de rastreabilidade do PRODUTO dono desta spec. Só aparece quando a
-                     spec pertence a um produto de verdade (não ao inbox de rascunhos). */
-                  leading={<TraceabilityReportsButton productId={ownerProduct?.id ?? null} productName={ownerProduct?.name ?? null} />}
-                  actions={[
-                    // No mobile o gatilho dos relatórios é um item do menu; a lista dos três perfis
-                    // é a instância `hosted` abaixo, ancorada no ícone da barra.
-                    ...(ownerProduct?.id
-                      ? [{
-                        key: "reports", label: "Relatórios (PDF)", mobileOnly: true,
-                        icon: <PictureAsPdfOutlinedIcon sx={{ fontSize: "0.95rem" }} />,
-                        tooltip: "Resumido, completo ou misto — o mapeamento da construção do produto.",
-                        onClick: (el: HTMLElement) => setReportsAnchor(el),
-                      } as const]
-                      : []),
-                    // UI/UX 2026-09-08 (Jean): o laço autônomo em TODOS os arquivos mora AQUI, ao
-                    // lado dos relatórios — longe do "Resolver GAPs deste arquivo", que é a ação
-                    // vizinha de escopo pequeno. Sempre com N2 (ID do produto digitado).
-                    {
-                      key: "autonomy",
-                      label: autonomyLoopRunning
-                        ? "Laço em andamento…"
-                        : (gapCount ?? 0) > 0
-                          ? `Modo autônomo em todos os arquivos (${gapCount})`
-                          : "Modo autônomo",
-                      icon: <SmartToyOutlinedIcon sx={{ fontSize: "0.95rem" }} />,
-                      tooltip: autonomy?.enabled === false
-                        ? "Modo autônomo desligado nesta instalação (SPEC_AUTONOMY=off)"
-                        : autonomyLoopRunning
-                          ? "Laço autônomo em andamento — acompanhe na aba do laço"
-                          : (gapCount ?? 0) > 0
-                            ? `O laço percorre a spec INTEIRA resolvendo, salvando e revalidando, até ${autonomy?.maxRoundsAllowed ?? 5} passe(s). Pede confirmação digitada.`
-                            : "Nenhum GAP em aberto na spec — rode Validar para (re)avaliar",
-                      disabled: autonomyLoopRunning || autonomyStarting || autonomy?.enabled === false || (gapCount ?? 0) === 0,
-                      busy: autonomyStarting,
-                      variant: "outlined", color: "secondary",
-                      onClick: () => { setAutonomyStartText(""); setAutonomyStartOpen(true); },
-                    },
-                    {
-                      key: "discard", label: "Descartar", color: "inherit",
-                      onClick: () => router.push(`/projects/${editProjectId}`),
-                    },
-                    // UI/UX 2026-09-06 — o editor principal edita a spec inteira OU o arquivo
-                    // escolhido na lista; o botão salva o que está aberto (PUT com If-Match no caso
-                    // do arquivo, para não sobrescrever revisão da IA/laço autônomo).
-                    {
-                      key: "save",
-                      label: approving === "save" ? "Salvando…" : activeFile ? "Salvar arquivo" : "Salvar rascunho",
-                      icon: <SaveOutlinedIcon sx={{ fontSize: "0.95rem" }} />,
-                      disabled: !!approving, busy: approving === "save", variant: "outlined",
-                      onClick: handleSaveCurrent,
-                    },
-                    // Onda 3 (b): "Salvar e Iniciar" → promoção. A spec só é admitida na fábrica por
-                    // aqui; com GAPs em aberto exige confirmação por digitação. B1: o rótulo diz o
-                    // escopo real (produto inteiro vs. só esta spec) — fonte única em factoryActions.
-                    {
-                      key: "promote",
-                      label: approving === "start" ? FACTORY_LABEL.promoting : promoteButtonLabel(promoteScope),
-                      icon: <RocketLaunchIcon sx={{ fontSize: "0.95rem" }} />,
-                      tooltip: promoteScope === "spec" ? FACTORY_TOOLTIP.promoteSpec : FACTORY_TOOLTIP.promoteProduct,
-                      disabled: !!approving, busy: approving === "start",
-                      variant: "contained", color: "success",
-                      onClick: handlePromote,
-                    },
-                  ]}
-                />
-                {/* Lista dos três perfis de relatório quando o gatilho vem do menu de ícone (mobile). */}
-                <TraceabilityReportsButton
-                  variant="hosted" hostAnchor={reportsAnchor} onHostClose={() => setReportsAnchor(null)}
-                  productId={ownerProduct?.id ?? null} productName={ownerProduct?.name ?? null}
-                />
-              </Stack>
+              {/* UI/UX 2026-09-11 — o cabeçalho que existia aqui (título do projeto + barra de
+                  ações) subiu para o `SpecCommandBar`: era a SEGUNDA faixa de cromo acima do
+                  editor e duplicava o "Salvar" da toolbar abaixo. O erro de ação foi para o
+                  `SpecNoticeCenter`, junto dos demais avisos. */}
               {/* Altura preenche a viewport (plataforma profissional): em ≥lg o corpo cresce
                   (flexGrow) até o fundo do container de altura fixa — topos/fundos alinhados com o
                   rail da árvore por construção. Abaixo de lg cai no calc/altura fixa. */}
               <Box sx={{ flexGrow: { lg: 1 }, minHeight: { lg: 0 }, height: { xs: 520, md: "calc(100vh - 240px)", lg: "auto" }, overflow: "hidden", display: "flex" }}>
                 <Box sx={{ flexGrow: 1, minWidth: 0, overflow: "hidden" }}>
+                  {/* UI/UX 2026-09-11 — esta chamada NÃO recebe `onSave`/`saveLabel` de propósito:
+                      a barra de comando da página, logo acima, já tem o Salvar — era o MESMO
+                      `handleSaveCurrent` duas vezes a ~150px de distância. Em tela cheia a barra
+                      não existe, e lá o botão continua (chamada com `fullscreen`). */}
                   <SpecEditor
                     value={activeFile ? fileDraft : specMarkdown} onChange={handleEditorChange}
                     fileExt={activeFile ? (activeFile.path.split(".").pop() || "md") : "md"}
                     fullscreen={false} onToggleFullscreen={() => setEditorFullscreen(true)}
-                    onSave={handleSaveCurrent} approving={approving}
-                    saveLabel={activeFile ? "Salvar arquivo" : "Salvar rascunho"}
+                    approving={approving}
                     onRegen={undefined}
                     regenDisabled={true}
                     projectId={editProjectId} isAdmin={authStore.isZentrizAdmin}
@@ -4313,7 +4469,7 @@ export default function SpecPage() {
                       <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ rowGap: 0.5 }}>
                         <CheckCircleIcon sx={{ color: "success.main", fontSize: "1.1rem" }} />
                         <Typography variant="subtitle2" fontWeight={600}>Spec gerada pelo CTO</Typography>
-                        <Chip label="Revise e edite antes de aprovar" size="small" color="warning" sx={{ fontSize: "0.65rem" }} />
+                        <Chip label="Revise e edite antes de aprovar" size="small" color="warning" sx={{ fontSize: "0.72rem" }} />
                       </Stack>
                       <Button size="small" startIcon={<AutoFixHighIcon />} onClick={() => setSpecMarkdown(null)}>
                         Recomeçar
@@ -4490,7 +4646,7 @@ export default function SpecPage() {
                         <Button type="submit" variant="contained" size="large"
                           color={canDecomposeOnUpload && decomposeOnUpload ? "secondary" : "primary"}
                           startIcon={submitting ? <CircularProgress size={18} color="inherit" />
-                            : canDecomposeOnUpload && decomposeOnUpload ? <CallSplitIcon /> : <span style={{ fontSize: "1rem" }}>💾</span>}
+                            : canDecomposeOnUpload && decomposeOnUpload ? <CallSplitIcon /> : <SaveOutlinedIcon />}
                           disabled={submitting || !files.length}
                           onClick={(e) => { e.preventDefault(); handleUploadSubmit(e as unknown as React.FormEvent); }}>
                           {submitting ? "Salvando…" : canDecomposeOnUpload && decomposeOnUpload ? "Salvar e decompor" : "Salvar rascunho"}

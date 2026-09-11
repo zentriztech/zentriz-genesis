@@ -180,9 +180,12 @@ export default function ConnectReadyChecklist({ projectId, reloadSignal = 0, isE
             {it.key === "connect" && it.level !== "ok" && (
               <Tooltip title="Pede ao arquiteto (LLM) a declaração Connect a partir da spec. Leva de 30 s a 2 min e grava `connect.yaml` na raiz.">
                 <span>
+                  {/* Medido em 320px: era 41×16 px — abaixo do mínimo de 24×24 do WCAG 2.5.8, e é
+                      o único botão de ação desta lista. 0,72rem + minHeight 24 resolve sem engordar
+                      a faixa. */}
                   <Button size="small" variant="outlined" onClick={() => void gerarDeclaracao()} disabled={gerando}
                     startIcon={gerando ? <CircularProgress size={10} /> : undefined}
-                    sx={{ py: 0, px: 0.75, minWidth: 0, fontSize: "0.62rem", lineHeight: 1.4 }}>
+                    sx={{ py: 0, px: 0.9, minWidth: 0, minHeight: 24, fontSize: "0.72rem", lineHeight: 1.4 }}>
                     {gerando ? "gerando…" : "Gerar"}
                   </Button>
                 </span>
