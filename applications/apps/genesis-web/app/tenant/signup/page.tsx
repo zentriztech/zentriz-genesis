@@ -7,6 +7,7 @@ import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import TextField from "@mui/material/TextField";
+import Autocomplete from "@mui/material/Autocomplete";
 import MenuItem from "@mui/material/MenuItem";
 import InputAdornment from "@mui/material/InputAdornment";
 import Typography from "@mui/material/Typography";
@@ -27,15 +28,33 @@ import { maskCnpj, normalizeCnpjInput, maskCep, maskPhone, normalizeUf, BR_UFS }
 const PRIMARY = "#6366F1";
 const PRIMARY_D = "#4F46E5";
 const ACCENT_GRADIENT = `linear-gradient(135deg, ${PRIMARY} 0%, ${PRIMARY_D} 100%)`;
-const PAGE_BG = "linear-gradient(160deg, #0D0F14 0%, #12151d 55%, #0D0F14 100%)";
+// Light, mas não branco puro (claro demais cansa a vista) — gradiente cinza-lavanda
+// levemente colorido pela marca, com contraste suficiente pro texto escuro abaixo.
+const PAGE_BG = "linear-gradient(160deg, #E7E8F3 0%, #EDEFF8 55%, #E3E5F1 100%)";
+const TITLE_COLOR = "#1E1B3A";
+const SUBTITLE_COLOR = "rgba(30,27,58,0.72)";
+
+// Lista curta (não exaustiva) só pra dar sugestões no autocomplete — o campo aceita
+// qualquer texto livre (freeSolo), então nenhum país fica de fora por não estar aqui.
+const COUNTRY_OPTIONS = [
+  "Brasil", "Estados Unidos", "Portugal", "Espanha", "Argentina", "Chile",
+  "Uruguai", "Paraguai", "México", "Colômbia", "Peru", "Canadá",
+  "Reino Unido", "Alemanha", "França", "Itália",
+];
+
+function isBrazilCountry(country: string): boolean {
+  const c = country.trim().toLowerCase();
+  return c === "" || c === "brasil" || c === "brazil" || c === "br";
+}
 
 type Plan = {
   id: string;
   name: string;
   slug: string;
+  tagline?: string | null;
   maxProjects: number;
   maxUsersPerTenant: number;
-  monthlyPriceCents: number;
+  monthlyPriceCents: number | null;
 };
 
 type SignupResponse = {
@@ -107,6 +126,7 @@ export default function TenantSignupPage() {
   const [codeMsg, setCodeMsg] = useState<{ severity: "success" | "info" | "error"; text: string } | null>(null);
 
   // Dados adicionais da empresa (opcionais)
+  const [country, setCountry] = useState("Brasil");
   const [cnpj, setCnpj] = useState("");
   const [cnpjBusy, setCnpjBusy] = useState(false);
   const [cnpjMsg, setCnpjMsg] = useState<{ severity: "success" | "error"; text: string } | null>(null);
@@ -122,8 +142,10 @@ export default function TenantSignupPage() {
   const [addressState, setAddressState] = useState("");
 
   const emailOk = EMAIL_RE.test(adminEmail.trim());
+  const isBR = isBrazilCountry(country);
   // Valor canônico do CNPJ (sem máscara), ciente do novo modelo alfanumérico da SEFAZ.
-  const cnpjNorm = normalizeCnpjInput(cnpj);
+  // Só se aplica no Brasil — fora daqui o registro fiscal é texto livre, sem máscara.
+  const cnpjNorm = isBR ? normalizeCnpjInput(cnpj) : cnpj.trim();
 
   async function handleSendCode() {
     if (!emailOk || sendingCode) return;
@@ -150,7 +172,7 @@ export default function TenantSignupPage() {
   }
 
   async function handleCnpjLookup() {
-    if (cnpjNorm.length !== 14 || cnpjBusy) return;
+    if (!isBrazilCountry(country) || cnpjNorm.length !== 14 || cnpjBusy) return;
     setCnpjBusy(true);
     setCnpjMsg(null);
     try {
@@ -229,6 +251,7 @@ export default function TenantSignupPage() {
         adminEmail: adminEmail.trim(),
         password,
         code: code.trim(),
+        country: country.trim() || "Brasil",
         cnpj: cnpjNorm || undefined,
         responsibleName: responsibleName.trim() || undefined,
         responsibleEmail: responsibleEmail.trim() || undefined,
@@ -331,18 +354,17 @@ export default function TenantSignupPage() {
       }}
     >
       <motion.div {...cardMotion} style={{ width: "100%", maxWidth: 640 }}>
-        {/* Cores fixas (não tokens de tema): estes títulos ficam SOBRE o PAGE_BG escuro
-            hardcoded. Usar text.primary/text.secondary os tornaria escuros e invisíveis
-            no tema claro (regra de ouro: texto claro exige fundo escuro). */}
+        {/* Cores fixas (não tokens de tema): estes títulos ficam SOBRE o PAGE_BG claro
+            hardcoded desta página (regra de ouro: texto escuro exige fundo claro). */}
         <Typography
           variant="h4"
           component="h1"
           align="center"
-          sx={{ color: "#F8FAFC", fontWeight: 700, mb: 0.5 }}
+          sx={{ color: TITLE_COLOR, fontWeight: 700, mb: 0.5 }}
         >
           Cadastre sua empresa
         </Typography>
-        <Typography align="center" sx={{ color: "rgba(248,250,252,0.72)", mb: { xs: 3, md: 4 } }}>
+        <Typography align="center" sx={{ color: SUBTITLE_COLOR, mb: { xs: 3, md: 4 } }}>
           Escolha um plano e crie sua conta. O acesso é liberado após a ativação pela Zentriz.
         </Typography>
 
@@ -431,14 +453,23 @@ export default function TenantSignupPage() {
                           <Typography variant="subtitle1" sx={{ color: selected ? "primary.main" : "text.primary" }}>
                             {plan.name}
                           </Typography>
+                          {plan.tagline && (
+                            <Typography variant="caption" color="text.secondary" sx={{ display: "block", fontStyle: "italic" }}>
+                              {plan.tagline}
+                            </Typography>
+                          )}
                           <Divider sx={{ my: 1 }} />
                           <Typography variant="body2" color="text.secondary">
-                            {plan.maxProjects} projetos
+                            {plan.maxProjects}{plan.monthlyPriceCents === null ? "+" : ""} projetos
                           </Typography>
                           <Typography variant="body2" color="text.secondary">
                             {plan.maxUsersPerTenant} usuários
                           </Typography>
-                          <PlanInstallments monthlyPriceCents={plan.monthlyPriceCents} sx={{ mt: 1 }} />
+                          <PlanInstallments
+                            monthlyPriceCents={plan.monthlyPriceCents}
+                            currency={isBR ? "BRL" : "USD"}
+                            sx={{ mt: 1 }}
+                          />
                         </CardContent>
                       </Card>
                     );
@@ -457,30 +488,53 @@ export default function TenantSignupPage() {
               <Typography variant="subtitle2" sx={{ color: "text.primary", mb: 0.5 }}>
                 Dados da empresa
               </Typography>
+              <Autocomplete
+                freeSolo
+                fullWidth
+                options={COUNTRY_OPTIONS}
+                value={country}
+                onChange={(_e, value) => setCountry(value ?? "")}
+                onInputChange={(_e, value) => setCountry(value)}
+                renderInput={(params) => (
+                  <TextField {...params} label="País" margin="normal" placeholder="Brasil" />
+                )}
+              />
               <TextField
                 fullWidth
-                label="CNPJ (opcional)"
+                label={isBR ? "CNPJ (opcional)" : "Registro fiscal / Tax ID (opcional)"}
                 value={cnpj}
-                onChange={(e) => setCnpj(maskCnpj(e.target.value))}
+                onChange={(e) => setCnpj(isBR ? maskCnpj(e.target.value) : e.target.value)}
                 margin="normal"
-                placeholder="12.ABC.345/01DE-35"
-                helperText="Aceita o novo formato alfanumérico da SEFAZ. Consulte para preencher nome e endereço."
-                inputProps={{ maxLength: 18, autoCapitalize: "characters", style: { textTransform: "uppercase" } }}
-                InputProps={{
-                  endAdornment: (
-                    <InputAdornment position="end">
-                      <Button
-                        size="small"
-                        onClick={handleCnpjLookup}
-                        disabled={cnpjNorm.length !== 14 || cnpjBusy}
-                      >
-                        {cnpjBusy ? <CircularProgress size={16} /> : "Consultar"}
-                      </Button>
-                    </InputAdornment>
-                  ),
-                }}
+                placeholder={isBR ? "12.ABC.345/01DE-35" : "Número de registro fiscal do seu país"}
+                helperText={
+                  isBR
+                    ? "Aceita o novo formato alfanumérico da SEFAZ. Consulte para preencher nome e endereço."
+                    : "Equivalente ao CNPJ no seu país (texto livre, números e letras)."
+                }
+                inputProps={
+                  isBR
+                    ? { maxLength: 18, autoCapitalize: "characters", style: { textTransform: "uppercase" } }
+                    : { maxLength: 40 }
+                }
+                InputProps={
+                  isBR
+                    ? {
+                        endAdornment: (
+                          <InputAdornment position="end">
+                            <Button
+                              size="small"
+                              onClick={handleCnpjLookup}
+                              disabled={cnpjNorm.length !== 14 || cnpjBusy}
+                            >
+                              {cnpjBusy ? <CircularProgress size={16} /> : "Consultar"}
+                            </Button>
+                          </InputAdornment>
+                        ),
+                      }
+                    : undefined
+                }
               />
-              {cnpjMsg && (
+              {isBR && cnpjMsg && (
                 <Alert severity={cnpjMsg.severity} sx={{ mt: 1 }} onClose={() => setCnpjMsg(null)}>
                   {cnpjMsg.text}
                 </Alert>
@@ -632,40 +686,75 @@ export default function TenantSignupPage() {
                 placeholder="(11) 99999-9999"
                 inputProps={{ inputMode: "tel", maxLength: 15, autoComplete: "tel" }}
               />
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-                <TextField label="CEP" value={addressCep} onChange={(e) => setAddressCep(maskCep(e.target.value))} margin="normal" placeholder="00000-000" inputProps={{ inputMode: "numeric", maxLength: 9, autoComplete: "postal-code" }} sx={{ width: { sm: 180 } }} fullWidth />
-                <TextField label="Logradouro" value={addressStreet} onChange={(e) => setAddressStreet(e.target.value)} margin="normal" fullWidth />
-                <TextField label="Número" value={addressNumber} onChange={(e) => setAddressNumber(e.target.value)} margin="normal" sx={{ width: { sm: 120 } }} fullWidth />
-              </Stack>
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-                <TextField label="Complemento" value={addressComplement} onChange={(e) => setAddressComplement(e.target.value)} margin="normal" fullWidth />
-                <TextField label="Bairro" value={addressDistrict} onChange={(e) => setAddressDistrict(e.target.value)} margin="normal" fullWidth />
-              </Stack>
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-                <TextField label="Cidade" value={addressCity} onChange={(e) => setAddressCity(e.target.value)} margin="normal" fullWidth />
-                <TextField
-                  select
-                  label="UF"
-                  value={addressState}
-                  onChange={(e) => setAddressState(e.target.value)}
-                  margin="normal"
-                  sx={{ width: { sm: 140 } }}
-                  fullWidth
-                  SelectProps={{
-                    renderValue: (v) => (v as string) || "",
-                    MenuProps: { PaperProps: { style: { maxHeight: 360 } } },
-                  }}
-                >
-                  <MenuItem value="">
-                    <em>Selecione</em>
-                  </MenuItem>
-                  {BR_UFS.map((s) => (
-                    <MenuItem key={s.uf} value={s.uf}>
-                      {s.uf} — {s.name}
-                    </MenuItem>
-                  ))}
-                </TextField>
-              </Stack>
+              {/* As 3 linhas de endereço ficam dentro de um Stack vertical próprio (spacing
+                  controla o gap entre linhas) — os TextFields dentro de cada linha NÃO usam
+                  margin="normal" (o Stack horizontal já dá o gap entre colunas); antes as
+                  duas margens se somavam e o espaçamento vertical ficava dobrado/inconsistente. */}
+              {isBR ? (
+                <Stack spacing={2} sx={{ mt: 2 }}>
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                    <TextField label="CEP" value={addressCep} onChange={(e) => setAddressCep(maskCep(e.target.value))} placeholder="00000-000" inputProps={{ inputMode: "numeric", maxLength: 9, autoComplete: "postal-code" }} sx={{ width: { sm: 180 } }} fullWidth />
+                    <TextField label="Logradouro" value={addressStreet} onChange={(e) => setAddressStreet(e.target.value)} fullWidth />
+                    <TextField label="Número" value={addressNumber} onChange={(e) => setAddressNumber(e.target.value)} sx={{ width: { sm: 120 } }} fullWidth />
+                  </Stack>
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                    <TextField label="Complemento" value={addressComplement} onChange={(e) => setAddressComplement(e.target.value)} fullWidth />
+                    <TextField label="Bairro" value={addressDistrict} onChange={(e) => setAddressDistrict(e.target.value)} fullWidth />
+                  </Stack>
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                    <TextField label="Cidade" value={addressCity} onChange={(e) => setAddressCity(e.target.value)} fullWidth />
+                    <TextField
+                      select
+                      label="UF"
+                      value={addressState}
+                      onChange={(e) => setAddressState(e.target.value)}
+                      sx={{ width: { sm: 140 } }}
+                      fullWidth
+                      SelectProps={{
+                        renderValue: (v) => (v as string) || "",
+                        MenuProps: { PaperProps: { style: { maxHeight: 360 } } },
+                      }}
+                    >
+                      <MenuItem value="">
+                        <em>Selecione</em>
+                      </MenuItem>
+                      {BR_UFS.map((s) => (
+                        <MenuItem key={s.uf} value={s.uf}>
+                          {s.uf} — {s.name}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                  </Stack>
+                </Stack>
+              ) : (
+                // Layout internacional: País já foi capturado acima. Ordem pedida:
+                // Estado/Província, Cidade, Endereço (texto livre), Código postal — sem
+                // Logradouro/Número/Complemento/Bairro separados (não fazem sentido fora do
+                // formato BR) nem UF fixa (fica texto livre, cada país tem sua própria lista).
+                <Stack spacing={2} sx={{ mt: 2 }}>
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                    <TextField label="Estado / Província" value={addressState} onChange={(e) => setAddressState(e.target.value)} fullWidth />
+                    <TextField label="Cidade" value={addressCity} onChange={(e) => setAddressCity(e.target.value)} fullWidth />
+                  </Stack>
+                  <TextField
+                    label="Endereço"
+                    value={addressStreet}
+                    onChange={(e) => setAddressStreet(e.target.value)}
+                    placeholder="Ex.: Rua José Antônio, 187, Santa Luzia, apto 87, andar 89"
+                    multiline
+                    minRows={2}
+                    fullWidth
+                  />
+                  <TextField
+                    label="Código postal (equivalente ao CEP)"
+                    value={addressCep}
+                    onChange={(e) => setAddressCep(e.target.value)}
+                    inputProps={{ maxLength: 16, autoComplete: "postal-code" }}
+                    sx={{ width: { sm: 240 } }}
+                    fullWidth
+                  />
+                </Stack>
+              )}
 
               <Alert severity="info" sx={{ mt: 2.5 }}>
                 Após o cadastro, a conta é criada <strong>inativa</strong>. O acesso só é liberado

@@ -37,6 +37,7 @@ type SignupBody = {
   password?: string;
   code?: string;
   // Dados adicionais da empresa (opcionais no signup público)
+  country?: string;
   cnpj?: string;
   responsibleName?: string;
   responsibleEmail?: string;
@@ -163,13 +164,21 @@ export async function signupRoutes(app: FastifyInstance) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "Código de verificação é obrigatório" });
     }
 
-    // Campos opcionais da empresa
+    // Campos opcionais da empresa. País default 'BR' preserva o comportamento de sempre
+    // para quem não manda o campo (clientes antigos do form). Fora do Brasil o "CNPJ" é
+    // um registro fiscal internacional de formato livre — sem checksum SEFAZ para validar.
+    const country = (optStr(body.country) ?? "BR").toUpperCase();
+    const isBrazil = country === "BR" || country === "BRASIL" || country === "BRAZIL";
     const cnpjRaw = optStr(body.cnpj);
     let cnpj: string | null = null;
     if (cnpjRaw) {
-      cnpj = normalizeCnpjAlnum(cnpjRaw);
-      if (!isValidCnpj(cnpj)) {
-        return reply.status(400).send({ code: "BAD_REQUEST", message: "CNPJ inválido" });
+      if (isBrazil) {
+        cnpj = normalizeCnpjAlnum(cnpjRaw);
+        if (!isValidCnpj(cnpj)) {
+          return reply.status(400).send({ code: "BAD_REQUEST", message: "CNPJ inválido" });
+        }
+      } else {
+        cnpj = cnpjRaw;
       }
     }
     const responsibleEmail = optStr(body.responsibleEmail)?.toLowerCase() ?? null;
@@ -201,20 +210,21 @@ export async function signupRoutes(app: FastifyInstance) {
       await client.query("BEGIN");
       const tenantInsert = await client.query(
         `INSERT INTO tenants
-           (name, plan_id, status, email, email_confirmed, cnpj,
+           (name, plan_id, status, email, email_confirmed, cnpj, country,
             responsible_name, responsible_email, responsible_phone,
             address_cep, address_street, address_number, address_complement,
             address_district, address_city, address_state)
-         VALUES ($1, $2, 'inactive', $3, true, $4,
-                 $5, $6, $7,
-                 $8, $9, $10, $11,
-                 $12, $13, $14)
+         VALUES ($1, $2, 'inactive', $3, true, $4, $5,
+                 $6, $7, $8,
+                 $9, $10, $11, $12,
+                 $13, $14, $15)
          RETURNING id, name, plan_id, status, email, email_confirmed, created_at`,
         [
           tenantName,
           planId,
           adminEmail,
           cnpj,
+          country,
           optStr(body.responsibleName) ?? null,
           responsibleEmail,
           optStr(body.responsiblePhone) ?? null,
@@ -224,7 +234,8 @@ export async function signupRoutes(app: FastifyInstance) {
           optStr(body.addressComplement) ?? null,
           optStr(body.addressDistrict) ?? null,
           optStr(body.addressCity) ?? null,
-          optStr(body.addressState)?.toUpperCase() ?? null,
+          // UF só é código de 2 letras no Brasil — fora daqui, estado/província é texto livre.
+          isBrazil ? (optStr(body.addressState)?.toUpperCase() ?? null) : (optStr(body.addressState) ?? null),
         ]
       );
       const tenant = tenantInsert.rows[0];
