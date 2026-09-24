@@ -16,6 +16,7 @@ import fs from "fs/promises";
 import crypto from "crypto";
 import { DEPLOY_FORMATS, type DeployFormat } from "./provision/deployTargets.js";
 import { normalizeProductId, resolveInboxProductId, assertProductOwnership } from "./inbox.js";
+import { recomputeProductLifecycle } from "./productLifecycle.js";
 import { computeSpecTreeHash, sha256Hex } from "../lib/specTreeHash.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
@@ -254,6 +255,12 @@ export async function createProjectFromSpec(
       ["pending_conversion", projectId]);
     status = "pending_conversion";
   }
+
+  // Bug real observado em prod (2026-09-24): produto criado sem projetos nasce
+  // 'ingesting' (default) e NADA recalculava esse estado ao materializar uma spec direto
+  // num produto existente — o produto ficava 'ingesting' pra sempre e `promotability.ts`
+  // lia isso como "já saiu da Bancada", mentindo pro usuário. Recomputa aqui (idempotente).
+  await recomputeProductLifecycle(client, resolvedProductId);
 
   return { projectId, status };
 }

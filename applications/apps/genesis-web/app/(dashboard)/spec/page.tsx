@@ -4182,7 +4182,7 @@ export default function SpecPage() {
           subtitle={treeProductId
             ? "Spec do produto — escolha o arquivo na lista da pasta, à esquerda."
             : "Os arquivos desta spec ficam na lista à esquerda."}
-          onBack={() => router.push(`/projects/${editProjectId}`)}
+          onBack={() => router.push(treeProductId ? "/specs" : `/projects/${editProjectId}`)}
           barLeading={<TraceabilityReportsButton productId={ownerProduct?.id ?? null} productName={ownerProduct?.name ?? null} />}
           trailing={
             <TraceabilityReportsButton
