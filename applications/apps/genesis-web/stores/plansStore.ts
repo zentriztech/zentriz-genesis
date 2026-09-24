@@ -8,16 +8,19 @@ export type CreatePlanPayload = {
   id: string;
   name: string;
   slug: string;
+  tagline?: string | null;
   maxProjects: number;
   maxUsersPerTenant: number;
-  monthlyPriceCents?: number;
+  /** null = sob consulta (ex.: plano "Fábrica"). */
+  monthlyPriceCents?: number | null;
 };
 
 export type UpdatePlanPayload = {
   name?: string;
+  tagline?: string | null;
   maxProjects?: number;
   maxUsersPerTenant?: number;
-  monthlyPriceCents?: number;
+  monthlyPriceCents?: number | null;
 };
 
 class PlansStore {

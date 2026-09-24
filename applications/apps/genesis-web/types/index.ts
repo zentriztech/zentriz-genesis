@@ -1,13 +1,18 @@
-export type PlanSlug = "prata" | "ouro" | "diamante";
+// Slugs deixaram de ser um conjunto fechado (planos são renomeados/adicionados via
+// admin CRUD, ex.: Núcleo/Portfólio/Operação/Fábrica, 2026-09-24) — nada no código
+// alterna comportamento pelo valor exato do slug, só exibe texto.
+export type PlanSlug = string;
 
 export interface Plan {
   id: string;
   slug: PlanSlug;
   name: string;
+  /** Frase curta de posicionamento (ex.: "primeira frente", "engenharia inteira"). */
+  tagline?: string | null;
   maxProjects: number;
   maxUsersPerTenant: number;
-  /** Preço mensal em centavos (BRL). 0 = gratuito/a definir. */
-  monthlyPriceCents: number;
+  /** Preço mensal em centavos (BRL). 0 = gratuito/a definir. null = sob consulta. */
+  monthlyPriceCents: number | null;
 }
 
 export type TenantStatus = "active" | "suspended" | "inactive";

@@ -16,6 +16,8 @@ import DialogTitle from "@mui/material/DialogTitle";
 import Grid from "@mui/material/Grid";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
+import FormControlLabel from "@mui/material/FormControlLabel";
+import Checkbox from "@mui/material/Checkbox";
 import type { Plan } from "@/types";
 import { plansStore, type UpdatePlanPayload } from "@/stores/plansStore";
 import { authStore } from "@/stores/authStore";
@@ -32,8 +34,10 @@ function parseReaisToCents(input: string): number | null {
 
 function EditPlanDialog({ plan, open, onClose }: { plan: Plan; open: boolean; onClose: () => void }) {
   const [name, setName] = useState(plan.name);
+  const [tagline, setTagline] = useState(plan.tagline ?? "");
   const [maxProjects, setMaxProjects] = useState(String(plan.maxProjects));
   const [maxUsers, setMaxUsers] = useState(String(plan.maxUsersPerTenant));
+  const [contactOnly, setContactOnly] = useState(plan.monthlyPriceCents === null);
   const [price, setPrice] = useState(((plan.monthlyPriceCents ?? 0) / 100).toFixed(2).replace(".", ","));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,17 +48,22 @@ function EditPlanDialog({ plan, open, onClose }: { plan: Plan; open: boolean; on
     try {
       const payload: UpdatePlanPayload = {};
       if (name !== plan.name) payload.name = name;
+      if (tagline.trim() !== (plan.tagline ?? "")) payload.tagline = tagline.trim() || null;
       const mp = parseInt(maxProjects, 10);
       const mu = parseInt(maxUsers, 10);
       if (!isNaN(mp) && mp !== plan.maxProjects) payload.maxProjects = mp;
       if (!isNaN(mu) && mu !== plan.maxUsersPerTenant) payload.maxUsersPerTenant = mu;
-      const cents = parseReaisToCents(price);
-      if (cents === null) {
-        setError("Valor mensal inválido. Use um número em reais (ex.: 99,00).");
-        setSaving(false);
-        return;
+      if (contactOnly) {
+        if (plan.monthlyPriceCents !== null) payload.monthlyPriceCents = null;
+      } else {
+        const cents = parseReaisToCents(price);
+        if (cents === null) {
+          setError("Valor mensal inválido. Use um número em reais (ex.: 99,00).");
+          setSaving(false);
+          return;
+        }
+        if (cents !== (plan.monthlyPriceCents ?? 0)) payload.monthlyPriceCents = cents;
       }
-      if (cents !== (plan.monthlyPriceCents ?? 0)) payload.monthlyPriceCents = cents;
       await plansStore.update(plan.id, payload);
       onClose();
     } catch (err) {
@@ -70,15 +79,28 @@ function EditPlanDialog({ plan, open, onClose }: { plan: Plan; open: boolean; on
       <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 2, pt: 2 }}>
         {error && <Alert severity="error">{error}</Alert>}
         <TextField label="Nome" value={name} onChange={(e) => setName(e.target.value)} fullWidth />
+        <TextField
+          label="Tagline (opcional)"
+          value={tagline}
+          onChange={(e) => setTagline(e.target.value)}
+          fullWidth
+          placeholder="Ex.: primeira frente, engenharia inteira…"
+        />
         <TextField label="Máx. projetos" type="number" value={maxProjects} onChange={(e) => setMaxProjects(e.target.value)} fullWidth />
         <TextField label="Máx. usuários por tenant" type="number" value={maxUsers} onChange={(e) => setMaxUsers(e.target.value)} fullWidth />
-        <TextField
-          label="Valor mensal (R$)"
-          value={price}
-          onChange={(e) => setPrice(e.target.value)}
-          fullWidth
-          helperText="Preço mensal do plano em reais (ex.: 99,00). 0 = gratuito/a definir."
+        <FormControlLabel
+          control={<Checkbox checked={contactOnly} onChange={(e) => setContactOnly(e.target.checked)} />}
+          label="Sob consulta (sem preço fixo)"
         />
+        {!contactOnly && (
+          <TextField
+            label="Valor mensal (R$)"
+            value={price}
+            onChange={(e) => setPrice(e.target.value)}
+            fullWidth
+            helperText="Preço mensal do plano em reais (ex.: 99,00). 0 = gratuito/a definir."
+          />
+        )}
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose} disabled={saving}>Cancelar</Button>
@@ -130,15 +152,24 @@ const ZentrizPlansPage = observer(function ZentrizPlansPage() {
               <Card>
                 <CardContent>
                   <Typography variant="h6">{plan.name}</Typography>
+                  {plan.tagline && (
+                    <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic" }}>{plan.tagline}</Typography>
+                  )}
                   <Typography variant="body2" color="text.secondary">slug: {plan.slug}</Typography>
                   <Typography variant="h5" color="primary" sx={{ mt: 1, mb: 0.5, fontWeight: 700 }}>
-                    {formatBRL(plan.monthlyPriceCents)}
-                    <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>
-                      /mês
-                    </Typography>
+                    {plan.monthlyPriceCents === null ? (
+                      "Sob consulta"
+                    ) : (
+                      <>
+                        {formatBRL(plan.monthlyPriceCents)}
+                        <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>
+                          /mês
+                        </Typography>
+                      </>
+                    )}
                   </Typography>
                   <PlanInstallments monthlyPriceCents={plan.monthlyPriceCents} sx={{ mb: 1 }} />
-                  <Typography variant="body2">Projetos máx.: {plan.maxProjects}</Typography>
+                  <Typography variant="body2">Projetos máx.: {plan.maxProjects}{plan.monthlyPriceCents === null ? "+" : ""}</Typography>
                   <Typography variant="body2">Usuários por tenant: {plan.maxUsersPerTenant}</Typography>
                 </CardContent>
                 {isAdmin && (
