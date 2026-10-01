@@ -156,22 +156,24 @@ export const PROVIDER_META: Record<Provider, {
   fields: { key: string; label: string; placeholder: string; secret?: boolean }[];
 }> = {
   bedrock: {
-    // Modelos Bedrock validados por invocação real (Converse). Família Claude 5 (Opus 5,
-    // Sonnet 5, Fable 5/5.1) + Haiku 4.5 validados em 2026-09-03. Modelos que retornam
-    // "model identifier invalid" ou "not authorized" foram removidos.
-    // ⚠️ ENTITLEMENT: a família Claude 5 está liberada na conta de build (896328489567) mas
-    // ainda NEGADA no Bedrock Model Access da conta de PROD (820198199720) — selecionáveis já,
-    // mas em prod caem na cascata CLAUDE_MODEL_FALLBACK até o grant ser concedido. Haiku 4.5 e
-    // Sonnet 4.6 funcionam em prod hoje. Se novos modelos forem liberados, adicionar após teste real.
+    // Catálogo LOCAL (fallback quando o slot ainda não tem credencial — a tela lista do provider e
+    // verifica por invocação assim que há credencial). Medido por InvokeModel real em 2026-10-01:
+    // conta 896 (Venuxx) invoca os 14 abaixo; conta 820 (ZFactory/prod) só opus-4-6, opus-4-5,
+    // sonnet-4-6, sonnet-4-5 e haiku-4-5 — 5.5 lá dá "not available for this account".
     label: "AWS Bedrock", icon: "☁️",
     models: [
+      "us.anthropic.claude-opus-5-5",
+      "us.anthropic.claude-sonnet-5-5",
       "us.anthropic.claude-opus-5",
       "us.anthropic.claude-sonnet-5",
-      "us.anthropic.claude-fable-5",
       "us.anthropic.claude-fable-5-1",
+      "us.anthropic.claude-fable-5",
       "us.anthropic.claude-opus-4-8",
       "us.anthropic.claude-opus-4-7",
+      "us.anthropic.claude-opus-4-6-v1",
+      "us.anthropic.claude-opus-4-5-20251101-v1:0",
       "us.anthropic.claude-sonnet-4-6",
+      "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
       "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     ],
     fields: [

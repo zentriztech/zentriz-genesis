@@ -165,6 +165,18 @@ MODEL_LIMITS: dict[str, dict[str, int]] = {
     "us.anthropic.claude-fable-5": {"context": 200_000, "max_output": 32_000},
     "us.anthropic.claude-fable-5-1": {"context": 200_000, "max_output": 32_000},
     "us.anthropic.claude-haiku-4-5-20251001-v1:0": {"context": 200_000, "max_output": 8_192},
+    # 2026-10-01 — ids invocáveis medidos por InvokeModel real. Conta 896 (Venuxx): os 14 Claude,
+    # incluindo 5.5. Conta 820 (ZFactory/prod): só opus-4-6/opus-4-5/sonnet-4-6/sonnet-4-5/haiku-4-5
+    # (5.5 → "not available for this account"). Sem estas entradas o slot da ZFactory
+    # (`opus-4-5-20251101-v1:0`) caía em _DEFAULT_LIMITS e truncava a saída em 16k.
+    "claude-opus-5-5": {"context": 200_000, "max_output": 64_000},
+    "claude-sonnet-5-5": {"context": 200_000, "max_output": 64_000},
+    "us.anthropic.claude-opus-5-5": {"context": 200_000, "max_output": 64_000},
+    "us.anthropic.claude-sonnet-5-5": {"context": 200_000, "max_output": 64_000},
+    "us.anthropic.claude-opus-4-6-v1": {"context": 200_000, "max_output": 64_000},
+    "us.anthropic.claude-opus-4-5-20251101-v1:0": {"context": 200_000, "max_output": 64_000},
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0": {"context": 200_000, "max_output": 64_000},
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0": {"context": 200_000, "max_output": 8_192},
 }
 _DEFAULT_LIMITS = {"context": 200_000, "max_output": 16_000}
 
