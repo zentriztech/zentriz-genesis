@@ -487,7 +487,7 @@ export async function pushProjectFiles(
   branch: string,
   projectFilesRoot: string,
   projectId: string,
-  opts: { syncDeletes?: boolean } = {},
+  opts: { syncDeletes?: boolean; messageSuffix?: string } = {},
 ): Promise<{ sha: string; fileCount: number; deleted?: number; deletionsSkipped?: string }> {
   const { readdir, stat, readFile } = await import("fs/promises");
   const pathMod = await import("path");
@@ -584,9 +584,12 @@ export async function pushProjectFiles(
 
     const { data: tree } = await octokit.git.createTree({ owner, repo, base_tree: baseTreeSha, tree: treeItems });
 
-    const batchMsg = batches.length > 1
+    // RFC-0009 (F3): sufixo do ticket no commit — ponto ÚNICO de escrita do histórico gerado
+    // (a Fábrica não commita por task; medido). Sem ticket, a mensagem é idêntica à de antes.
+    const suffix = opts?.messageSuffix ?? "";
+    const batchMsg = (batches.length > 1
       ? `feat: Genesis — batch ${batchIdx + 1}/${batches.length} (${batch.length} files)`
-      : `feat: Genesis — push ${allFiles.length} generated files`;
+      : `feat: Genesis — push ${allFiles.length} generated files`) + suffix;
 
     const { data: newCommit } = await octokit.git.createCommit({
       owner, repo,

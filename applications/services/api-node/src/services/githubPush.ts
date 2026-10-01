@@ -30,6 +30,7 @@ import {
 const execFileAsync = promisify(execFile);
 import { notifyTelegramTenant } from "../routes/telegram.js";
 import { validateDeployMatrix } from "./provision/deployMatrix.js";
+import { ticketStamp } from "./tickets.js";
 import { renderMobileRncliBundle } from "./provision/renderers/mobileRncliRenderer.js";
 import { renderMobileEasBundle } from "./provision/renderers/mobileEasRenderer.js";
 
@@ -663,7 +664,11 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
     // H4: só no push de EVOLUÇÃO sincronizamos deleções (arquivo removido no filho sai do branch);
     // guardado por lista protegida + `git ls-files` local + `truncated` (github.ts). Flag para desligar.
     const syncDeletes = (process.env.EVOLUTION_SYNC_DELETES ?? "on").toLowerCase() !== "off";
-    const { sha, fileCount, deleted, deletionsSkipped } = await pushProjectFiles(installationId, owner, repoName, branch, PROJECT_FILES_ROOT, projectId, { syncDeletes });
+    // RFC-0009 (F3): o ticket carimba o commit em lote e o título do PR. `git log --grep=TK-0012`
+    // passa a achar tudo o que o pedido gerou — rastreabilidade que o sufixo no ID da task NÃO
+    // daria (o regex do runner trunca `TSK-BE-001-TK12` em silêncio).
+    const stamp = ticketStamp((row.extra ?? null) as Record<string, unknown> | null);
+    const { sha, fileCount, deleted, deletionsSkipped } = await pushProjectFiles(installationId, owner, repoName, branch, PROJECT_FILES_ROOT, projectId, { syncDeletes, messageSuffix: stamp ? ` (${stamp})` : undefined });
     if (deletionsSkipped) console.warn(`[GitHubPush] evolução ${projectId}: ${deletionsSkipped}`);
 
     await client.query(
@@ -675,7 +680,7 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
 
     const pr = await openPullRequest(installationId, {
       owner, repo: repoName, head: branch, base: "dev",
-      title: `Evolução v${opts.versionLabel} — ${(opts.title ?? (row.title as string) ?? projectId).replace(/ — Evolução v\d+$/i, "")}`,
+      title: `${stamp ? `${stamp} · ` : ""}Evolução v${opts.versionLabel} — ${(opts.title ?? (row.title as string) ?? projectId).replace(/ — Evolução v\d+$/i, "")}`,
       body: opts.prBody,
     });
 

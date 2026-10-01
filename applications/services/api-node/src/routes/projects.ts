@@ -30,6 +30,10 @@ import { sha256Hex } from "../lib/specTreeHash.js";
 import { costUsd, priceCaseSql } from "../lib/modelPricing.js";
 import { getProjectSpendUsd, getTenantMonthSpendUsd, resolveTenantMonthlyBudgetUsd } from "../services/tenantCostCap.js";
 import { emitValueEvent } from "../services/valueEvents.js";
+import {
+  evolutionRequestHeader, loadTicket, materializeTicketIntoSpecTree, reopenTicketsOfChild,
+  ticketCode, type TicketRow,
+} from "../services/tickets.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -3007,6 +3011,7 @@ export async function projectRoutes(app: FastifyInstance) {
               return reply.send({ ok: true, mode: "already_archived", projectId: id, message: "Projeto já estava arquivado." });
             }
             await client.query("UPDATE projects SET status = 'archived', updated_at = now() WHERE id = $1", [id]);
+            await reopenTicketsOfChild(client, id);
             return reply.send({
               ok: true, mode: "archived", projectId: id,
               message: "Projeto ocultado do portal (arquivado). Nada foi apagado — reversível.",
@@ -3015,6 +3020,12 @@ export async function projectRoutes(app: FastifyInstance) {
           // Sem artefatos → cai no hard delete abaixo (mode: "deleted").
         }
 
+        // RFC-0009 (invariante 3): o pedido sobrevive à execução. Descartar o filho devolve o
+        // ticket para 'open' — quem morreu foi a EXECUÇÃO, não o pedido. Sem isto, o ticket
+        // ficaria eternamente 'promoted' apontando para um projeto inexistente (o ataque
+        // adversarial "dois lugares dizendo a verdade"). Roda ANTES do DELETE: o FK do
+        // child_project_id não tem cascade e a linha precisa ser lida enquanto existe.
+        await reopenTicketsOfChild(client, id);
         // Deletar do banco (ON DELETE CASCADE cuida das tabelas filhas)
         await client.query("DELETE FROM projects WHERE id = $1", [id]);
         // Deletar arquivos do disco se keepFiles=false
@@ -3354,12 +3365,15 @@ export async function projectRoutes(app: FastifyInstance) {
   // O arquivo de spec pode ser enviado separadamente via multipart (projeto filho terá spec_ref próprio)
   app.post<{
     Params: { id: string };
-    Body: { request?: string; workMode?: "copy" | "branch" };
+    Body: { request?: string; workMode?: "copy" | "branch"; ticketId?: string };
   }>("/api/projects/:id/evolve", async (request, reply) => {
     const user = getUser(request);
     // RFC-0002 A.1: conta de gestão (zentriz_admin) não cria/evolui projeto (autoria).
     if (denyCreationForManagement(user, reply)) return;
     const { id: parentId } = request.params;
+    // RFC-0009: promover um Ticket é ESTA rota com `ticketId` — não há segunda porta de promoção
+    // (fluxo paralelo é o erro clássico do Genesis). Sem ticketId, o caminho antigo é idêntico.
+    const ticketId = (request.body?.ticketId ?? "").trim();
     const evolutionRequest = request.body?.request?.trim() ?? "";
     const workMode: "copy" | "branch" = request.body?.workMode === "branch" ? "branch" : "copy";
 
@@ -3380,7 +3394,28 @@ export async function projectRoutes(app: FastifyInstance) {
           message: `Evolução só permitida em projetos aceitos. Status atual: ${parentRow.status}`,
         });
       }
-      if (!evolutionRequest) {
+      // RFC-0009 — promoção de Ticket: o texto do pedido vem do ticket (nunca reescrito aqui;
+      // o corpo é do humano). O ticket precisa ser do MESMO produto do pai e estar em 'open'.
+      let ticket: TicketRow | null = null;
+      if (ticketId) {
+        const t = await loadTicket(client, ticketId);
+        if (!t || !canAccessProjectRow(user, t)) {
+          return reply.status(404).send({ code: "TICKET_NOT_FOUND", message: "Pedido não encontrado" });
+        }
+        if (t.product_id !== (parentRow.product_id as string | null)) {
+          return reply.status(400).send({ code: "TICKET_WRONG_PRODUCT", message: "O pedido é de outro produto." });
+        }
+        if (t.status !== "open") {
+          return reply.status(409).send({
+            code: "TICKET_ALREADY_PROMOTED",
+            message: `${ticketCode(t.number)} já foi promovido (status ${t.status}).`,
+            childProjectId: t.child_project_id,
+          });
+        }
+        ticket = t;
+      }
+      const requestText = ticket ? ticket.body : evolutionRequest;
+      if (!requestText) {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "Campo 'request' é obrigatório (descreva o que evoluir)." });
       }
 
@@ -3460,7 +3495,10 @@ export async function projectRoutes(app: FastifyInstance) {
           JSON.stringify({
             ...inheritedDeployPrefs,
             evolution: true,
-            evolution_request: evolutionRequest,
+            evolution_request: requestText,
+            // RFC-0009: o ticket viaja no `extra` — daí ele chega ao corpo do PR e à mensagem
+            // de merge (buildPullRequestBody recebe o extra do filho) sem tocar no ID da task.
+            ...(ticket ? { ticket_id: ticket.id, ticket_number: ticket.number, ticket_kind: ticket.change_kind } : {}),
             evolution_work_mode: workMode,
             evolution_parent_id: parentId,
             // Evoluir E1: raiz da linhagem (identidade Connect/repo/Deadpool) + branch de trabalho.
@@ -3499,7 +3537,7 @@ export async function projectRoutes(app: FastifyInstance) {
             const original = readFileSync(r.file_path);
             const filename = isPrimary ? `spec-evolution-v${nextVersion}.md` : r.filename;
             const content = isPrimary
-              ? Buffer.from(`# EVOLUTION REQUEST — v${nextVersion}\n\n> ${evolutionRequest}\n\n---\n\n` + original.toString("utf-8"), "utf-8")
+              ? Buffer.from(`${evolutionRequestHeader(nextVersion, ticket)}\n\n> ${requestText}\n\n---\n\n` + original.toString("utf-8"), "utf-8")
               : original;
             const dir = relDir ? join(childSpecDir, relDir) : childSpecDir;
             mkdirSync(dir, { recursive: true });
@@ -3586,6 +3624,30 @@ export async function projectRoutes(app: FastifyInstance) {
         `UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1`,
         [childId, JSON.stringify({ evolution_source: evolutionSource, evolution_source_error: evolutionSourceError, evolution_inherited_files: inherited, evolution_inherited_spec: inheritedSpec })],
       );
+      // ── RFC-0009 (F2): materializar `tickets/TK-NNNN/request.md` (+ anexos) na ÁRVORE da spec
+      // do filho, via `rel_dir` (migration 071). O `request.md` é imutável: é a única cópia
+      // legível do que o humano pediu — `evolution_request` é sobrescrito pelo sintetizado
+      // (evolutionGate.ts:214) e hoje só sobrevive numa coluna JSON que ninguém lê.
+      // Best-effort por desenho: falhar aqui NÃO pode abortar a evolução já criada.
+      if (ticket) {
+        const mat = await materializeTicketIntoSpecTree(client, {
+          ticket,
+          childProjectId: childId,
+          authorEmail: user.email,
+          projectTitle: String(parentRow.title ?? ""),
+          versionLabel: `v${nextVersion}`,
+        });
+        await client.query(
+          `UPDATE tickets SET status = 'promoted', child_project_id = $2, promoted_at = now(), updated_at = now() WHERE id = $1`,
+          [ticket.id, childId],
+        );
+        await client.query(
+          `UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1`,
+          [childId, JSON.stringify({ ticket_files: mat.files, ticket_materialize_error: mat.ok ? null : (mat.error ?? "falhou") })],
+        );
+        if (!mat.ok) request.log.warn({ childId, ticketId: ticket.id, err: mat.error }, "[evolve] materialização do ticket falhou");
+      }
+
       // RFC-0005 (D-G3): a spec é herdada → as triagens de GAPs vivas do pai imediato também são.
       try {
         const { inheritTriages } = await import("../services/findingTriage.js");
@@ -3599,7 +3661,7 @@ export async function projectRoutes(app: FastifyInstance) {
       await client.query(
         `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
          VALUES ($1, 'system', 'system', 'step', $2)`,
-        [childId, `🔄 Evolução v${nextVersion} criada a partir de "${parentRow.title}". Código-base: ${evolutionSource === "git-clone" ? `clone do repo (dev) em evolution/v${nextVersion}` : evolutionSource === "disk-copy" ? "cópia do apps/ do pai (sem repo GitHub — Deadpool pode ter alterado)" : "NENHUM (apps/ vazio — verifique PROJECT_FILES_ROOT/repo)"}. Arquivos herdados: ${inherited}. Pedido: "${evolutionRequest}"`]
+        [childId, `🔄 Evolução v${nextVersion} criada a partir de "${parentRow.title}". Código-base: ${evolutionSource === "git-clone" ? `clone do repo (dev) em evolution/v${nextVersion}` : evolutionSource === "disk-copy" ? "cópia do apps/ do pai (sem repo GitHub — Deadpool pode ter alterado)" : "NENHUM (apps/ vazio — verifique PROJECT_FILES_ROOT/repo)"}. Arquivos herdados: ${inherited}. Pedido${ticket ? ` ${ticketCode(ticket.number)}` : ""}: "${requestText}"`]
       );
 
       request.log.info({ parentId, childId, version: nextVersion, workMode, evolutionSource, inherited }, "[evolve] Projeto filho criado");

@@ -20,6 +20,7 @@ import type { Pool } from "pg";
 import { resolveLineageRoot } from "./lineage.js";
 import { projectRootCandidates } from "./connectManifestsDisk.js";
 import { sha256Hex } from "../lib/specTreeHash.js";
+import { ticketStamp, TICKET_KIND_LABEL } from "./tickets.js";
 
 type Db = Pick<Pool, "query">;
 export type Compat = "patch" | "minor" | "major";
@@ -160,6 +161,10 @@ export async function buildPullRequestBody(db: Db, childId: string, version: str
     typeof plan.summary === "string" && plan.summary ? plan.summary : (typeof extra.evolution_request === "string" ? String(extra.evolution_request).slice(0, 1500) : ""),
     "",
     `**Compatibilidade:** ${String(extra.evolution_compat ?? "minor").toUpperCase()}`,
+    // RFC-0009 (F3): quem carimba o ticket é a MÁQUINA — confiar no humano custa ~40% dos links
+    // issue↔commit (BTLink, EMSE 2023). Este corpo é reusado como mensagem do merge commit
+    // (evolutionMerge.ts), então o carimbo chega ao histórico de `dev` sem código novo lá.
+    ticketStamp(extra) ? `**Ticket:** ${ticketStamp(extra)}${extra.ticket_kind ? ` (${TICKET_KIND_LABEL[extra.ticket_kind as keyof typeof TICKET_KIND_LABEL] ?? String(extra.ticket_kind)})` : ""}` : "",
     rfcs.length ? `\n**RFCs:**\n${rfcs.map((r) => `- \`${r}\``).join("\n")}` : "",
     "",
   ];
