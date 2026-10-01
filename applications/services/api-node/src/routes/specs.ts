@@ -1,3 +1,4 @@
+import { ALERT_STEP_OPTIONS } from "../services/llmGuard.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import path from "path";
 import AdmZip from "adm-zip";
@@ -559,6 +560,10 @@ export async function specRoutes(app: FastifyInstance) {
     // INTAKE-GATE: modo de intake enviado pelo portal ("free_text" | "attachments").
     // Determina qual regra de conteúdo mínimo se aplica (texto ≥500 letras vs ≥1 anexo).
     let intakeMode: string | null = null;
+    // Post-mortem 30/09/2026: orçamento de LLM em US$ (Bancada + Fábrica) e passo de alerta (%)
+    // são OBRIGATÓRIOS no envio — sem eles o guard de custo nega toda chamada do projeto.
+    let budgetUsdRaw: string | null = null;
+    let budgetAlertStepRaw: string | null = null;
     // DM-T2: campos de entrega (vão para extra; validados no dispatch de deploy pelo deployMatrix).
     const deliveryFields: Record<string, string> = {};
     // Item 3: conexão de Ferramenta UI/UX escolhida no form + projetos da conta. Quando
@@ -644,6 +649,15 @@ export async function specRoutes(app: FastifyInstance) {
           ? (v as { value: string }).value.trim()
           : "";
         if (raw) intakeMode = raw;
+      }
+      for (const key of ["budgetUsd", "budgetAlertStepPct"] as const) {
+        if (part.fields?.[key] !== undefined) {
+          const f = part.fields[key];
+          const v = Array.isArray(f) ? f[0] : f;
+          const raw = v && typeof (v as { value?: string }).value === "string" ? (v as { value: string }).value.trim() : "";
+          if (raw && key === "budgetUsd") budgetUsdRaw = raw;
+          if (raw && key === "budgetAlertStepPct") budgetAlertStepRaw = raw;
+        }
       }
       // RASCUNHO: flag draft do multipart (enviada pelo "Salvar Rascunho").
       if (part.fields?.draft !== undefined) {
@@ -770,6 +784,16 @@ export async function specRoutes(app: FastifyInstance) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "Envie pelo menos um arquivo" });
     }
 
+    // Orçamento ANTES do gate semântico: o gate já chama LLM, e não há gasto sem teto.
+    const budgetUsd = Number(String(budgetUsdRaw ?? "").replace(",", "."));
+    const budgetAlertStepPct = Number(budgetAlertStepRaw);
+    if (!Number.isFinite(budgetUsd) || budgetUsd <= 0 || budgetUsd > 1_000_000) {
+      return reply.status(422).send({ code: "BUDGET_REQUIRED", message: "Informe o orçamento disponível para o projeto, em US$ (Bancada + Fábrica)." });
+    }
+    if (!(ALERT_STEP_OPTIONS as readonly number[]).includes(budgetAlertStepPct)) {
+      return reply.status(422).send({ code: "BUDGET_ALERT_STEP_REQUIRED", message: `Escolha a cada quantos % gastos receber alerta: ${ALERT_STEP_OPTIONS.join(", ")}%.` });
+    }
+
     // INTAKE-GATE (determinístico, custo ZERO de LLM): título + tipo obrigatórios e conteúdo
     // mínimo por modo (texto ≥500 letras | ≥1 anexo). Barra junk ANTES de criar o projeto.
     // Não se aplica ao caminho de decomposição de produto (batch), que usa createProjectFromSpec
@@ -871,6 +895,10 @@ export async function specRoutes(app: FastifyInstance) {
         specApproved,
         isDraft,
       });
+      await client.query(
+        `UPDATE projects SET budget_usd = $2, budget_alert_step_pct = $3, budget_updated_at = now() WHERE id = $1`,
+        [result.projectId, budgetUsd.toFixed(2), budgetAlertStepPct],
+      );
     } catch (e) {
       // Funil de criação (§4.2): produto explícito inexistente/de outro tenant → 404.
       if (e instanceof InboxError) {

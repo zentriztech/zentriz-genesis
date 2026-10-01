@@ -31,6 +31,7 @@ import { opsAgentRoutes } from "./routes/opsAgent.js";
 import { productRoutes } from "./routes/products.js";
 import { ticketRoutes } from "./routes/tickets.js";
 import { internalLlmRoutes } from "./routes/internalLlm.js";
+import { llmGuardInternalRoutes, llmGuardUserRoutes } from "./routes/llmGuard.js";
 import { telegramRoutes } from "./routes/telegram.js";
 import { runtimeConfigRoutes } from "./routes/runtimeConfig.js";
 import { skillsRoutes } from "./routes/skills.js";
@@ -118,6 +119,8 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(productRoutes);
   await app.register(ticketRoutes); // RFC-0009: o PEDIDO de evolução (Ticket), separado da execução
   await app.register(internalLlmRoutes);
+  await app.register(llmGuardInternalRoutes); // post-mortem 30/09: licença + registro de TODA chamada de LLM paga
+  await app.register(llmGuardUserRoutes); // orçamento em USD por projeto + chave geral (admin)
   await app.register(telegramRoutes);
   await app.register(runtimeConfigRoutes);
   await app.register(skillsRoutes);

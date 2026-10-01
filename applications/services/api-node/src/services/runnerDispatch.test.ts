@@ -18,6 +18,8 @@ vi.mock("./tenantLlmConfig.js", () => ({
   revertSlotClaim: (projectId: string, previousStatus: string | null) => revertSpy(projectId, previousStatus),
 }));
 
+// Post-mortem 30/09: o gate de orçamento do projeto tem testes próprios (llmGuard.test.ts).
+vi.mock("./llmGuard.js", () => ({ checkProjectBudgetGate: async () => ({ ok: true }) }));
 vi.mock("../auth.js", () => ({ signToken: () => "fake.jwt.token" }));
 
 // Cost cap por tenant (migration 068): controlável por teste; default = sem cap (ok).

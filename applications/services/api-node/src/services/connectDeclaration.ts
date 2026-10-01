@@ -848,9 +848,16 @@ export async function ensureConnectDeclarationsTick(
   let pending: Array<Record<string, unknown>> = [];
   try {
     pending = (await db.query(
-      `SELECT r.id, r.project_id, r.tenant_id, r.status, p.status AS project_status
+      // 🔴 POST-MORTEM 30/09/2026 (BRL 90 mil): este SELECT não trazia `connect_decl_result`, então
+      // `attemptsOf(row.connect_decl_result)` era sempre 0 ⇒ toda falha virava "tentativa 1/3" ⇒
+      // `releaseClaim` devolvia a run à fila PARA SEMPRE (1 Opus/min, payload idêntico, 22 dias).
+      // Agora a contagem é lida, e só entra quem tem orçamento de LLM vivo (sem orçamento o guard
+      // negaria de qualquer forma — e a run ficaria na frente da fila queimando tentativas).
+      `SELECT r.id, r.project_id, r.tenant_id, r.status, r.connect_decl_result, p.status AS project_status
          FROM spec_autonomy_runs r JOIN projects p ON p.id = r.project_id
+         JOIN projects o ON o.id = COALESCE(p.budget_owner_project_id, p.id)
         WHERE r.connect_decl_at IS NULL AND r.finished_at IS NOT NULL
+          AND o.budget_usd IS NOT NULL AND o.budget_paused_at IS NULL
         ORDER BY r.finished_at ASC LIMIT $1`,
       [MAX_DECLS_PER_TICK],
     )).rows as Array<Record<string, unknown>>;

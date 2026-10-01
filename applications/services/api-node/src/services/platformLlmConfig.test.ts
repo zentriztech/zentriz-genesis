@@ -27,9 +27,9 @@ import {
 } from "./platformLlmConfig.js";
 
 const SLOT = (over: Record<string, unknown> = {}) => ({
-  id: "s0", priority: 0, provider: "foundry", model_id: "claude-opus-5",
+  id: "s0", priority: 0, provider: "anthropic", model_id: "claude-opus-5",
   model_id_fallback: null, label: null, is_active: true,
-  credentials: { foundry_api_key: "CHAVE" },
+  credentials: { api_key: "CHAVE" },
   verified_at: null, verify_status: null, verify_error: null,
   verify_model: null, verify_latency_ms: null,
   ...over,
@@ -65,6 +65,12 @@ describe("platformSlotUsable — a gestão paga, mas declaradamente", () => {
     const [s] = await getPlatformSlots();
     expect(platformSlotUsable(s)).toBe(false);
   });
+  it("slot foundry da gestão nunca serve, mesmo com chave gravada — Foundry REMOVIDO 2026-10-01 (post-mortem)", async () => {
+    db.rows = [SLOT({ provider: "foundry", credentials: { foundry_api_key: "CHAVE" } })];
+    const [s] = await getPlatformSlots();
+    expect(platformSlotUsable(s)).toBe(false);
+    await expect(resolvePlatformCandidates()).rejects.toBeInstanceOf(PlatformLlmNotConfiguredError);
+  });
   it("slot inativo, sem provider ou sem modelo não serve", async () => {
     db.rows = [SLOT({ is_active: false }), SLOT({ id: "b", provider: "" }), SLOT({ id: "c", model_id: "" })];
     const s = await getPlatformSlots();
@@ -83,9 +89,9 @@ describe("resolvePlatformCandidates", () => {
       model_id: "us.anthropic.claude-opus-4-6-v1",
       credentials: { aws_access_key_id: "AKIA_G", aws_secret_access_key: "S", aws_region: "us-east-1" } })];
     const c = await resolvePlatformCandidates();
-    expect(c[0].foundryApiKey).toBe("CHAVE");
+    expect(c[0].apiKey).toBe("CHAVE");
     expect(c[1].awsAccessKeyId).toBe("AKIA_G");
-    expect(c[1].foundryApiKey).toBeUndefined();
+    expect(c[1].apiKey).toBe(""); // a chave do slot 0 não vaza para o candidato bedrock
     // `isDefault` marca o LLM que ninguém escolheu; aqui alguém escolheu, numa linha de banco.
     expect(c.every((x) => x.isDefault === false)).toBe(true);
   });

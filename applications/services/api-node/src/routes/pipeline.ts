@@ -495,6 +495,15 @@ export async function pipelineRoutes(app: FastifyInstance) {
         }
       }
 
+      // Post-mortem 30/09/2026: orçamento em US$ do projeto (migration 131), fail-closed.
+      {
+        const { checkProjectBudgetGate } = await import("../services/llmGuard.js");
+        const pGate = await checkProjectBudgetGate(client, projectId);
+        if (!pGate.ok) {
+          return reply.status(402).send({ code: pGate.code, message: pGate.message });
+        }
+      }
+
       const projectRow = await client.query(
         "SELECT status, product_id, title, created_by FROM projects WHERE id = $1",
         [projectId]

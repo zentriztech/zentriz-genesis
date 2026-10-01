@@ -247,7 +247,9 @@ export const PROVIDER_META: Record<Provider, {
   },
 };
 
-export const PROVIDERS = Object.keys(PROVIDER_META) as Provider[];
+// `foundry` REMOVIDO 2026-10-01 (post-mortem BRL 90 mil): não aparece mais para escolha; o meta
+// fica só para rotular algum slot legado (já desativado pela migração 131 e recusado pela api).
+export const PROVIDERS: Provider[] = (Object.keys(PROVIDER_META) as Provider[]).filter((p) => p !== "foundry");
 
 const MODEL_PROVIDER_MAP: Record<string, Provider> = {
   "us.anthropic.claude-opus-5":               "bedrock",

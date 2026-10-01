@@ -361,6 +361,11 @@ services:
       - DEADPOOL_ALLOW_LIVE_LLM_CALLS=${DEADPOOL_ALLOW_LIVE_LLM_CALLS:-false}
       - DEADPOOL_ALLOW_NETWORK_CLONE=${DEADPOOL_ALLOW_NETWORK_CLONE:-false}
       - DEADPOOL_ALLOW_LIVE_GITHUB_CALLS=${DEADPOOL_ALLOW_LIVE_GITHUB_CALLS:-false}
+      # LLM GUARD (post-mortem 30/09/2026): toda chamada paga do Deadpool pede licença ao Genesis
+      # (orçamento do projeto vinculado, kill switch, disjuntores) e registra tokens+USD.
+      # FAIL-CLOSED: sem token ou api fora ⇒ a chamada NÃO sai.
+      - DEADPOOL_LLM_GUARD_URL=http://api:3000
+      - GENESIS_API_TOKEN=${GENESIS_API_TOKEN:-}
     volumes:
       - zentriz-genesis_deadpool_state:/data
       # D-A1 (decisão do Jean, 2026-09-05): working trees que o Genesis git-linka. A api registra

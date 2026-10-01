@@ -59,6 +59,7 @@ import PostAddOutlinedIcon from "@mui/icons-material/PostAddOutlined";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { motion, AnimatePresence } from "framer-motion";
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost, apiPostMultipart, apiPut, withQuery } from "@/lib/api";
+import { BudgetFields, budgetError } from "@/components/ProjectBudget";
 import { projectsStore } from "@/stores/projectsStore";
 import { authStore } from "@/stores/authStore";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
@@ -1876,6 +1877,9 @@ export default function SpecPage() {
   // Texto livre flow
   const [freeText, setFreeText]         = useState("");
   const [projectTitle, setProjectTitle] = useState("");
+  // Orçamento de LLM OBRIGATÓRIO no envio (migração 131 — post-mortem 30/09/2026).
+  const [budgetUsd, setBudgetUsd] = useState("");
+  const [budgetStepPct, setBudgetStepPct] = useState<number | "">("");
   const [generating, setGenerating]     = useState(false);
   const [genError, setGenError]         = useState<string | null>(null);
   const [genElapsed, setGenElapsed]     = useState(0);
@@ -3350,6 +3354,8 @@ export default function SpecPage() {
     if (!editProjectId) {
       if (!projectTitle.trim()) { setApproveError("Informe o Título do projeto."); return; }
       if (!projectType) { setApproveError("Selecione o Tipo do projeto."); return; }
+      const bErr = budgetError(budgetUsd, budgetStepPct);
+      if (bErr) { setApproveError(bErr); return; }
       if (freeText.trim() && freeText.trim().length < MIN_FREE_TEXT_CHARS) {
         setApproveError(`A descrição em texto livre precisa de no mínimo ${MIN_FREE_TEXT_CHARS} caracteres.`); return;
       }
@@ -3382,6 +3388,8 @@ export default function SpecPage() {
       const formData = new FormData();
       formData.append("title", projectTitle.trim());
       formData.append("intakeMode", "free_text");
+      formData.append("budgetUsd", budgetUsd.replace(",", "."));
+      formData.append("budgetAlertStepPct", String(budgetStepPct));
       if (parentProjectId) formData.append("parentProjectId", parentProjectId);
       if (freeText.trim()) formData.append("freeDescription", freeText.trim());
       if (projectType) formData.append("projectType", projectType);
@@ -3437,7 +3445,7 @@ export default function SpecPage() {
     } finally {
       setApproving(null);
     }
-  }, [specMarkdown, projectTitle, parentProjectId, editProjectId, freeText, uiuxConnId, uiuxProjectIds,
+  }, [specMarkdown, projectTitle, budgetUsd, budgetStepPct, parentProjectId, editProjectId, freeText, uiuxConnId, uiuxProjectIds,
       projectType, deliveryMode, cloudConnId, deployFormat, deployTtlDays, router, persistSpecMarkdown]);
 
   // ── Promoção à fábrica (migração 097) ───────────────────────────────────────
@@ -3580,6 +3588,8 @@ export default function SpecPage() {
     // INTAKE-GATE (espelha o backend): título e tipo obrigatórios; pelo menos 1 anexo.
     if (!projectTitle.trim()) { setUploadError("Informe o Título do projeto."); return; }
     if (!projectType) { setUploadError("Selecione o Tipo do projeto."); return; }
+    const bErr = budgetError(budgetUsd, budgetStepPct);
+    if (bErr) { setUploadError(bErr); return; }
     if (!files.length) { setUploadError("Selecione pelo menos um arquivo."); return; }
     // Tetos do multipart da API checados aqui (mensagem clara em vez de 413 opaco).
     if (files.length > MAX_UPLOAD_FILES) { setUploadError(`Envie no máximo ${MAX_UPLOAD_FILES} arquivos por vez.`); return; }
@@ -3590,6 +3600,8 @@ export default function SpecPage() {
       const fd = new FormData();
       fd.append("title", projectTitle.trim());
       fd.append("intakeMode", "attachments");
+      fd.append("budgetUsd", budgetUsd.replace(",", "."));
+      fd.append("budgetAlertStepPct", String(budgetStepPct));
       if (parentProjectId) fd.append("parentProjectId", parentProjectId);
       if (projectType) fd.append("projectType", projectType);
       // §5.3: SEMPRE envia productId (ver handleSaveSpec). Vazio → backend resolve o inbox.
@@ -4375,6 +4387,7 @@ export default function SpecPage() {
                       size="small" sx={{ mb: 2 }}
                       placeholder="Ex.: E-commerce de calçados"
                     />
+                    <BudgetFields budgetUsd={budgetUsd} onBudgetUsd={setBudgetUsd} stepPct={budgetStepPct} onStepPct={setBudgetStepPct} />
                     <ProjectTypeSelect value={projectType} onChange={setProjectType} />
                     <DeliverySection visible={!!projectType} isBackend={isBackendType} mode={deliveryMode} onMode={setDeliveryMode}
                       advancedOpen={advancedOpen} onAdvancedOpen={setAdvancedOpen}
@@ -4530,6 +4543,7 @@ export default function SpecPage() {
                     value={projectTitle} onChange={(e) => setProjectTitle(e.target.value)}
                     size="small" sx={{ mb: 2 }} placeholder="Ex.: Auto Parts API"
                   />
+                  <BudgetFields budgetUsd={budgetUsd} onBudgetUsd={setBudgetUsd} stepPct={budgetStepPct} onStepPct={setBudgetStepPct} />
                   <ProjectTypeSelect value={projectType} onChange={setProjectType} />
                   <DeliverySection visible={!!projectType} isBackend={isBackendType} mode={deliveryMode} onMode={setDeliveryMode}
                     advancedOpen={advancedOpen} onAdvancedOpen={setAdvancedOpen}

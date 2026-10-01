@@ -48,6 +48,8 @@ let comparable: { files: string[]; before: number; now: number; same: number } |
  * no GAP-76 — e o `.catch()` não salva, o TypeError é sincrônico). `findingTriage` é puro (só `crypto`),
  * então herdar o original e dublar só o que toca banco é seguro e imuniza a suíte.
  */
+// LLM GUARD (migr. 131): o gate de orçamento tem teste próprio (llmGuard.test.ts); aqui libera.
+vi.mock("./llmGuard.js", () => ({ checkProjectBudgetGate: async () => ({ ok: true }) }));
 vi.mock("./findingTriage.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./findingTriage.js")>()),
   projectFindingsState: vi.fn(async () => ({ latestRunId, findings, resolved: [], counts: {} })),

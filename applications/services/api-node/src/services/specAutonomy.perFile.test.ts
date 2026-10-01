@@ -58,6 +58,8 @@ let latestRunId: string | null = "run-0";
  * FÁBRICA e substitui o módulo inteiro, então export novo no `specAutonomy.ts` derrubava a suíte com
  * TypeError sincrônico (queimado no GAP-76). `findingTriage` é puro, herdar o original é seguro.
  */
+// LLM GUARD (migr. 131): o gate de orçamento tem teste próprio (llmGuard.test.ts); aqui libera.
+vi.mock("./llmGuard.js", () => ({ checkProjectBudgetGate: async () => ({ ok: true }) }));
 vi.mock("./findingTriage.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./findingTriage.js")>()),
   projectFindingsState: vi.fn(async () => ({ latestRunId, findings, resolved: [], counts: {} })),

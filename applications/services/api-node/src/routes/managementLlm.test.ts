@@ -75,7 +75,7 @@ describe("porta da conta de gestão", () => {
       expect(res.statusCode).toBe(403);
     }
     const put = await app.inject({ method: "PUT", url: "/api/management/llm-config/0",
-      payload: { provider: "foundry", model_id: "claude-opus-5" } });
+      payload: { provider: "anthropic", model_id: "claude-opus-5" } });
     expect(put.statusCode).toBe(403);
     expect(db.escritas).toHaveLength(0);
   });
@@ -94,7 +94,7 @@ describe("GET /api/management/llm-config", () => {
   it("slot sem credencial própria não é utilizável — nem na conta que paga", async () => {
     // A conta de gestão é a pagadora, mas continua proibida de rodar no `.env` do container:
     // é a LEI dos slots. Sem credencial GRAVADA o slot não serve.
-    db.rows = [{ id: "s0", priority: 0, provider: "foundry", model_id: "claude-opus-5",
+    db.rows = [{ id: "s0", priority: 0, provider: "anthropic", model_id: "claude-opus-5",
                  credentials: {}, is_active: true }];
     const j = (await app.inject({ method: "GET", url: "/api/management/llm-config" })).json();
     expect(j.slots[0].usable).toBe(false);
@@ -102,8 +102,8 @@ describe("GET /api/management/llm-config", () => {
   });
 
   it("nunca devolve a credencial em claro", async () => {
-    db.rows = [{ id: "s0", priority: 0, provider: "foundry", model_id: "claude-opus-5",
-                 credentials: { foundry_api_key: "CHAVE_SUPER_SECRETA_123" }, is_active: true }];
+    db.rows = [{ id: "s0", priority: 0, provider: "anthropic", model_id: "claude-opus-5",
+                 credentials: { api_key: "CHAVE_SUPER_SECRETA_123" }, is_active: true }];
     const body = (await app.inject({ method: "GET", url: "/api/management/llm-config" })).body;
     expect(body).not.toContain("CHAVE_SUPER_SECRETA_123");
     expect(body).toContain("****");
@@ -113,9 +113,25 @@ describe("GET /api/management/llm-config", () => {
 describe("PUT /api/management/llm-config/:priority", () => {
   it("recusa salvar sem model_id — nem a plataforma escolhe modelo por omissão", async () => {
     const res = await app.inject({ method: "PUT", url: "/api/management/llm-config/0",
-      payload: { provider: "foundry" } });
+      payload: { provider: "anthropic" } });
     expect(res.statusCode).toBe(400);
     expect(db.escritas).toHaveLength(0);
+  });
+
+  it("recusa provider foundry com 400 — Foundry REMOVIDO 2026-10-01 (post-mortem)", async () => {
+    const res = await app.inject({ method: "PUT", url: "/api/management/llm-config/0",
+      payload: { provider: "foundry", model_id: "claude-opus-5", credentials: { foundry_api_key: "CHAVE" } } });
+    expect(res.statusCode).toBe(400);
+    expect(db.escritas).toHaveLength(0);
+    expect(probe.chamadas).toHaveLength(0);
+  });
+
+  it("GET: slot foundry remanescente aparece, mas nunca utilizável — Foundry REMOVIDO 2026-10-01 (post-mortem)", async () => {
+    db.rows = [{ id: "s0", priority: 0, provider: "foundry", model_id: "claude-opus-5",
+                 credentials: { foundry_api_key: "CHAVE" }, is_active: true }];
+    const j = (await app.inject({ method: "GET", url: "/api/management/llm-config" })).json();
+    expect(j.slots[0].usable).toBe(false);
+    expect(j.has_usable_slot).toBe(false);
   });
 
   it("recusa provider fora da lista", async () => {
@@ -126,26 +142,26 @@ describe("PUT /api/management/llm-config/:priority", () => {
 
   it("recusa priority fora de 0..3 (o CHECK do banco recusaria calado)", async () => {
     const res = await app.inject({ method: "PUT", url: "/api/management/llm-config/9",
-      payload: { provider: "foundry", model_id: "claude-opus-5" } });
+      payload: { provider: "anthropic", model_id: "claude-opus-5" } });
     expect(res.statusCode).toBe(400);
   });
 
   it("grava, testa por invocação REAL e devolve o veredicto", async () => {
     const res = await app.inject({ method: "PUT", url: "/api/management/llm-config/0",
-      payload: { provider: "foundry", model_id: "claude-opus-5",
-                 credentials: { foundry_api_key: "CHAVE" }, label: "principal" } });
+      payload: { provider: "anthropic", model_id: "claude-opus-5",
+                 credentials: { api_key: "CHAVE" }, label: "principal" } });
     expect(res.statusCode).toBe(200);
-    expect(probe.chamadas[0]).toMatchObject({ provider: "foundry", model: "claude-opus-5" });
+    expect(probe.chamadas[0]).toMatchObject({ provider: "anthropic", model: "claude-opus-5" });
     expect(res.json().verify).toMatchObject({ ok: true, status: "ok" });
   });
 
   it("credencial MASCARADA não apaga a chave já gravada", async () => {
-    db.rows = [{ id: "s0", priority: 0, provider: "foundry", model_id: "claude-opus-5",
-                 credentials: { foundry_api_key: "CHAVE_REAL" }, is_active: true }];
+    db.rows = [{ id: "s0", priority: 0, provider: "anthropic", model_id: "claude-opus-5",
+                 credentials: { api_key: "CHAVE_REAL" }, is_active: true }];
     await app.inject({ method: "PUT", url: "/api/management/llm-config/0",
-      payload: { provider: "foundry", model_id: "claude-sonnet-5",
-                 credentials: { foundry_api_key: "CHAV****REAL" } } });
-    expect(probe.chamadas[0].creds.foundry_api_key).toBe("CHAVE_REAL");
+      payload: { provider: "anthropic", model_id: "claude-sonnet-5",
+                 credentials: { api_key: "CHAV****REAL" } } });
+    expect(probe.chamadas[0].creds.api_key).toBe("CHAVE_REAL");
   });
 
   it("descarta credencial fora da whitelist do provider", async () => {
@@ -158,19 +174,19 @@ describe("PUT /api/management/llm-config/:priority", () => {
 
 describe("POST /api/management/llm-config/models — catálogo dinâmico na conta da gestão", () => {
   it("sem credencial digitada usa a GRAVADA no slot", async () => {
-    db.rows = [{ id: "s0", priority: 0, provider: "foundry", model_id: "claude-opus-5",
-                 credentials: { foundry_api_key: "CHAVE_SALVA" }, is_active: true }];
-    probe.catalogo = { provider: "foundry", source: "catalog", warning: "", models: [], usable: 0, total: 0, cached: false };
+    db.rows = [{ id: "s0", priority: 0, provider: "anthropic", model_id: "claude-opus-5",
+                 credentials: { api_key: "CHAVE_SALVA" }, is_active: true }];
+    probe.catalogo = { provider: "anthropic", source: "catalog", warning: "", models: [], usable: 0, total: 0, cached: false };
     const res = await app.inject({ method: "POST", url: "/api/management/llm-config/models",
-      payload: { provider: "foundry", priority: 0, credentials: {} } });
+      payload: { provider: "anthropic", priority: 0, credentials: {} } });
     expect(res.statusCode).toBe(200);
-    expect(probe.catalogoChamadas[0].creds.foundry_api_key).toBe("CHAVE_SALVA");
+    expect(probe.catalogoChamadas[0].creds.api_key).toBe("CHAVE_SALVA");
   });
 
   it("agents fora do ar devolve `unavailable`, não 500", async () => {
     probe.catalogo = null;
     const res = await app.inject({ method: "POST", url: "/api/management/llm-config/models",
-      payload: { provider: "foundry", credentials: {} } });
+      payload: { provider: "anthropic", credentials: {} } });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ ok: false, unavailable: true });
   });

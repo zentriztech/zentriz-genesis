@@ -388,7 +388,7 @@ export async function auditFindings(db: Db, args: {
   // O envelope INTEIRO é o do slot do revisor. Trocar só o `model_id` sobre as credenciais do slot
   // primário era o que funcionava por acidente enquanto tudo era Bedrock; com slots de providers
   // diferentes isso vira 401/400 — é o mesmo erro do Grupo C, um nível acima.
-  const reviewerFields = agentsLlmFields(pick.llm);
+  const reviewerFields = { ...agentsLlmFields(pick.llm), guard_project_id: args.projectId };
 
   const refs = await loadSpecFiles(db, args.projectId).catch(() => []);
   if (refs.length === 0) return { ...empty("projeto sem arquivos de spec"), skipped };

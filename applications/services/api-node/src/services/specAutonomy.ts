@@ -1067,6 +1067,16 @@ export async function advanceAutonomyRun(db: Db, id: string): Promise<boolean> {
     return true;
   }
 
+  // LLM GUARD (post-mortem 30/09/2026): sem orçamento, pausado ou sem saldo para a próxima
+  // atividade ⇒ o laço PARA aqui, em vez de bater no guard a cada tick. Import tardio: evita o
+  // ciclo specs→llmGuard→projectStatus.
+  const { checkProjectBudgetGate } = await import("./llmGuard.js");
+  const gate = await checkProjectBudgetGate(db, run.projectId);
+  if (!gate.ok) {
+    await finishRun(db, run, "stalled", `Laço autônomo parado pelo guarda de custo (${gate.code}): ${gate.message}`, {});
+    return true;
+  }
+
   switch (run.status) {
     case "pending": return startRound(db, run);
     case "cto_running": return checkCto(db, run);

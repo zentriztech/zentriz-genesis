@@ -22,6 +22,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timezone
 
+from orchestrator.agents import llm_guard as _llm_guard
+
 # T01: sanitiza AWS_PROFILE="" (string vazia) — boto3 procura profile literal ""
 # e falha com ProfileNotFound. `unset` no compose vira "" via ${VAR:-}, então
 # corrigimos em runtime também (defesa em profundidade).
@@ -1860,6 +1862,16 @@ def _load_file_from_disk(project_id: str | None, relative_path: str, product_id:
     return ""
 
 
+def _guard_record_raw(gctx: dict, model: str, usage: object) -> None:
+    """Registra no LLM GUARD o usage de uma chamada SDK crua (dict do Bedrock ou objeto do SDK)."""
+    def _g(k: str) -> int:
+        v = usage.get(k) if isinstance(usage, dict) else getattr(usage, k, 0)
+        return int(v or 0)
+    _llm_guard.record(gctx, model=model, input_tokens=_g("input_tokens"), output_tokens=_g("output_tokens"),
+                      cache_read_tokens=_g("cache_read_input_tokens"),
+                      cache_write_tokens=_g("cache_creation_input_tokens"))
+
+
 def _ask_llm_for_backend_language(text: str) -> str:
     """Chama LLM isolado para classificar linguagem. Raises em qualquer falha."""
     import os as _os, json as _j
@@ -1873,17 +1885,22 @@ def _ask_llm_for_backend_language(text: str) -> str:
         "Responda SOMENTE a palavra, sem explicação.\n\n"
         f"Texto:\n{text[:8000]}"
     )
+    _gctx = _llm_guard.check(model=model, user=prompt, max_tokens=10, provider=provider,
+                             purpose="runner:backend_language")
     if provider == "bedrock":
         client = _bedrock_client(_os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
         body = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 10,
                 "messages": [{"role": "user", "content": prompt}]}
         resp = client.invoke_model(modelId=model, body=_j.dumps(body))
-        answer = _j.loads(resp["body"].read())["content"][0]["text"].strip().lower()
+        _parsed = _j.loads(resp["body"].read())
+        _guard_record_raw(_gctx, model, _parsed.get("usage"))
+        answer = _parsed["content"][0]["text"].strip().lower()
     else:
         from anthropic import Anthropic
         client = Anthropic(api_key=_os.environ.get("CLAUDE_API_KEY", ""))
         resp = client.messages.create(model=model, max_tokens=10,
                                       messages=[{"role": "user", "content": prompt}])
+        _guard_record_raw(_gctx, model, getattr(resp, "usage", None))
         answer = resp.content[0].text.strip().lower()
     for v in ("python", "nodejs", "java", "go", "rust", "php", "ruby", "other"):
         if v in answer:
@@ -2085,6 +2102,8 @@ Responda SOMENTE a palavra correspondente, sem ponto final, sem explicação.
 Texto:
 {text[:3000]}"""
 
+    _gctx = _llm_guard.check(model=model, user=prompt, max_tokens=10, provider=provider,
+                             purpose="runner:module")
     if provider == "bedrock":
         import json as _json
         client = _bedrock_client(_os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
@@ -2095,6 +2114,7 @@ Texto:
         }
         resp = client.invoke_model(modelId=model, body=_json.dumps(body))
         result = _json.loads(resp["body"].read())
+        _guard_record_raw(_gctx, model, result.get("usage"))
         answer = result["content"][0]["text"].strip().lower()
     else:
         from anthropic import Anthropic
@@ -2104,6 +2124,7 @@ Texto:
             model=model, max_tokens=10,
             messages=[{"role": "user", "content": prompt}],
         )
+        _guard_record_raw(_gctx, model, getattr(resp, "usage", None))
         answer = resp.content[0].text.strip().lower()
 
     # Validate answer
@@ -2624,6 +2645,13 @@ def _call_autonomous_monitor(project_id: str, task: dict, request_id: str) -> di
 
     for _attempt in range(2):
         try:
+            # LLM GUARD: negado ⇒ ESCALATE (humano decide), nunca retry pago.
+            try:
+                _gctx = _llm_guard.check(model=_model, user=_monitor_prompt, max_tokens=4096,
+                                         provider=_provider, project_id=project_id,
+                                         purpose="runner:autonomous_monitor")
+            except _llm_guard.LlmGuardDenied as _gd:
+                return {"outcome": "ESCALATE", "summary": f"LLM negado pelo guard de custo: {_gd.message}"}
             # Suporta Bedrock (padrão do Genesis) e Anthropic API direta
             if _provider == "bedrock":
                 import json as _json
@@ -2635,6 +2663,7 @@ def _call_autonomous_monitor(project_id: str, task: dict, request_id: str) -> di
                 })
                 _resp = _bedrock.invoke_model(modelId=_model, body=_body)
                 _parsed = _json.loads(_resp["body"].read())
+                _guard_record_raw(_gctx, _model, _parsed.get("usage"))
                 _text = _parsed.get("content", [{}])[0].get("text", "")
             else:
                 # Anthropic API direta
@@ -2645,6 +2674,7 @@ def _call_autonomous_monitor(project_id: str, task: dict, request_id: str) -> di
                     messages=[{"role": "user", "content": _monitor_prompt}],
                     timeout=120,
                 )
+                _guard_record_raw(_gctx, _model, getattr(_response, "usage", None))
                 _text = _response.content[0].text if _response.content else ""
 
             # Extrair JSON da resposta (comum a todos os providers)

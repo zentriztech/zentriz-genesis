@@ -25,7 +25,9 @@ function getUser(request: FastifyRequest): AuthUser {
 // `google` = Gemini, consumido pelo endpoint OpenAI-compatível do Google. É o único slot de
 // família NÃO-Claude — é o que torna possível um revisor cross-family (a pesquisa mede ZERO
 // ganho em auto-revisão da mesma família). Não confundir com `azure_openai`, que só serve GPT.
-const ALLOWED_PROVIDERS = ["bedrock", "foundry", "google", "openai", "anthropic", "azure_openai"] as const;
+// REMOVIDO 2026-10-01 (post-mortem BRL 90 mil): `foundry` saiu da lista — o loop rodou no Foundry,
+// sem cache e sem registro de gasto. Slot foundry não pode mais ser criado nem usado.
+const ALLOWED_PROVIDERS = ["bedrock", "google", "openai", "anthropic", "azure_openai"] as const;
 type Provider = typeof ALLOWED_PROVIDERS[number];
 
 /**
@@ -51,8 +53,6 @@ function requireProviderAndModel(body: Record<string, unknown>):
 
 const CREDENTIAL_FIELDS: Record<Provider, string[]> = {
   bedrock:      ["aws_access_key_id", "aws_secret_access_key", "aws_region"],
-  // `foundry_base_url` sobrepõe `foundry_resource` (mesma precedência de `_build_foundry_client`).
-  foundry:      ["foundry_api_key", "foundry_resource", "foundry_base_url"],
   // `google_base_url` permite apontar para o endpoint OpenAI-compatível do Vertex em vez do
   // da Gemini API (mesma precedência: se vier, sobrepõe a base padrão).
   // Dois modos: chave da Gemini API (simples, sem GCP) OU service account do Vertex — este

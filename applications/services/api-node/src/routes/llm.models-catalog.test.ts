@@ -95,9 +95,16 @@ describe("POST /api/tenant/llm-config/models — catálogo dinâmico e verificad
   it("agents indisponível → `unavailable`, não 500: o front mantém a lista que já tinha", async () => {
     cat.resposta = null;
     const res = await app.inject({ method: "POST", url: "/api/tenant/llm-config/models",
-      payload: { provider: "foundry", credentials: {} } });
+      payload: { provider: "anthropic", credentials: {} } });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject({ ok: false, unavailable: true, provider: "foundry" });
+    expect(res.json()).toMatchObject({ ok: false, unavailable: true, provider: "anthropic" });
+  });
+
+  it("provider foundry é recusado com 400 — Foundry REMOVIDO 2026-10-01 (post-mortem)", async () => {
+    const res = await app.inject({ method: "POST", url: "/api/tenant/llm-config/models",
+      payload: { provider: "foundry", credentials: { foundry_api_key: "k" } } });
+    expect(res.statusCode).toBe(400);
+    expect(cat.chamadas).toHaveLength(0);
   });
 
   it("provider inválido é recusado antes de virar chamada ao agents", async () => {

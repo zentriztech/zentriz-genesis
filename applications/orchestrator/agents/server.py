@@ -23,6 +23,7 @@ if _dotenv.exists():
     load_dotenv(_dotenv)
 
 from .runtime import run_agent, SHOW_TRACEBACK
+from . import llm_guard as _llm_guard
 from . import pm, dev, qa, monitor, devops
 from .cto import CTO_SYSTEM_PROMPT_PATH
 from .engineer import ENGINEER_SYSTEM_PROMPT_PATH
@@ -93,6 +94,46 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Zentriz Genesis Agents", lifespan=lifespan)
+
+
+# ── LLM GUARD (post-mortem 30/09/2026) ───────────────────────────────────────────────────────────
+# Negação do guard é 402 (Payment Required) com `code` legível — a api distingue "sem orçamento /
+# chave geral" de falha de provider e NÃO re-tenta. Qualquer escape não tratado cai aqui.
+from fastapi.responses import JSONResponse as _JSONResponse  # noqa: E402
+
+
+@app.exception_handler(_llm_guard.LlmGuardDenied)
+def _llm_guard_denied_handler(_request, exc: "_llm_guard.LlmGuardDenied"):
+    return _JSONResponse(status_code=402, content={"detail": _guard_detail(exc)})
+
+
+def _guard_detail(exc: "_llm_guard.LlmGuardDenied") -> dict:
+    return {"code": exc.code, "message": exc.message, "guard": True, "project_id": exc.project_id}
+
+
+def _guard_http(exc: "_llm_guard.LlmGuardDenied") -> HTTPException:
+    return HTTPException(status_code=402, detail=_guard_detail(exc))
+
+
+def _guard_pid(body: dict) -> str | None:
+    """Projeto que paga as chamadas deste pedido. Só UUID conta (pseudo-projeto ⇒ None)."""
+    if not isinstance(body, dict):
+        return None
+    inp = body.get("input") if isinstance(body.get("input"), dict) else {}
+    cfg = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else {}
+    for c in (body.get("guard_project_id"), cfg.get("guard_project_id"), inp.get("guard_project_id"),
+              body.get("usage_project_id"), body.get("originProjectId"), body.get("project_id"),
+              inp.get("project_id")):
+        pid = _llm_guard.as_project_id(c)
+        if pid:
+            return pid
+    return None
+
+
+def _in_guard_scope(fn, body: dict, purpose: str, *args):
+    """Roda `fn(*args)` com o escopo do guard do pedido (usado como alvo das threads async)."""
+    with _llm_guard.guard_scope(project_id=_guard_pid(body), purpose=purpose):
+        return fn(*args)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -479,8 +520,9 @@ def _invoke_agent(body: dict, system_prompt, role: str) -> dict:
         message = body if "input" in body else _wrap_with_llm_config(body)
         message = _resolve_llm_api_key(message)  # FT-13: resolve api_key para providers não-bedrock
         logger.info("[%s] Recebeu solicitação. Processando...", agent_name)
-        response = _slot_cascade(
-            message, lambda m: run_agent(system_prompt_path=system_prompt, message=m, role=role))
+        with _llm_guard.guard_scope(project_id=_guard_pid(body) or _guard_pid(message), purpose=role):
+            response = _slot_cascade(
+                message, lambda m: run_agent(system_prompt_path=system_prompt, message=m, role=role))
         logger.info("[%s] Solicitação processada com sucesso.", agent_name)
         if role == "CTO":
             _persist_cto_response_json(message, response)
@@ -490,6 +532,9 @@ def _invoke_agent(body: dict, system_prompt, role: str) -> dict:
             _persist_engineer_artifacts_if_enabled(message, response)
             _try_persist_engineer_artifacts_from_raw(message, response)
         return response
+    except _llm_guard.LlmGuardDenied as e:
+        logger.warning("[%s] LLM negado pelo guard: %s", agent_name, e)
+        raise _guard_http(e)
     except ValueError as e:
         logger.warning("[%s] Erro de validação: %s", agent_name, e)
         raise HTTPException(status_code=400, detail=str(e))
@@ -516,14 +561,18 @@ def _invoke_parametrized(body: dict, get_path_fn, role: str) -> dict:
         skill_path = ctx.get("skill_path")
         prompt_path = get_path_fn(skill_path)
         logger.info("[%s] Recebeu solicitação (skill_path=%s). Processando...", agent_name, skill_path or "default")
-        response = _slot_cascade(
-            message, lambda m: run_agent(system_prompt_path=prompt_path, message=m, role=role))
+        with _llm_guard.guard_scope(project_id=_guard_pid(body) or _guard_pid(message), purpose=role):
+            response = _slot_cascade(
+                message, lambda m: run_agent(system_prompt_path=prompt_path, message=m, role=role))
         logger.info("[%s] Solicitação processada com sucesso.", agent_name)
         if role == "PM":
             _persist_pm_response_json(message, response)
             _persist_pm_artifacts_if_enabled(message, response)
             _try_persist_pm_artifacts_from_raw(message, response)
         return response
+    except _llm_guard.LlmGuardDenied as e:
+        logger.warning("[%s] LLM negado pelo guard: %s", agent_name, e)
+        raise _guard_http(e)
     except ValueError as e:
         logger.warning("[%s] Erro de validação: %s", agent_name, e)
         raise HTTPException(status_code=400, detail=str(e))
@@ -571,7 +620,7 @@ def invoke_cto_async(body: dict):
     job_id = f"cto-{uuid.uuid4().hex[:12]}"
     with _jobs_lock:
         _async_jobs[job_id] = {"status": "running", "created_at": time.time()}
-    thread = threading.Thread(target=_run_cto_async, args=(job_id, body), daemon=True)
+    thread = threading.Thread(target=_in_guard_scope, args=(_run_cto_async, body, "run_cto_async", job_id, body), daemon=True)
     thread.start()
     return {"jobId": job_id, "status": "running"}
 
@@ -648,7 +697,7 @@ def _run_splitter_async(job_id: str, body: dict) -> None:
             )
         llm_cfg = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else None
         result = _run_splitter(document, model_id,
-                               usage_project_id=(body.get("originProjectId") or None),
+                               usage_project_id=(body.get("originProjectId") or _guard_pid(body)),
                                llm_cfg=llm_cfg)
         with _jobs_lock:
             if job_id in _async_jobs:
@@ -671,7 +720,7 @@ def invoke_product_architect_async(body: dict):
     job_id = f"pa-{uuid.uuid4().hex[:12]}"
     with _jobs_lock:
         _async_jobs[job_id] = {"status": "running", "created_at": time.time()}
-    thread = threading.Thread(target=_run_splitter_async, args=(job_id, body), daemon=True)
+    thread = threading.Thread(target=_in_guard_scope, args=(_run_splitter_async, body, "run_splitter_async", job_id, body), daemon=True)
     thread.start()
     return {"jobId": job_id, "status": "running"}
 
@@ -748,7 +797,7 @@ def _run_spec_split_async(job_id: str, body: dict) -> None:
             )
         llm_cfg = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else None
         result = _run_spec_split(spec_md, model_id,
-                                 usage_project_id=(body.get("originProjectId") or None),
+                                 usage_project_id=(body.get("originProjectId") or _guard_pid(body)),
                                  llm_cfg=llm_cfg,
                                  project_name=(body.get("project_name") or ""),
                                  project_type=(body.get("project_type") or ""))
@@ -773,7 +822,7 @@ def invoke_spec_split_async(body: dict):
     job_id = f"ss-{uuid.uuid4().hex[:12]}"
     with _jobs_lock:
         _async_jobs[job_id] = {"status": "running", "created_at": time.time()}
-    thread = threading.Thread(target=_run_spec_split_async, args=(job_id, body), daemon=True)
+    thread = threading.Thread(target=_in_guard_scope, args=(_run_spec_split_async, body, "run_spec_split_async", job_id, body), daemon=True)
     thread.start()
     return {"jobId": job_id, "status": "running"}
 
@@ -813,7 +862,7 @@ def _run_spec_validator_async(job_id: str, body: dict) -> None:
         # `SPEC_VALIDATOR_THINKING` — um `"false"` de texto virando `True` faria o braço A rodar como
         # braço B e o A/B compararia o mesmo juiz consigo mesmo.
         _think = body.get("thinking")
-        result = validate_spec(spec_text, usage_project_id=(body.get("originProjectId") or None),
+        result = validate_spec(spec_text, usage_project_id=(body.get("originProjectId") or _guard_pid(body)),
                                model_id=(body.get("model_id") or None), llm_cfg=llm_cfg,
                                known_findings=known if isinstance(known, list) else None,
                                thinking=_think if isinstance(_think, bool) else None)
@@ -836,7 +885,7 @@ def invoke_spec_validator_async(body: dict):
     job_id = f"sv-{uuid.uuid4().hex[:12]}"
     with _jobs_lock:
         _async_jobs[job_id] = {"status": "running", "created_at": time.time()}
-    thread = threading.Thread(target=_run_spec_validator_async, args=(job_id, body), daemon=True)
+    thread = threading.Thread(target=_in_guard_scope, args=(_run_spec_validator_async, body, "run_spec_validator_async", job_id, body), daemon=True)
     thread.start()
     return {"jobId": job_id, "status": "running"}
 
@@ -934,7 +983,7 @@ def invoke_lesson_extract_async(body: dict):
     job_id = f"le-{uuid.uuid4().hex[:12]}"
     with _jobs_lock:
         _async_jobs[job_id] = {"status": "running", "created_at": time.time()}
-    thread = threading.Thread(target=_run_lesson_extract_async, args=(job_id, body), daemon=True)
+    thread = threading.Thread(target=_in_guard_scope, args=(_run_lesson_extract_async, body, "run_lesson_extract_async", job_id, body), daemon=True)
     thread.start()
     return {"jobId": job_id, "status": "running"}
 
@@ -1133,7 +1182,7 @@ def invoke_raw(body: dict):
             resp = ""
         except Exception as e:
             logger.warning(f"[/invoke/raw] Principal falhou ({_model}): {_scrub(e, _cfg)}")
-            if not _fb:
+            if not _fb or isinstance(e, _llm_guard.LlmGuardDenied):
                 raise
             resp = ""
         if _fb:
@@ -1146,6 +1195,13 @@ def invoke_raw(body: dict):
         return {"response": resp, "model_used": _effective(_model), "model_requested": model_id,
                 **_outcome()}
 
+    with _llm_guard.guard_scope(project_id=_guard_pid(body),
+                                purpose=str(body.get("purpose") or body.get("usage_agent") or "invoke_raw")):
+        return _invoke_raw_cascade(_cands, _tentar, _is_slot_fail, _kind_of, _scrub, llm_cfg)
+
+
+def _invoke_raw_cascade(_cands, _tentar, _is_slot_fail, _kind_of, _scrub, llm_cfg):
+    """Cascata de slots do /invoke/raw (extraída para rodar dentro do escopo do guard)."""
     _ultimo_erro: Exception | None = None
     for _i, _c in enumerate(_cands):
         _cfg = _c["llm_cfg"]
@@ -1156,6 +1212,8 @@ def invoke_raw(body: dict):
                 if _i > 0:
                     _out["slot_cascade"] = _i  # quantos slots foram queimados antes deste
                 return _out
+        except _llm_guard.LlmGuardDenied as _g:
+            raise _guard_http(_g)
         except Exception as _e:
             _ultimo_erro = _e
             if _i < len(_cands) - 1 and _is_slot_fail(_e):

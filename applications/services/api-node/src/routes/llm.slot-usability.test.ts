@@ -83,11 +83,22 @@ describe("GET /api/tenant/llm-config — o que a tela afirma sobre o slot", () =
     expect(body.slots[0].uses_zentriz_account).toBe(false);
   });
 
-  // A chave do container é a identidade da Zentriz: sem isenção ela não pode validar slot nenhum.
-  it("foundry: a chave do container não conta para tenant não isento", async () => {
+  // Foundry REMOVIDO 2026-10-01 (post-mortem BRL 90 mil): slot remanescente nunca fica verde —
+  // nem pela chave do container, nem pela isenção, nem por chave própria gravada.
+  it("slot foundry remanescente nunca é utilizável — Foundry REMOVIDO 2026-10-01 (post-mortem)", async () => {
     process.env.ANTHROPIC_FOUNDRY_API_KEY = "chave-do-host";
     slotRows = [slot({ provider: "foundry", model_id: "claude-opus-5" })];
     expect((await get()).slots[0].usable).toBe(false);
+
+    byocExempt = true;
+    expect((await get()).slots[0].usable).toBe(false);
+
+    slotRows = [slot({ provider: "foundry", model_id: "claude-opus-5", credentials: { foundry_api_key: "k" } })];
+    const body = await get();
+    expect(body.slots[0].usable).toBe(false);
+    expect(body.slots[0].own_credentials).toBe(false);
+    expect(body.has_usable_slot).toBe(false);
+    delete process.env.ANTHROPIC_FOUNDRY_API_KEY;
   });
 
   it("os 4 slots aparecem sempre; os não cadastrados vêm como não utilizáveis", async () => {
@@ -98,11 +109,11 @@ describe("GET /api/tenant/llm-config — o que a tela afirma sobre o slot", () =
   });
 
   // A recomendação do Jean ("pelo menos 2 slots de famílias diferentes") precisa de um NÚMERO na
-  // resposta — a tela não pode inferir família a partir do provider (foundry e bedrock servem Claude).
+  // resposta — a tela não pode inferir família a partir do provider (anthropic e bedrock servem Claude).
   it("dois slots Claude em providers diferentes ainda são UMA família — sem cross-family", async () => {
     const creds = { aws_access_key_id: "AKIA", aws_secret_access_key: "s" };
     slotRows = [
-      slot({ provider: "foundry", model_id: "claude-opus-5", credentials: { foundry_api_key: "k" }, priority: 0 }),
+      slot({ provider: "anthropic", model_id: "claude-opus-5", credentials: { api_key: "k" }, priority: 0 }),
       slot({ provider: "bedrock", model_id: "us.anthropic.claude-sonnet-5", credentials: creds, priority: 1 }),
     ];
     const body = await get();
@@ -112,7 +123,7 @@ describe("GET /api/tenant/llm-config — o que a tela afirma sobre o slot", () =
 
   it("um slot Claude + um Gemini destravam o revisor cross-family", async () => {
     slotRows = [
-      slot({ provider: "foundry", model_id: "claude-opus-5", credentials: { foundry_api_key: "k" }, priority: 0 }),
+      slot({ provider: "anthropic", model_id: "claude-opus-5", credentials: { api_key: "k" }, priority: 0 }),
       slot({ provider: "google", model_id: "gemini-3-pro", credentials: { google_api_key: "AIza" }, priority: 1 }),
     ];
     const body = await get();
@@ -123,7 +134,7 @@ describe("GET /api/tenant/llm-config — o que a tela afirma sobre o slot", () =
   // Slot inutilizável não conta família: prometeria um revisor que nunca vai rodar.
   it("família de slot NÃO utilizável não entra na conta", async () => {
     slotRows = [
-      slot({ provider: "foundry", model_id: "claude-opus-5", credentials: { foundry_api_key: "k" }, priority: 0 }),
+      slot({ provider: "anthropic", model_id: "claude-opus-5", credentials: { api_key: "k" }, priority: 0 }),
       slot({ provider: "google", model_id: "gemini-3-pro", credentials: {}, priority: 1 }),
     ];
     const body = await get();

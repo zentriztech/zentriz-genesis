@@ -15,6 +15,8 @@ import traceback as _tb
 import contextlib
 import contextvars
 
+from . import llm_guard as _llm_guard
+
 logger = logging.getLogger(__name__)
 
 _r = Path(__file__).resolve().parent.parent.parent
@@ -1596,13 +1598,19 @@ def resolve_provider(llm_cfg: dict | None, env_provider: str) -> str:
     declared = (cfg.get("provider") or "").strip().lower()
     env_provider = (env_provider or "").strip().lower()
     if not declared:
+        if env_provider == "foundry":
+            raise ValueError("provider 'foundry' foi removido (post-mortem 30/09/2026) — cadastre outro slot.")
         return env_provider
     byoc = any(str(cfg.get(k) or "").strip() for k in _BYOC_FIELDS)
     # `bedrock`/`anthropic` sem credencial = "use a identidade do host" — indistinguível do
     # default legado, então a infraestrutura decide. Com credencial, é BYOC e vale.
     legado_sem_credencial = declared in ("bedrock", "anthropic") and not byoc
     if env_provider == "foundry" and legado_sem_credencial:
-        return "foundry"
+        declared = "foundry"
+    # REMOVIDO 2026-10-01 (post-mortem BRL 90 mil): o loop rodou no Foundry, sem cache e sem
+    # registro de gasto. Nem slot nem env podem mais levar uma chamada para lá — falha alto.
+    if declared == "foundry":
+        raise ValueError("provider 'foundry' foi removido (post-mortem 30/09/2026) — cadastre outro slot.")
     return declared
 
 def _build_google_client(llm_cfg: dict | None = None, model: str = "") -> tuple[str, str]:
@@ -1692,12 +1700,16 @@ _ERR_CONFIG = ("configure um slot", "não definida", "exige api key", "exige `ve
 
 
 def classify_llm_error(exc: BaseException | str) -> str:
-    """`auth` | `model` | `quota` | `network` | `config` | `other`.
+    """`guard` | `auth` | `model` | `quota` | `network` | `config` | `other`.
 
     A ordem de teste importa: um 403 costuma trazer a palavra "model" no corpo (o serviço explica
     QUAL modelo foi negado), então credencial é avaliada antes de disponibilidade. Classificar 403
     como `model` faria a cascata pular o slot certo e culpar o id.
     """
+    # LLM GUARD: recusa de orçamento/kill switch NÃO é defeito do slot — a cascata não pode
+    # "tentar o próximo" (seria contornar o guard) e o probe não pode carimbar o slot de quebrado.
+    if isinstance(exc, _llm_guard.LlmGuardDenied) or "[llm-guard]" in str(exc):
+        return "guard"
     txt = (str(exc) or "").lower()
     if any(m in txt for m in _ERR_CONFIG):
         return "config"
@@ -2002,7 +2014,10 @@ def list_models_verified(llm_cfg: dict | None, max_workers: int = 10,
     # `DeploymentNotFound` como se os modelos do Bedrock não existissem. Além de falso, invocar
     # pela identidade do host contraria a LEI dos slots (o custo é do tenant, não da Zentriz).
     # Então: lista sim, verifica NÃO — e diz por quê.
-    efetivo = resolve_provider(cfg, os.environ.get("GENESIS_LLM_PROVIDER", ""))
+    try:
+        efetivo = resolve_provider(cfg, os.environ.get("GENESIS_LLM_PROVIDER", ""))
+    except ValueError:
+        efetivo = "foundry (removido)"  # nada é verificado em provider removido
     if provider and efetivo and efetivo != provider:
         modelos = [{"id": m, "ok": False, "kind": "config", "latency_ms": 0,
                     "message": "não verificado: este slot não tem credencial própria"}
@@ -2054,6 +2069,26 @@ _OPENAI_MODEL_LIMITS: dict[str, dict[str, int]] = {
 _OPENAI_DEFAULT_LIMITS = {"context": 128_000, "max_output": 16_384}
 
 
+def _guard_text(v: object) -> str:
+    """Texto estável de system/user (str ou blocos de cache) para hash e estimativa do guard."""
+    if isinstance(v, str):
+        return v
+    try:
+        return json.dumps(v, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return str(v)
+
+
+def _guard_project_of(message: dict) -> str | None:
+    inp = message.get("input") if isinstance(message.get("input"), dict) else {}
+    for c in (message.get("guard_project_id"), (message.get("llm_config") or {}).get("guard_project_id"),
+              message.get("project_id"), inp.get("project_id")):
+        pid = _llm_guard.as_project_id(c)
+        if pid:
+            return pid
+    return None
+
+
 def _run_agent_openai(
     system_prompt_path: str | Path,
     message: dict,
@@ -2090,6 +2125,10 @@ def _run_agent_openai(
     logger.info("[%s][OpenAI] modelo=%s max_tokens=%d timeout=%ds", agent_name, model, max_tokens, timeout)
 
     raw_text = ""
+    _in = _out = 0
+    _gctx = _llm_guard.check(model=model, system=_guard_text(system_content), user=_guard_text(user_content),
+                             max_tokens=max_tokens, provider="openai", project_id=_guard_project_of(message),
+                             purpose=f"{role}:{mode}")
     for attempt in range(CLAUDE_RETRY_ATTEMPTS):
         try:
             resp = client.chat.completions.create(
@@ -2104,6 +2143,8 @@ def _run_agent_openai(
             _in  = resp.usage.prompt_tokens     if resp.usage else 0
             _out = resp.usage.completion_tokens if resp.usage else 0
             logger.info("[%s][OpenAI] Resposta recebida tokens_in=%d tokens_out=%d", agent_name, _in, _out)
+            _llm_guard.record(_gctx, model=model, input_tokens=_in, output_tokens=_out,
+                              duration_ms=int((time.perf_counter() - t0) * 1000))
             break
         except Exception as e:
             err_lower = str(e).lower()
@@ -2139,6 +2180,7 @@ def _run_agent_openai(
 
     out["validator_pass"] = True
     out["_model"] = model
+    out["_input_tokens_total"], out["_output_tokens_total"] = int(_in or 0), int(_out or 0)
     out["_duration_ms"] = int((time.perf_counter() - t0) * 1000)
     log_agent_call(agent_name, mode, {}, out, out["_duration_ms"], request_id=request_id)
     return _normalize_response_envelope(out, request_id, raw_text)
@@ -2567,6 +2609,11 @@ def run_agent(
                     agent_name, model, repair_attempt, MAX_REPAIRS, max_tokens, budget["utilization_pct"])
         last_error = None
         response = None
+        # LLM GUARD: licença por CHAMADA (cada repair da LEI 5 é paga e passa de novo pelo guard).
+        _gctx = _llm_guard.check(model=model, system=_guard_text(system_content), user=_guard_text(user_content),
+                                 max_tokens=max_tokens, provider=provider, project_id=_guard_project_of(message),
+                                 purpose=f"{role}:{mode or 'default'}")
+        _g_t0 = time.perf_counter()
         for attempt in range(CLAUDE_RETRY_ATTEMPTS):
             try:
                 create_kw: dict = {
@@ -2675,6 +2722,11 @@ def run_agent(
         _acc_output_tokens += int(_output_tokens or 0)
         _llm_calls += 1
         _cache_now = _cache_tokens(_usage)                      # GAP-148
+        _llm_guard.record(_gctx, model=model, provider=provider,
+                          input_tokens=int(_input_tokens or 0), output_tokens=int(_output_tokens or 0),
+                          cache_read_tokens=int(_cache_now.get("cacheReadTokens", 0) or 0),
+                          cache_write_tokens=int(_cache_now.get("cacheWriteTokens", 0) or 0),
+                          duration_ms=int((time.perf_counter() - _g_t0) * 1000))
         if "cacheReadTokens" in _cache_now:
             _acc_cache_read = (_acc_cache_read or 0) + int(_cache_now["cacheReadTokens"])
         if "cacheWriteTokens" in _cache_now:
@@ -3298,6 +3350,37 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                         llm_cfg: dict | None = None,
                         cache_prefix: bool = False,
                         thinking: bool = False) -> str:
+    """LLM GUARD (post-mortem 30/09/2026): licença ANTES, registro (tokens + USD) DEPOIS.
+
+    Negado ⇒ `LlmGuardDenied` (nenhum byte sai para o provedor). O projeto vem do escopo
+    (`llm_guard.guard_scope`) ou de `usage_project_id`; pseudo-projeto conta como "sem projeto".
+    """
+    _gctx = _llm_guard.check(
+        model=model_id, system=system, user=user, max_tokens=max_tokens,
+        provider=(llm_cfg or {}).get("provider"), project_id=usage_project_id, purpose=usage_agent,
+    )
+    _t0 = time.time()
+    text = _call_bedrock_direct_impl(system, user, model_id, max_tokens=max_tokens,
+                                     temperature=temperature, usage_project_id=usage_project_id,
+                                     usage_agent=usage_agent, llm_cfg=llm_cfg,
+                                     cache_prefix=cache_prefix, thinking=thinking)
+    _u = LAST_USAGE.get() or {}
+    _llm_guard.record(
+        _gctx, model=LAST_EFFECTIVE_MODEL.get() or model_id,
+        input_tokens=_u.get("input_tokens", 0), output_tokens=_u.get("output_tokens", 0),
+        cache_read_tokens=_u.get("cache_read_tokens", 0), cache_write_tokens=_u.get("cache_write_tokens", 0),
+        duration_ms=int((time.time() - _t0) * 1000),
+    )
+    return text
+
+
+def _call_bedrock_direct_impl(system: str, user: str, model_id: str,
+                              max_tokens: int = 8000, temperature: float = 0.2,
+                              usage_project_id: str | None = None,
+                              usage_agent: str = "direct",
+                              llm_cfg: dict | None = None,
+                              cache_prefix: bool = False,
+                              thinking: bool = False) -> str:
     """Chama Bedrock com system + user; retorna string bruta da resposta.
 
     `llm_cfg` (opcional, mesmo shape do envelope `llm_config` da fábrica): credenciais AWS

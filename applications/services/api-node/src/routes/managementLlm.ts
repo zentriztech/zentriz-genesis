@@ -29,12 +29,12 @@ import { hasOwnCredentials } from "../services/tenantLlmConfig.js";
 import { getPlatformSlots, platformSlotUsable, type PlatformLlmSlot } from "../services/platformLlmConfig.js";
 import { probeSlot, listModels, type ProbeResult } from "../services/llmSlotProbe.js";
 
-const ALLOWED_PROVIDERS = ["bedrock", "foundry", "google", "openai", "anthropic", "azure_openai"] as const;
+// `foundry` REMOVIDO 2026-10-01 (post-mortem BRL 90 mil).
+const ALLOWED_PROVIDERS = ["bedrock", "google", "openai", "anthropic", "azure_openai"] as const;
 type Provider = typeof ALLOWED_PROVIDERS[number];
 
 const CREDENTIAL_FIELDS: Record<Provider, string[]> = {
   bedrock:      ["aws_access_key_id", "aws_secret_access_key", "aws_region"],
-  foundry:      ["foundry_api_key", "foundry_resource", "foundry_base_url"],
   google:       ["google_api_key", "google_base_url",
                  "vertex_project_id", "vertex_location", "vertex_service_account_json"],
   openai:       ["api_key"],

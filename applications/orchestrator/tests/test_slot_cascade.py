@@ -188,7 +188,7 @@ def test_probe_sem_modelo_ou_sem_provider_nao_chama_ninguem(monkeypatch):
     monkeypatch.setenv("GENESIS_LLM_PROVIDER", "")
     monkeypatch.setattr(runtime, "call_bedrock_direct",
                         lambda **kw: pytest.fail("não deveria chamar o provider"))
-    r = runtime.probe_slot({"provider": "foundry"}, "")
+    r = runtime.probe_slot({"provider": "bedrock"}, "")
     assert r["ok"] is False and r["kind"] == "config"
     r = runtime.probe_slot({}, "claude-opus-5")
     assert r["ok"] is False and r["kind"] == "config"
@@ -199,7 +199,7 @@ def test_probe_ok_quando_o_modelo_pedido_responde(monkeypatch):
         runtime.LAST_EFFECTIVE_MODEL.set(kw["model_id"])
         return "ok"
     monkeypatch.setattr(runtime, "call_bedrock_direct", fake)
-    r = runtime.probe_slot({"provider": "foundry", "foundry_api_key": "k"}, "claude-opus-5")
+    r = runtime.probe_slot({"provider": "anthropic", "api_key": "k"}, "claude-opus-5")
     assert r["ok"] is True and r["kind"] == "" and r["model"] == "claude-opus-5"
 
 

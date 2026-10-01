@@ -144,14 +144,17 @@ def test_provider_de_outra_familia_e_respeitado_mesmo_sem_credencial_propria():
     assert runtime.resolve_provider({"provider": "azure_openai"}, "foundry") == "azure_openai"
 
 
-def test_slot_claude_legado_sem_credencial_cai_para_a_infraestrutura():
-    """Config antiga (anterior ao Foundry) diz `bedrock`/`anthropic` sem chave: é default, não escolha."""
-    assert runtime.resolve_provider({"provider": "bedrock"}, "foundry") == "foundry"
-    assert runtime.resolve_provider({"provider": "anthropic"}, "foundry") == "foundry"
+def test_slot_claude_legado_com_env_foundry_FALHA_ALTO():
+    """Foundry REMOVIDO 2026-10-01 (post-mortem BRL 90 mil): o legado não pode mais cair lá."""
+    with pytest.raises(ValueError, match="foundry"):
+        runtime.resolve_provider({"provider": "bedrock"}, "foundry")
+    with pytest.raises(ValueError, match="foundry"):
+        runtime.resolve_provider({"provider": "foundry", "foundry_api_key": "k"}, "bedrock")
 
 
 def test_sem_provider_no_envelope_vale_o_env():
-    assert runtime.resolve_provider({}, "foundry") == "foundry"
+    with pytest.raises(ValueError, match="foundry"):
+        runtime.resolve_provider({}, "foundry")
     assert runtime.resolve_provider(None, "bedrock") == "bedrock"
 
 

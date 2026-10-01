@@ -111,7 +111,8 @@ export function hasOwnCredentials(provider: string, creds: Record<string, string
     case "bedrock":
       return !!(creds.aws_access_key_id && creds.aws_secret_access_key);
     case "foundry":
-      return !!creds.foundry_api_key;
+      // Provider REMOVIDO 2026-10-01 (post-mortem BRL 90 mil): slot foundry remanescente nunca é utilizável.
+      return false;
     case "google":
       // API Key da Gemini API basta para o Gemini nativo; o modo Vertex (Model Garden) precisa do
       // par projeto + service account — projeto sozinho não autentica nada.
@@ -137,7 +138,7 @@ export function hasOwnCredentials(provider: string, creds: Record<string, string
 export function infraCanServe(provider: string): boolean {
   switch (provider) {
     case "bedrock":  return true;
-    case "foundry":  return !!process.env.ANTHROPIC_FOUNDRY_API_KEY;
+    case "foundry":  return false; // REMOVIDO 2026-10-01 — nem a chave do container serve mais.
     case "google":   return !!(process.env.GOOGLE_API_KEY || process.env.GOOGLE_VERTEX_PROJECT);
     default:         return false;
   }
@@ -216,6 +217,12 @@ export async function getTenantLlmConfigs(tenantId: string): Promise<TenantLlmCo
  * que o runner já manda no envelope (`runner.py` `_llm_config`). Credenciais viajam só container→container.
  */
 export interface AgentsLlmOverride {
+  /**
+   * Post-mortem 30/09/2026: projeto que PAGA a chamada. Os agents levam até o guard de custo
+   * (`/api/internal/llm-guard/*`) — sem ele a chamada cai no teto pequeno de "sem projeto".
+   * O laço do incidente chamava sem projeto e por isso era invisível ao orçamento.
+   */
+  guard_project_id?: string;
   model_id?: string;
   model_id_rework?: string;
   llm_config: Record<string, string>;
@@ -292,6 +299,11 @@ function credentialEnvelope(cfg: ResolvedLlmConfig): Record<string, string> {
  * (falha → default do env, igual ao comportamento anterior) e NUNCA loga credenciais.
  */
 export async function resolveWorkbenchLlm(opts: { projectId?: string | null; tenantId?: string | null }): Promise<AgentsLlmOverride> {
+  const o = await resolveWorkbenchLlmInner(opts);
+  return opts.projectId ? { ...o, guard_project_id: String(opts.projectId) } : o;
+}
+
+async function resolveWorkbenchLlmInner(opts: { projectId?: string | null; tenantId?: string | null }): Promise<AgentsLlmOverride> {
   let projectErr: unknown = null;
   if (opts.projectId) {
     try {
@@ -396,8 +408,9 @@ function toResolved(cfg: TenantLlmConfig): ResolvedLlmConfig {
 
 /** Campos a espalhar no corpo enviado aos agents (omite tudo quando é o default do env). */
 export function agentsLlmFields(o: AgentsLlmOverride): Record<string, unknown> {
-  if (o.isDefault) return {};
+  if (o.isDefault) return o.guard_project_id ? { guard_project_id: o.guard_project_id } : {};
   return {
+    ...(o.guard_project_id ? { guard_project_id: o.guard_project_id } : {}),
     ...(o.model_id ? { model_id: o.model_id } : {}),
     ...(o.model_id_rework ? { model_id_rework: o.model_id_rework } : {}),
     llm_config: o.llm_config,

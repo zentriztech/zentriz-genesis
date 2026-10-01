@@ -55,6 +55,13 @@ export async function dispatchProjectRun(pool: Pool, projectId: string): Promise
     return { projectId, dispatched: false, reason: `${gate.block.code}: ${gate.block.message.slice(0, 160)}` };
   }
 
+  // Post-mortem 30/09/2026: orçamento em US$ do PROJETO (migration 131) — fail-closed.
+  {
+    const { checkProjectBudgetGate } = await import("./llmGuard.js");
+    const pGate = await checkProjectBudgetGate(pool, projectId);
+    if (!pGate.ok) return { projectId, dispatched: false, reason: `${pGate.code}: ${pGate.message}` };
+  }
+
   // Cost cap mensal de LLM por TENANT (migration 068): a cascata/promoção passa pelo
   // MESMO gate do /run interativo — sem isto um tenant sobre o teto ainda gastava LLM
   // via gatilhos de accept/promote. Fail-safe: sem cap ⇒ segue; erro de infra ⇒

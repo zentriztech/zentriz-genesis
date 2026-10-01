@@ -269,6 +269,9 @@ def _slot_body_fields(model_id: str = "") -> dict:
     # quando há mais de um slot utilizável — com um só, o corpo fica idêntico ao de antes.
     if env.get("llm_candidates"):
         out["llm_candidates"] = env["llm_candidates"]
+    if env.get("guard_project_id"):
+        out["guard_project_id"] = env["guard_project_id"]
+        out["purpose"] = "cyborg_v3"
     return out
 
 
@@ -684,7 +687,10 @@ def run_prior_audit(project_id: str, prod_id: str | None, model_id: str) -> dict
         return name, ar
 
     with ThreadPoolExecutor(max_workers=5) as ex:
-        futs = {ex.submit(_one, a): a for a in analyses}
+        # ContextVar NÃO atravessa o Executor: sem a cópia, as 5 análises rodavam sem `_SLOT_LLM`
+        # (sem slot do tenant e sem projeto para o guard). Uma cópia POR submit (Context não é
+        # reentrante entre threads).
+        futs = {ex.submit(contextvars.copy_context().run, _one, a): a for a in analyses}
         for fut in as_completed(futs, timeout=ANALYSIS_TIMEOUT + 60):
             try:
                 name, ar = fut.result()
@@ -904,6 +910,16 @@ Comece analisando o audit (via `zentriz-audit {project_id}`) e o estado atual do
         **_slot_body_fields(model_id),
     }
 
+    # LLM GUARD: a sessão longa do `claude` no executor é a chamada mais cara do Cyborg — licença
+    # ANTES de despachar (estimativa pelo teto de 64k de saída). Negado ⇒ não despacha.
+    from orchestrator.agents import llm_guard as _llm_guard
+    try:
+        _gctx = _llm_guard.check(model=model_id or "", system=engineer_prompt, user=user_briefing,
+                                 max_tokens=64000, project_id=project_id, purpose="cyborg_v3:engineer_session")
+    except _llm_guard.LlmGuardDenied as _gd:
+        return {"ok": False, "error": f"LLM negado pelo guard de custo ({_gd.code}): {_gd.message}",
+                "guard_denied": True}
+
     # Fase 3 (rota B): sessão longa do `claude` = código não-confiável → roteia p/ executor.
     status, text = executor_bridge.dispatch(
         "/cyborg-engineer", payload,
@@ -912,7 +928,15 @@ Comece analisando o audit (via `zentriz-audit {project_id}`) e o estado atual do
     if status != 200:
         return {"ok": False, "error": f"FTS retornou {status}: {text[:500]}"}
     try:
-        return json.loads(text)
+        _res = json.loads(text)
+        # Registro do que o executor reportar (tokens). Sem usage reportado, o registro fica com
+        # zero tokens — mas a CHAMADA conta (disjuntor de repetição e auditoria).
+        _u = (_res.get("usage") if isinstance(_res, dict) else None) or {}
+        _llm_guard.record(_gctx, model=model_id, input_tokens=_u.get("input_tokens", 0),
+                          output_tokens=_u.get("output_tokens", 0),
+                          cache_read_tokens=_u.get("cache_read_input_tokens", 0),
+                          cache_write_tokens=_u.get("cache_creation_input_tokens", 0))
+        return _res
     except Exception as e:
         return {"ok": False, "error": f"parse fail: {e}", "raw": text[:2000]}
 
@@ -1813,6 +1837,9 @@ def run_cyborg_v3(project_id: str, tenant_id: str | None, prod_id: str | None) -
     # credencial), como a Bancada e a Fábrica. Antes ele era o único plano 100% env: modelo literal
     # da Zentriz invocado com a identidade do container. Falha alto: sem slot, não há run.
     _slot = _resolve_slot_llm(project_id)
+    # LLM GUARD: o projeto viaja no corpo de todo `/invoke/raw` — o gasto do Cyborg debita no
+    # orçamento DESTE projeto (antes era invisível: o agents não sabia de quem era a chamada).
+    _slot = {**(_slot or {}), "guard_project_id": project_id}
     _SLOT_LLM.set(_slot)
     # ⚖️ "sempre o melhor **entre os cadastrados nos slots**" (Jean, 2026-09-10) — sem exceção de
     # env. `CYBORG_V3_MODEL` (que já não tinha default) morreu aqui: um id vindo do env não é do

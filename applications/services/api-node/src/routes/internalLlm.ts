@@ -18,7 +18,7 @@ import { pool } from "../db/client.js";
  * usa ao assinar). Em produção, NEGA quando não há token estático nem JWT válido.
  * Fora de produção, mantém uma folga (sem token configurado) para dev local.
  */
-function authenticateInternal(request: FastifyRequest): { ok: true; payload: TokenPayload | null } | { ok: false } {
+export function authenticateInternal(request: FastifyRequest): { ok: true; payload: TokenPayload | null } | { ok: false } {
   const internalToken = (process.env.GENESIS_API_TOKEN ?? process.env.GENESIS_INTERNAL_TOKEN ?? "").trim();
   const provided = ((request.headers["x-internal-token"] as string)
     || (request.headers["authorization"] as string ?? "").replace(/^Bearer\s+/i, "")).trim();

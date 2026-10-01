@@ -27,9 +27,9 @@ vi.mock("../db/client.js", () => ({ pool: { query: (s: string) => queryMock(s) }
 import { resolveProjectLlmConfig, LlmSlotNotConfiguredError } from "./tenantLlmConfig.js";
 import { strongestByDomination } from "./reviewerModel.js";
 
-const foundry = (model: string, priority: number) => ({
-  provider: "foundry", model_id: model, model_id_fallback: null,
-  credentials: { foundry_api_key: `KEY-FOUNDRY-P${priority}` },
+const anthropic = (model: string, priority: number) => ({
+  provider: "anthropic", model_id: model, model_id_fallback: null,
+  credentials: { api_key: `KEY-ANTHROPIC-P${priority}` },
   max_concurrent_projects: 3, daily_token_quota: null, deadpool_token_reserve: 0,
   priority, byoc_exempt: false,
 });
@@ -70,7 +70,7 @@ describe("strongestByDomination — só a relação MEDIDA elimina", () => {
 
 describe("resolveProjectLlmConfig — strategy strongest (o Cyborg)", () => {
   it("haiku na prioridade 0 e opus na 1 → o Cyborg sobe para o opus", async () => {
-    tenantRows = [foundry("claude-haiku-4-5", 0), foundry("claude-opus-5", 1)];
+    tenantRows = [anthropic("claude-haiku-4-5", 0), anthropic("claude-opus-5", 1)];
 
     const padrao = await resolveProjectLlmConfig(PROJECT);
     expect(padrao.modelId).toBe("claude-haiku-4-5");   // Bancada/Fábrica seguem a ORDEM do tenant
@@ -86,22 +86,22 @@ describe("resolveProjectLlmConfig — strategy strongest (o Cyborg)", () => {
   it("a CREDENCIAL que viaja é a do slot vencedor, não a do slot 0", async () => {
     // O ponto financeiro da LEI: trocar de slot troca de fatura. Levar o modelo de um slot com a
     // chave de outro seria 400 (provider errado) ou, pior, consumo na credencial errada.
-    tenantRows = [foundry("claude-haiku-4-5", 0), google("gemini-3-pro", 1)];
+    tenantRows = [anthropic("claude-haiku-4-5", 0), google("gemini-3-pro", 1)];
     const cyborg = await resolveProjectLlmConfig(PROJECT, { strategy: "strongest" });
     expect(cyborg.modelId).toBe("gemini-3-pro");
     expect(cyborg.provider).toBe("google");
     expect(cyborg.googleApiKey).toBe("KEY-GOOGLE-P1");
-    expect(cyborg.foundryApiKey).toBeUndefined();
+    expect(cyborg.apiKey).toBe(""); // a chave do slot 0 (anthropic) NÃO viaja junto
   });
 
   it("empate sem ordem conhecida → vence a prioridade do TENANT (não uma nota nossa)", async () => {
-    tenantRows = [google("gemini-3-pro", 0), foundry("claude-opus-5", 1)];
+    tenantRows = [google("gemini-3-pro", 0), anthropic("claude-opus-5", 1)];
     const c = await resolveProjectLlmConfig(PROJECT, { strategy: "strongest" });
     expect(c.modelId).toBe("gemini-3-pro");
     expect(c.selection?.why).toContain("desempatou pela ordem do tenant");
 
     // Reordenar na tela muda a escolha na hora, sem deploy — é a "reflexão dinâmica" pedida.
-    tenantRows = [foundry("claude-opus-5", 0), google("gemini-3-pro", 1)];
+    tenantRows = [anthropic("claude-opus-5", 0), google("gemini-3-pro", 1)];
     expect((await resolveProjectLlmConfig(PROJECT, { strategy: "strongest" })).modelId).toBe("claude-opus-5");
   });
 
@@ -109,10 +109,21 @@ describe("resolveProjectLlmConfig — strategy strongest (o Cyborg)", () => {
     // Um opus que só roda na conta da Zentriz não é "o melhor": é o que a lei proíbe.
     tenantRows = [
       google("gemini-3-pro", 0),
-      { ...foundry("claude-opus-5", 1), credentials: {} },
+      { ...anthropic("claude-opus-5", 1), credentials: {} },
     ];
     const c = await resolveProjectLlmConfig(PROJECT, { strategy: "strongest" });
     expect(c.modelId).toBe("gemini-3-pro");
+    expect(c.selection?.slotModels).toEqual(["gemini-3-pro"]);
+  });
+
+  it("slot foundry remanescente nunca é candidato — Foundry REMOVIDO 2026-10-01 (post-mortem)", async () => {
+    // Mesmo com chave gravada e o modelo mais forte, o provider removido não volta pela estratégia.
+    tenantRows = [
+      google("gemini-3-pro", 0),
+      { ...anthropic("claude-opus-5", 1), provider: "foundry", credentials: { foundry_api_key: "K" } },
+    ];
+    const c = await resolveProjectLlmConfig(PROJECT, { strategy: "strongest" });
+    expect(c.provider).toBe("google");
     expect(c.selection?.slotModels).toEqual(["gemini-3-pro"]);
   });
 

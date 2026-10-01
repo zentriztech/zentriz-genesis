@@ -97,8 +97,8 @@ describe("resolveWorkbenchLlm", () => {
   it("a fila da gestão é lida por prioridade, e a contingência vira candidata", async () => {
     projectRows = [{ tenant_id: TENANT, creator_role: "zentriz_admin" }];
     zentrizRows = [
-      { provider: "foundry", model_id: "claude-opus-5", priority: 0,
-        credentials: { foundry_api_key: "K0" } },
+      { provider: "anthropic", model_id: "claude-opus-5", priority: 0,
+        credentials: { api_key: "K0" } },
       { provider: "bedrock", model_id: "us.anthropic.claude-opus-4-6-v1", priority: 1,
         credentials: { aws_access_key_id: "AKIA_1", aws_secret_access_key: "S1" } },
     ];
@@ -122,36 +122,37 @@ describe("resolveWorkbenchLlm", () => {
     await expect(resolveWorkbenchLlm({ tenantId: TENANT })).rejects.toBeInstanceOf(LlmSlotNotConfiguredError);
   });
 
-  // ── provider=foundry (2026-09-09): Claude servido pelo Azure AI Foundry ────────────────────
-  it("foundry SEM credencial própria: a chave do container só serve o tenant ISENTO", async () => {
+  // ── provider=foundry — REMOVIDO 2026-10-01 (post-mortem BRL 90 mil) ─────────────────────
+  it("slot foundry nunca é utilizável — nem chave do container, nem tenant ISENTO (Foundry REMOVIDO 2026-10-01, post-mortem)", async () => {
     process.env.ANTHROPIC_FOUNDRY_API_KEY = "chave-do-container";
     tenantRows = [{ ...TENANT_CFG, provider: "foundry", model_id: "claude-opus-5", credentials: {} }];
-    // Sem isenção, herdar a chave do host é justamente pôr a fatura na Zentriz.
     await expect(resolveWorkbenchLlm({ tenantId: TENANT })).rejects.toBeInstanceOf(LlmSlotNotConfiguredError);
 
+    // Antes a isenção destravava a chave do host; com o provider removido, nem ela serve.
     tenantRows = [{ ...TENANT_CFG, provider: "foundry", model_id: "claude-opus-5", credentials: {}, byoc_exempt: true }];
-    const o = await resolveWorkbenchLlm({ tenantId: TENANT });
-    expect(o.model_id).toBe("claude-opus-5");
-    expect(o.llm_config).toEqual({ provider: "foundry", model: "claude-opus-5" });
+    await expect(resolveWorkbenchLlm({ tenantId: TENANT })).rejects.toBeInstanceOf(LlmSlotNotConfiguredError);
     delete process.env.ANTHROPIC_FOUNDRY_API_KEY;
   });
 
-  it("foundry COM credencial própria (BYOC) → viaja com os nomes que _build_foundry_client procura", async () => {
-    tenantRows = [{
-      ...TENANT_CFG, provider: "foundry", model_id: "claude-opus-5",
+  it("slot foundry COM credencial própria (BYOC) também é recusado e a contingência assume (Foundry REMOVIDO 2026-10-01, post-mortem)", async () => {
+    const FOUNDRY_BYOC = {
+      ...TENANT_CFG, provider: "foundry", model_id: "claude-opus-5", priority: 0,
       credentials: { foundry_api_key: "k-tenant", foundry_resource: "recurso-do-tenant" },
-    }];
+    };
+    tenantRows = [FOUNDRY_BYOC];
+    await expect(resolveWorkbenchLlm({ tenantId: TENANT })).rejects.toBeInstanceOf(LlmSlotNotConfiguredError);
+
+    tenantRows = [FOUNDRY_BYOC, { ...TENANT_CFG, priority: 1 }];
     const o = await resolveWorkbenchLlm({ tenantId: TENANT });
-    expect(o.llm_config).toEqual({
-      provider: "foundry", model: "claude-opus-5",
-      foundry_api_key: "k-tenant", foundry_resource: "recurso-do-tenant",
-    });
+    expect(o.llm_config.provider).toBe("bedrock");
+    expect(o.llm_candidates).toBeUndefined(); // o slot foundry não entra nem como contingência
+    expect(JSON.stringify(o)).not.toContain("k-tenant");
   });
 
   it("slot Padrão sem credencial própria → é PULADO e a Contingência COM chave assume", async () => {
     delete process.env.ANTHROPIC_FOUNDRY_API_KEY;
     tenantRows = [
-      { ...TENANT_CFG, provider: "foundry", model_id: "claude-opus-5", credentials: {}, priority: 0 },
+      { ...TENANT_CFG, provider: "anthropic", model_id: "claude-opus-5", credentials: {}, priority: 0 },
       { ...TENANT_CFG, provider: "bedrock", model_id: "us.anthropic.claude-sonnet-5", priority: 1 },
     ];
     const o = await resolveWorkbenchLlm({ tenantId: TENANT });
@@ -246,8 +247,8 @@ describe("resolveWorkbenchLlm — fila de contingências (llm_candidates)", () =
   it("dois slots utilizáveis → fila na ORDEM das prioridades, cada um com sua credencial", async () => {
     tenantRows = [
       TENANT_CFG,
-      { ...TENANT_CFG, provider: "foundry", model_id: "claude-opus-5", model_id_fallback: null,
-        credentials: { foundry_api_key: "k-tenant", foundry_resource: "r" }, priority: 1 },
+      { ...TENANT_CFG, provider: "anthropic", model_id: "claude-opus-5", model_id_fallback: null,
+        credentials: { api_key: "k-tenant" }, priority: 1 },
     ];
     const o = await resolveWorkbenchLlm({ tenantId: TENANT });
     // O escolhido continua no topo: nenhum consumidor de `model_id`/`llm_config` muda.
@@ -258,7 +259,7 @@ describe("resolveWorkbenchLlm — fila de contingências (llm_candidates)", () =
       aws_access_key_id: "AKIA_T", model_rework: "us.anthropic.claude-opus-5",
     });
     expect(o.llm_candidates![1]).toMatchObject({
-      provider: "foundry", model: "claude-opus-5", foundry_api_key: "k-tenant",
+      provider: "anthropic", model: "claude-opus-5", api_key: "k-tenant",
     });
     // A credencial do slot 1 NÃO pode vazar para o candidato 2 (seria fatura no lugar errado).
     expect(o.llm_candidates![1].aws_access_key_id).toBeUndefined();
@@ -269,7 +270,7 @@ describe("resolveWorkbenchLlm — fila de contingências (llm_candidates)", () =
     delete process.env.ANTHROPIC_FOUNDRY_API_KEY;
     tenantRows = [
       TENANT_CFG,
-      { ...TENANT_CFG, provider: "foundry", model_id: "claude-opus-5", credentials: {}, priority: 1 },
+      { ...TENANT_CFG, provider: "anthropic", model_id: "claude-opus-5", credentials: {}, priority: 1 },
     ];
     const o = await resolveWorkbenchLlm({ tenantId: TENANT });
     expect(o.llm_candidates).toBeUndefined();

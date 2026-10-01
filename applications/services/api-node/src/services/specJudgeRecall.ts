@@ -1266,6 +1266,29 @@ const RECALL_TICK_SCAN = 5;
 /** Uma medição por processo. `null` = livre. */
 let recallEmVoo: string | null = null;
 
+// Post-mortem 30/09/2026: medição que NÃO roda não grava nada em `spec_judge_recall_runs` ⇒ o tick
+// seguinte (20 s) pegava a MESMA spec e pagava o injetor de novo — o mesmo desenho do laço de
+// R$ 90 mil. Falha agora entra em recuo por (projeto, spec_hash): 30 min, 2 h e desiste até a spec
+// mudar. Memória do processo: um restart da api concede no máximo mais RECALL_MAX_FAILURES tentativas.
+const RECALL_MAX_FAILURES = 3;
+const RECALL_BACKOFF_BASE_MS = 30 * 60_000;
+const recallFalhas = new Map<string, { failures: number; nextAt: number }>();
+
+export function recallEmRecuo(key: string, now = Date.now()): boolean {
+  const f = recallFalhas.get(key);
+  return !!f && (f.failures >= RECALL_MAX_FAILURES || now < f.nextAt);
+}
+
+export function registrarFalhaRecall(key: string, now = Date.now()): void {
+  const failures = (recallFalhas.get(key)?.failures ?? 0) + 1;
+  recallFalhas.set(key, { failures, nextAt: now + RECALL_BACKOFF_BASE_MS * 4 ** (failures - 1) });
+}
+
+/** Só para teste: zera o recuo entre casos. */
+export function _resetRecallBackoffForTests(): void {
+  recallFalhas.clear();
+}
+
 export interface JudgeRecallTickResult {
   scanned: number;
   started: number;
@@ -1318,6 +1341,13 @@ export async function judgeRecallTick(db: Db): Promise<JudgeRecallTickResult> {
     ).catch(() => ({ rows: [] }))).rows;
     if (jaTem.length) { out.skipped += 1; continue; }
 
+    const chave = `${projectId}:${atual.specHash}`;
+    if (recallEmRecuo(chave)) { out.skipped += 1; continue; }
+    // Sem orçamento/pausado: nem tenta (o guard negaria; tentar só gera ruído a cada tick).
+    const { checkProjectBudgetGate } = await import("./llmGuard.js");
+    const gate = await checkProjectBudgetGate(db, projectId);
+    if (!gate.ok) { out.skipped += 1; continue; }
+
     const files = atual.files.map((f) => ({
       path: `${f.rel_dir ? f.rel_dir + "/" : ""}${f.filename}`, content: f.content,
     }));
@@ -1334,10 +1364,15 @@ export async function judgeRecallTick(db: Db): Promise<JudgeRecallTickResult> {
       autonomyRunId: runId,
     })
       .then((r) => {
-        if (!r.ran) console.warn(`[specJudgeRecall] projeto=${projectId}: medição não rodou — ${r.reason ?? "motivo não informado"}`);
-        else console.info(`[specJudgeRecall] projeto=${projectId}: ${r.note}`);
+        if (!r.ran) {
+          registrarFalhaRecall(chave);
+          console.warn(`[specJudgeRecall] projeto=${projectId}: medição não rodou — ${r.reason ?? "motivo não informado"} (recuo ${recallFalhas.get(chave)?.failures}/${RECALL_MAX_FAILURES})`);
+        } else console.info(`[specJudgeRecall] projeto=${projectId}: ${r.note}`);
       })
-      .catch((e) => console.warn(`[specJudgeRecall] projeto=${projectId}: medição falhou — ${String(e).slice(0, 300)}`))
+      .catch((e) => {
+        registrarFalhaRecall(chave);
+        console.warn(`[specJudgeRecall] projeto=${projectId}: medição falhou — ${String(e).slice(0, 300)}`);
+      })
       .finally(() => { recallEmVoo = null; });
     return out;   // uma por tick, em série
   }

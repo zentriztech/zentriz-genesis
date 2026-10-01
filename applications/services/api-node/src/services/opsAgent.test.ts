@@ -48,10 +48,10 @@ vi.mock("../db/client.js", () => {
 
 import { ask, extrairJson, MAX_PASSOS, traceParaAuditoria, MAX_TRACE_BYTES } from "./opsAgent.js";
 
-const SLOT_FOUNDRY = {
-  id: "s0", priority: 0, provider: "foundry", model_id: "claude-opus-5",
+const SLOT_ANTHROPIC = {
+  id: "s0", priority: 0, provider: "anthropic", model_id: "claude-opus-5",
   model_id_fallback: null, label: "principal", is_active: true,
-  credentials: { foundry_api_key: "CHAVE_DA_GESTAO" },
+  credentials: { api_key: "CHAVE_DA_GESTAO" },
 };
 const SLOT_BEDROCK = {
   id: "s1", priority: 1, provider: "bedrock", model_id: "us.anthropic.claude-opus-4-6-v1",
@@ -64,7 +64,7 @@ let respostas: string[] = [];
 let corposEnviados: Record<string, unknown>[] = [];
 
 beforeEach(() => {
-  db.slots = [SLOT_FOUNDRY]; db.inserts = []; db.selects = [];
+  db.slots = [SLOT_ANTHROPIC]; db.inserts = []; db.selects = [];
   respostas = []; corposEnviados = [];
   process.env.API_AGENTS_URL = "http://agents:8000";
   vi.stubGlobal("fetch", async (_url: string, init: { body: string }) => {
@@ -96,24 +96,24 @@ describe("ask — LLM da conta de gestão", () => {
   });
 
   it("slot sem credencial PRÓPRIA não conta como configurado", async () => {
-    db.slots = [{ ...SLOT_FOUNDRY, credentials: {} }];
+    db.slots = [{ ...SLOT_ANTHROPIC, credentials: {} }];
     const r = await ask({ question: "quantos tenants?" });
     expect(r.code).toBe("PLATFORM_LLM_NOT_CONFIGURED");
   });
 
   it("manda a credencial da gestão e a fila inteira, cada candidato com a DELE", async () => {
-    db.slots = [SLOT_FOUNDRY, SLOT_BEDROCK];
+    db.slots = [SLOT_ANTHROPIC, SLOT_BEDROCK];
     respostas = ['{"thought":"ok","final":"7 tenants"}'];
     const r = await ask({ question: "quantos tenants?" });
     expect(r.ok).toBe(true);
     const corpo = corposEnviados[0];
-    expect((corpo.llm_config as Record<string, string>).foundry_api_key).toBe("CHAVE_DA_GESTAO");
+    expect((corpo.llm_config as Record<string, string>).api_key).toBe("CHAVE_DA_GESTAO");
     const candidatos = corpo.llm_candidates as Record<string, string>[];
     expect(candidatos).toHaveLength(2);
-    // A contingência leva a credencial DELA — não a chave do Foundry com o modelo do Bedrock.
+    // A contingência leva a credencial DELA — não a chave da Anthropic com o modelo do Bedrock.
     expect(candidatos[1].provider).toBe("bedrock");
     expect(candidatos[1].aws_access_key_id).toBe("AKIA_GESTAO");
-    expect(candidatos[1].foundry_api_key).toBeUndefined();
+    expect(candidatos[1].api_key).toBeUndefined();
   });
 
   it("executa ferramenta, devolve o resultado ao modelo e conclui", async () => {

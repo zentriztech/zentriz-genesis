@@ -670,6 +670,45 @@ describe("GAP-149 — o instrumento ganha CHAMADOR (e não mede duas vezes a mes
     expect(dedupe.params[0]).toBe("proj-1");
     delete process.env.SPEC_JUDGE_RECALL;
   });
+
+  it("post-mortem 30/09: projeto sem orçamento NÃO tenta medir (antes repetia a cada tick de 20 s)", async () => {
+    process.env.SPEC_JUDGE_RECALL = "on";
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const dir = await mkdtemp(join(tmpdir(), "recall-gate-"));
+    const arquivo = join(dir, "01-visao.md");
+    await writeFile(arquivo, ARQUIVO_A, "utf-8");
+    const { judgeRecallTick, _resetRecallBackoffForTests } = await import("./specJudgeRecall.js");
+    _resetRecallBackoffForTests();
+    const PID = "11111111-2222-4333-8444-555555555555";   // o gate só olha UUID
+    const { seen, db } = fakeDb((sql) => {
+      if (/spec_autonomy_runs/.test(sql)) return [{ ...RUN, project_id: PID }];
+      if (/project_spec_files/.test(sql)) return [{ filename: "01-visao.md", file_path: arquivo, rel_dir: "" }];
+      if (/FROM projects/.test(sql)) return [{ id: PID, budget_usd: null }];   // sem orçamento
+      return [];
+    });
+    const out = await judgeRecallTick(db as never);
+    expect(out).toMatchObject({ scanned: 1, started: 0, skipped: 1, busy: false });
+    expect(seen.some((q) => /FROM projects/.test(q.sql))).toBe(true);
+    delete process.env.SPEC_JUDGE_RECALL;
+  });
+
+  it("post-mortem 30/09: falha entra em recuo crescente e desiste após 3 (até a spec mudar)", async () => {
+    const { recallEmRecuo, registrarFalhaRecall, _resetRecallBackoffForTests } = await import("./specJudgeRecall.js");
+    _resetRecallBackoffForTests();
+    const t0 = 1_000_000;
+    expect(recallEmRecuo("p:h", t0)).toBe(false);
+    registrarFalhaRecall("p:h", t0);
+    expect(recallEmRecuo("p:h", t0 + 29 * 60_000)).toBe(true);    // 30 min de recuo
+    expect(recallEmRecuo("p:h", t0 + 31 * 60_000)).toBe(false);
+    registrarFalhaRecall("p:h", t0);
+    expect(recallEmRecuo("p:h", t0 + 119 * 60_000)).toBe(true);   // 2 h
+    registrarFalhaRecall("p:h", t0);
+    expect(recallEmRecuo("p:h", t0 + 365 * 24 * 3_600_000)).toBe(true);   // desistiu
+    expect(recallEmRecuo("p:OUTRA-spec", t0)).toBe(false);        // spec nova recomeça
+    _resetRecallBackoffForTests();
+  });
 });
 
 // 🔴 GAP-152: o veredicto em PROSA do A/B (`abNote`) era a ÚNICA leitura humana do experimento — e

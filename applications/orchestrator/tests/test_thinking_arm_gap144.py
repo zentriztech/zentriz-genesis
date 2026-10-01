@@ -122,21 +122,16 @@ def test_bedrock_sem_thinking_e_byte_identico_ao_de_antes(monkeypatch):
     assert sink[0]["system"] == "S"
 
 
-def test_foundry_ignora_thinking_e_DECLARA_em_log(monkeypatch, caplog):
-    """Achado #51: no Foundry o `text_stream` descarta os blocos de raciocínio. Ignorar em silêncio
-    faria o A/B atribuir ao raciocínio um resultado que rodou sem ele."""
+def test_env_foundry_falha_alto_sem_chamar_provider(monkeypatch):
+    """Foundry REMOVIDO 2026-10-01 (post-mortem BRL 90 mil): env foundry não leva chamada a lugar nenhum."""
     sink: list = []
     runtime = _ambiente_bedrock(monkeypatch)
     monkeypatch.setenv("GENESIS_LLM_PROVIDER", "foundry")
-    # ⚖️ LEI 2026-09-10: o stub aceita o envelope porque o cliente Foundry passou a recebê-lo
-    # (`_build_foundry_client(llm_cfg)`). Antes era `lambda:` sem argumento — e essa assinatura
-    # zero-arg era o próprio vazamento: a credencial do slot nunca chegava ao cliente.
     monkeypatch.setattr(runtime, "_build_foundry_client",
                         lambda llm_cfg=None: types.SimpleNamespace(messages=_Messages(sink)))
-    with caplog.at_level("WARNING"):
+    with pytest.raises(ValueError, match="foundry"):
         runtime.call_bedrock_direct("S", "U", "opus-5", max_tokens=8000, thinking=True)
-    assert sink[0]["thinking"] == {"type": "disabled"}      # NÃO ligou
-    assert "IGNORADO" in caplog.text and "text_stream" in caplog.text
+    assert sink == []
 
 
 def test_converse_ignora_thinking_e_DECLARA_em_log(monkeypatch, caplog):

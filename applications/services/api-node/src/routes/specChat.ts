@@ -1598,7 +1598,8 @@ function runFileChatJob(
   // seguia viva nos agents (medido em prod: 47.816 chars → 21.649 tokens de orçamento).
   const socketMs = rawSocketTimeoutMs(Number(raw.max_tokens ?? 0) || 8_000);
   // Síncrono: /invoke/raw responde no próprio request (não há fila/poll no lado dos agentes).
-  httpPost(`${base}/invoke/raw`, JSON.stringify(raw), socketMs)
+  // Post-mortem 30/09: o projeto do job paga a chamada (guard de custo nos agents).
+  httpPost(`${base}/invoke/raw`, JSON.stringify(job.projectId ? { guard_project_id: job.projectId, ...raw } : raw), socketMs)
     .then((text) => {
       clearTimeout(guard);
       const data = JSON.parse(text) as {

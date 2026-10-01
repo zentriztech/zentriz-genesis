@@ -158,26 +158,16 @@ def test_spec_validator_sem_modelo_declarado_falha_alto(monkeypatch):
 # + chave BOGUS no `llm_config` devolveu **200**. Ou seja: a credencial do tenant era descartada e
 # o consumo de `/invoke/raw`, splitter, spec_validator e Cyborg ia inteiro para a conta da Zentriz.
 
-def test_call_bedrock_direct_usa_a_credencial_do_SLOT_e_nao_a_do_container(monkeypatch):
+def test_slot_foundry_e_recusado_sem_construir_cliente(monkeypatch):
+    """Foundry REMOVIDO 2026-10-01: nem a chave do slot nem a do container chegam a um cliente."""
     monkeypatch.setenv("GENESIS_LLM_PROVIDER", "foundry")
-    monkeypatch.setenv("ANTHROPIC_FOUNDRY_API_KEY", "CHAVE-DO-CONTAINER")
-    monkeypatch.setenv("ANTHROPIC_FOUNDRY_RESOURCE", "recurso-do-container")
-
-    vistos: dict = {}
-
-    def _spy(llm_cfg=None):
-        vistos["llm_cfg"] = llm_cfg
-        raise RuntimeError("parar aqui — só interessa QUAL credencial chegou")
-
-    monkeypatch.setattr(runtime, "_build_foundry_client", _spy)
-    with pytest.raises(RuntimeError):
+    monkeypatch.setattr(runtime, "_build_foundry_client",
+                        lambda llm_cfg=None: pytest.fail("cliente Foundry não pode mais ser construído"))
+    with pytest.raises(ValueError, match="foundry"):
         runtime.call_bedrock_direct(
             system="s", user="u", model_id="claude-opus-5", max_tokens=16,
-            llm_cfg={"provider": "foundry", "foundry_api_key": "CHAVE-DO-TENANT",
-                     "foundry_resource": "recurso-do-tenant"},
+            llm_cfg={"provider": "foundry", "foundry_api_key": "CHAVE-DO-TENANT"},
         )
-    assert vistos["llm_cfg"] is not None, "o envelope do slot não chegou ao cliente Foundry"
-    assert vistos["llm_cfg"]["foundry_api_key"] == "CHAVE-DO-TENANT"
 
 
 def test_call_bedrock_direct_roteia_pelo_provider_do_SLOT_nao_pelo_env(monkeypatch):

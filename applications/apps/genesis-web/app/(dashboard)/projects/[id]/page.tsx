@@ -39,6 +39,7 @@ import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
 import TextField from "@mui/material/TextField";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import AttachFileIcon from "@mui/icons-material/AttachFile";
 import CancelIcon from "@mui/icons-material/Cancel";
 import DeleteForeverIcon from "@mui/icons-material/DeleteForever";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
@@ -70,8 +71,9 @@ import { DocViewerModal } from "@/components/DocViewerModal";
 import DeadpoolMonitorCard from "@/components/DeadpoolMonitorCard";
 import SpecQuestionsPanel from "@/components/SpecQuestionsPanel";
 import DeadpoolPromotionApprovals from "@/components/DeadpoolPromotionApprovals";
+import { ProjectBudgetCard } from "@/components/ProjectBudget";
 import { getAgentProfile } from "@/lib/agentProfiles";
-import { apiGet, apiPost, apiPatch, apiPut, apiDelete } from "@/lib/api";
+import { apiGet, apiPost, apiPatch, apiPut, apiDelete, apiPostMultipart } from "@/lib/api";
 // Padronização 2026-09-06: rótulos das ações de fábrica vêm de um módulo único.
 import { FACTORY_LABEL } from "@/lib/factoryActions";
 import { authStore } from "@/stores/authStore";
@@ -170,6 +172,10 @@ const TRIGGER_LABEL: Record<string, string> = {
   manual: "Manual", evolution_merge: "Pós-merge", rollback: "Rollback",
 };
 type MetricsResp      = { by_agent: Array<{ agent: string; calls: number; input_tokens: number; output_tokens: number }>; totals: { calls: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number } };
+// RFC-0009 — o PEDIDO de evolução (Ticket). `status` é do pedido; `execution_status` vem do
+// projeto filho (derivado no servidor), então a tela nunca inventa estado de execução.
+type TicketSummary    = { id: string; code: string; number: number; title: string; body: string; change_kind: string; status: string; execution_status: string | null; attachments_count: number; created_at: string };
+const TICKET_KIND_LABEL: Record<string, string> = { evolution: "evolução", fix: "correção", feature: "recurso novo" };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmtTime(iso: string) {
@@ -410,6 +416,15 @@ function ProjectDetailPageInner() {
   const [evolveRequest, setEvolveRequest] = useState("");
   const [evolveWorkMode, setEvolveWorkMode] = useState<"copy" | "branch">("copy");
   const [evolveLoading, setEvolveLoading] = useState(false);
+  // RFC-0009 — o pedido de evolução é um Ticket: tipo declarado, anexos e fila por produto.
+  // `evolveTicketId` vazio = pedido novo; preenchido = promover um pedido que já está na fila.
+  const [evolveKind, setEvolveKind] = useState<"evolution" | "fix" | "feature">("evolution");
+  const [evolveFiles, setEvolveFiles] = useState<File[]>([]);
+  const [evolveTicketId, setEvolveTicketId] = useState("");
+  const [openTickets, setOpenTickets] = useState<TicketSummary[]>([]);
+  const [parkLoading, setParkLoading] = useState(false);
+  const [evolveNotice, setEvolveNotice] = useState<string | null>(null);
+  const [evolveError, setEvolveError] = useState<string | null>(null);
   const [republishing, setRepublishing] = useState(false); // H2 — republicar evolução com push pendente
   const [copiedCmd, setCopiedCmd]   = useState(false);
   const [tasksOpen, setTasksOpen]   = useState(true);
@@ -960,17 +975,82 @@ function ProjectDetailPageInner() {
     }
   };
 
+  // RFC-0009 — a fila de pedidos do produto. Carregada ao abrir o diálogo: é ela que mostra o
+  // que já foi pedido e ainda não virou execução (inclusive o que ficou represado).
+  const loadOpenTickets = useCallback(async () => {
+    const productId = project?.productId;
+    if (!productId) { setOpenTickets([]); return; }
+    const rows = await apiGet<TicketSummary[]>(`/api/products/${productId}/tickets?status=open`).catch(() => null);
+    setOpenTickets(rows ?? []);
+  }, [project?.productId]);
+
+  // Carrega a fila uma vez ao abrir a página: o contador ao lado de "Evoluir" mostra que há
+  // pedido esperando sem exigir que o humano abra o diálogo para descobrir.
+  useEffect(() => { void loadOpenTickets(); }, [loadOpenTickets]);
+
+  /**
+   * Abre o PEDIDO (Ticket) com o texto do humano, o tipo declarado e os anexos.
+   * Devolve o ticket criado, ou `null` se o produto não aceitar pedido (INBOX/arquivado) —
+   * nesse caso o chamador cai no caminho antigo, que continua funcionando igual.
+   */
+  const createTicket = async (): Promise<TicketSummary | null> => {
+    const productId = project?.productId;
+    if (!productId) return null;
+    const fd = new FormData();
+    fd.append("body", evolveRequest.trim());
+    fd.append("changeKind", evolveKind);
+    fd.append("projectId", id);
+    for (const f of evolveFiles) fd.append("files", f, f.name);
+    return await apiPostMultipart<TicketSummary>(`/api/products/${productId}/tickets`, fd).catch(() => null);
+  };
+
+  /** Registrar o pedido SEM promover — o humano guarda a ideia mesmo com evolução em voo. */
+  const handleParkTicket = async () => {
+    if (isMaster || !evolveRequest.trim()) return;
+    setParkLoading(true);
+    setEvolveError(null);
+    try {
+      const t = await createTicket();
+      if (!t) { setEvolveError("Não foi possível registrar o pedido neste produto."); return; }
+      setEvolveRequest("");
+      setEvolveFiles([]);
+      setEvolveNotice(`${t.code} registrado na fila do produto. Promova quando quiser.`);
+      await loadOpenTickets();
+    } finally {
+      setParkLoading(false);
+    }
+  };
+
   const handleEvolve = async () => {
     if (isMaster) return;
-    if (!evolveRequest.trim()) return;
+    // Promovendo um pedido da fila, o texto é o DELE (o campo fica desabilitado).
+    if (!evolveTicketId && !evolveRequest.trim()) return;
     setEvolveLoading(true);
+    setEvolveError(null);
+    let createdTicketCode: string | null = null;
     try {
+      // O pedido vira Ticket ANTES da evolução: se a promoção esbarrar no guard de evolução em
+      // voo, o texto e os anexos do humano já estão salvos — antes disso, perdiam-se no 409.
+      let ticket: TicketSummary | null = null;
+      if (evolveTicketId) {
+        ticket = openTickets.find((t) => t.id === evolveTicketId) ?? null;
+      } else {
+        ticket = await createTicket();
+        // Sem ticket a evolução ainda acontece pelo caminho antigo — mas os ANEXOS não viajam.
+        // Dizer isso é obrigatório: anexo sumindo em silêncio é pior do que não oferecer anexo.
+        if (!ticket && evolveFiles.length > 0) {
+          setEvolveError("Não foi possível registrar o pedido com anexos neste produto — a evolução seguirá só com o texto.");
+        }
+      }
+      createdTicketCode = ticket && !evolveTicketId ? ticket.code : null;
       const result = await apiPost(`/api/projects/${id}/evolve`, {
-        request: evolveRequest.trim(),
+        ...(ticket ? { ticketId: ticket.id } : { request: evolveRequest.trim() }),
         workMode: evolveWorkMode,
       });
       setEvolveOpen(false);
       setEvolveRequest("");
+      setEvolveFiles([]);
+      setEvolveTicketId("");
       // Evoluir E2/E6: a evolução passa pela BANCADA — o filho abre no editor de spec, onde o
       // arquiteto gera RFC/ADR/CHANGELOG/connect.yaml e o humano revisa antes de promover.
       const childId = (result as Record<string, unknown>)?.childProjectId;
@@ -979,7 +1059,18 @@ function ProjectDetailPageInner() {
         window.location.href = `/spec?editProjectId=${encodeURIComponent(childId)}${prod}&evolve=1`;
       }
     } catch (e) {
-      setRunError(e instanceof Error ? e.message : "Falha ao criar evolução");
+      const msg = e instanceof Error ? e.message : "Falha ao criar evolução";
+      // Promover falhou, mas o PEDIDO já foi registrado — o diálogo fica aberto dizendo onde ele
+      // está e o que dá para fazer agora, em vez de devolver um 409 que apaga o texto do humano.
+      if (createdTicketCode) {
+        setEvolveError(`${msg}\n\nSeu pedido ${createdTicketCode} ficou registrado na fila deste produto e não se perdeu — promova-o quando der.`);
+        setEvolveRequest("");
+        setEvolveFiles([]);
+        await loadOpenTickets();
+      } else {
+        setEvolveError(msg);
+        setRunError(msg);
+      }
     } finally {
       setEvolveLoading(false);
     }
@@ -1281,12 +1372,13 @@ function ProjectDetailPageInner() {
             {acceptLoading ? "Aceitando…" : "Aceitar"}
           </Button>
         )}
-        {/* FT-10: Botão Evoluir — só aparece em projetos aceitos */}
+        {/* FT-10: Botão Evoluir — só aparece em projetos aceitos.
+            RFC-0009: o contador diz, sem abrir nada, quantos pedidos estão esperando. */}
         {project.status === "accepted" && (
           <Button variant="outlined" color="secondary" size="small"
             startIcon={<span style={{ fontSize: "1rem" }}>🔄</span>}
             onClick={() => setEvolveOpen(true)}>
-            Evoluir
+            {openTickets.length > 0 ? `Evoluir (${openTickets.length} pedido${openTickets.length > 1 ? "s" : ""})` : "Evoluir"}
           </Button>
         )}
         {/* Menu Ações */}
@@ -1319,6 +1411,9 @@ function ProjectDetailPageInner() {
           </DialogActions>
         </Dialog>
       </Stack>
+
+      {/* Orçamento de LLM (migração 131): gasto por fase, tokens, previsão e pausa. */}
+      <ProjectBudgetCard projectId={id} readOnly={isMaster} />
 
       {/* Modal: Reiniciar a partir de qual task? */}
       <Dialog open={restartDialogOpen} onClose={() => setRestartDialogOpen(false)} maxWidth="sm" fullWidth>
@@ -1575,25 +1670,119 @@ function ProjectDetailPageInner() {
         </Alert>
       )}
 
-      {/* FT-10: Modal de Evolução */}
-      <Dialog open={evolveOpen} onClose={() => setEvolveOpen(false)} maxWidth="sm" fullWidth>
+      {/* FT-10: Modal de Evolução · RFC-0009: o pedido é um Ticket (tipo + anexos + fila) */}
+      <Dialog
+        open={evolveOpen} maxWidth="sm" fullWidth
+        onClose={() => { setEvolveOpen(false); setEvolveError(null); }}
+        TransitionProps={{ onEntering: () => { setEvolveError(null); void loadOpenTickets(); } }}
+      >
         <DialogTitle>🔄 Evoluir projeto</DialogTitle>
         <DialogContent>
           <Alert severity="info" sx={{ mb: 2 }}>
             Uma evolução cria uma <strong>nova versão deste mesmo serviço</strong> (mesma identidade, mesmo repositório em <code>evolution/vN</code>). Você será levado à <strong>Bancada</strong>: o arquiteto transforma o pedido em <strong>RFC</strong> (critérios Gherkin + escopo de arquivos), <strong>ADR</strong> se houver decisão, <strong>CHANGELOG</strong> e <code>connect.yaml</code> evoluído. Depois de revisar, você promove à fábrica — que gera <strong>só as tasks adicionais</strong>, dentro do escopo do RFC.
           </Alert>
-          <Typography variant="subtitle2" gutterBottom>O que você quer evoluir?</Typography>
+          {evolveError && (
+            <Alert severity="warning" sx={{ mb: 2, whiteSpace: "pre-line" }} onClose={() => setEvolveError(null)}>
+              {evolveError}
+            </Alert>
+          )}
+
+          {/* A fila do produto: pedidos já abertos que ainda não viraram execução. Promover um
+              deles evita redigitar — e é o caminho de quem registrou a ideia enquanto a versão
+              anterior ainda estava em andamento. */}
+          {openTickets.length > 0 && (
+            <Box sx={{ mb: 2 }}>
+              <Typography variant="subtitle2" gutterBottom>
+                Pedidos abertos deste produto ({openTickets.length})
+              </Typography>
+              <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+                <Chip
+                  size="small" label="Novo pedido"
+                  color={evolveTicketId === "" ? "secondary" : "default"}
+                  variant={evolveTicketId === "" ? "filled" : "outlined"}
+                  onClick={() => setEvolveTicketId("")}
+                  sx={{ height: 26 }}
+                />
+                {openTickets.map((t) => (
+                  <Chip
+                    key={t.id} size="small"
+                    label={`${t.code} · ${TICKET_KIND_LABEL[t.change_kind] ?? t.change_kind} · ${t.title}${t.attachments_count > 0 ? ` 📎${t.attachments_count}` : ""}`}
+                    color={evolveTicketId === t.id ? "secondary" : "default"}
+                    variant={evolveTicketId === t.id ? "filled" : "outlined"}
+                    onClick={() => { setEvolveTicketId(t.id); setEvolveRequest(t.body); setEvolveKind((t.change_kind as "evolution" | "fix" | "feature") ?? "evolution"); }}
+                    sx={{ height: 26, maxWidth: "100%" }}
+                  />
+                ))}
+              </Stack>
+            </Box>
+          )}
+
+          <Typography variant="subtitle2" gutterBottom>
+            {evolveTicketId ? "Pedido selecionado (texto original, imutável)" : "O que você quer evoluir?"}
+          </Typography>
           <textarea
             value={evolveRequest}
             onChange={e => setEvolveRequest(e.target.value)}
+            readOnly={!!evolveTicketId}
             placeholder="Ex: Adicionar módulo de relatórios em PDF, exportação CSV, ou tela de comparativo mensal..."
             rows={4}
+            // `color` e `background` LITERAIS e não herdados: este é um <textarea> HTML puro, então o
+            // fundo é branco (default do browser) mas a fonte herdava a cor do tema — no tema escuro
+            // isso dava cinza-claro sobre branco, ilegível. Agora #111418 sobre #FFF (≈18:1, muito
+            // acima do mínimo 4,5:1 do WCAG 1.4.3), independente do tema ativo.
             style={{
               width: "100%", padding: "10px", borderRadius: "6px", resize: "vertical",
               fontFamily: "inherit", fontSize: "0.875rem",
+              color: "#111418", background: "#FFFFFF",
               border: "1px solid #ccc", outline: "none", boxSizing: "border-box",
             }}
           />
+          {/* Tipo DECLARADO pelo humano — a máquina não adivinha. Vai no cabeçalho da spec da
+              evolução e no `request.md`, que é o que o arquiteto e o CTO leem. */}
+          <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Que tipo de mudança é?</Typography>
+          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+            {(["evolution", "fix", "feature"] as const).map(k => (
+              <Button
+                key={k} size="small"
+                variant={evolveKind === k ? "contained" : "outlined"}
+                color={evolveKind === k ? "secondary" : "inherit"}
+                disabled={!!evolveTicketId}
+                onClick={() => setEvolveKind(k)}
+              >
+                {k === "evolution" ? "Evolução" : k === "fix" ? "Correção" : "Recurso novo"}
+              </Button>
+            ))}
+          </Stack>
+
+          {/* Anexos: print da tela, planilha, documento do cliente. Ficam em `tickets/TK-NNNN/anexos/`
+              na árvore da spec da nova versão — o contexto viaja junto com o pedido. */}
+          {!evolveTicketId && (
+            <>
+              <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Anexos (opcional)</Typography>
+              <Button component="label" size="small" variant="outlined" startIcon={<AttachFileIcon fontSize="small" />}>
+                Escolher arquivos
+                <input
+                  type="file" multiple hidden
+                  onChange={e => setEvolveFiles(Array.from(e.target.files ?? []).slice(0, 10))}
+                />
+              </Button>
+              {evolveFiles.length > 0 && (
+                <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", mt: 1 }}>
+                  {evolveFiles.map((f, i) => (
+                    <Chip
+                      key={`${f.name}-${i}`} size="small" variant="outlined" label={f.name}
+                      onDelete={() => setEvolveFiles(prev => prev.filter((_, j) => j !== i))}
+                      sx={{ height: 26 }}
+                    />
+                  ))}
+                </Stack>
+              )}
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: "block" }}>
+                Até 10 arquivos, 10 MB cada.
+              </Typography>
+            </>
+          )}
+
           <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Modo de trabalho</Typography>
           <div style={{ display: "flex", gap: "8px" }}>
             {(["copy", "branch"] as const).map(m => (
@@ -1612,14 +1801,25 @@ function ProjectDetailPageInner() {
               : "Cria branches main/staging/dev (se necessário) e um branch evolution/vN. Requer git disponível no projeto."}
           </Typography>
         </DialogContent>
-        <DialogContent sx={{ pt: 0, display: "flex", justifyContent: "flex-end", gap: 1 }}>
-          <Button onClick={() => setEvolveOpen(false)} disabled={evolveLoading}>Cancelar</Button>
+        <DialogContent sx={{ pt: 0, display: "flex", justifyContent: "flex-end", gap: 1, flexWrap: "wrap" }}>
+          <Button onClick={() => { setEvolveOpen(false); setEvolveError(null); }} disabled={evolveLoading || parkLoading}>Cancelar</Button>
+          {/* Registrar sem promover: a ideia fica guardada mesmo quando a versão anterior ainda
+              está em andamento (o guard de evolução em voo recusa promover, não registrar). */}
+          {!evolveTicketId && (
+            <Button
+              variant="outlined"
+              disabled={!evolveRequest.trim() || evolveLoading || parkLoading || !project?.productId}
+              onClick={handleParkTicket}
+            >
+              {parkLoading ? "Registrando…" : "Só registrar pedido"}
+            </Button>
+          )}
           <Button
             variant="contained" color="secondary"
-            disabled={!evolveRequest.trim() || evolveLoading}
+            disabled={(!evolveTicketId && !evolveRequest.trim()) || evolveLoading || parkLoading}
             onClick={handleEvolve}
           >
-            {evolveLoading ? "Criando…" : "Criar evolução"}
+            {evolveLoading ? "Criando…" : evolveTicketId ? "Promover pedido" : "Criar evolução"}
           </Button>
         </DialogContent>
       </Dialog>
@@ -1628,6 +1828,9 @@ function ProjectDetailPageInner() {
           & Operação (topo). O Snackbar de "comando copiado" segue aqui (usado pela aba Rodar). */}
       <Snackbar open={copiedCmd} autoHideDuration={2000} onClose={() => setCopiedCmd(false)}
         message="Comando copiado!" anchorOrigin={{ vertical: "bottom", horizontal: "center" }} />
+      {/* RFC-0009 — confirma ao humano que o pedido foi guardado (e com que código). */}
+      <Snackbar open={!!evolveNotice} autoHideDuration={6000} onClose={() => setEvolveNotice(null)}
+        message={evolveNotice ?? ""} anchorOrigin={{ vertical: "bottom", horizontal: "center" }} />
 
       {/* Repo not created — fallback manual só depois que o Cyborg terminou.
           Enquanto pending_cyborg o V3 está trabalhando e criará o repo via zentriz-github-push.
