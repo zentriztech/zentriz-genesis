@@ -886,9 +886,16 @@ export async function startValidation(pool: Pool, opts: {
       return { ok: false, code: "TENANT_LLM_BUDGET_EXCEEDED", message: budgetExceededMessage(budget.spentUsd, budget.budgetUsd), status: 402 };
     }
   }
-  // rate-limit 4/h por spec (in-memory — suficiente p/ freio de custo)
+  // rate-limit 4/h por spec. A memória freia rajada; o BANCO é o freio que sobrevive a restart
+  // (post-mortem 30/09/2026: o contador em memória zerava a cada recriação da api).
   const rl = checkRateLimit(`spec-validate:${projectId}`, { windowMs: 60 * 60_000, max: 4 });
-  if (!rl.ok) {
+  const lastHour = rl.ok
+    ? Number((await pool.query(
+        "SELECT count(*)::int AS n FROM spec_validation_runs WHERE project_id = $1 AND created_at > now() - interval '1 hour'",
+        [projectId],
+      )).rows[0]?.n ?? 0)
+    : 0;
+  if (!rl.ok || lastHour >= 4) {
     return { ok: false, code: "RATE_LIMITED", message: "Limite de 4 validações/hora por spec. Aguarde para revalidar.", status: 429 };
   }
 

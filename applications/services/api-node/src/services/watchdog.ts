@@ -132,15 +132,18 @@ async function getOrphanProjects(runnerActiveIds: Set<string>): Promise<OrphanPr
 async function markProject(
   id: string,
   status: string,
-  opts?: { restartCount?: number; extra?: Record<string, unknown> },
+  opts?: { restartCount?: number; extra?: Record<string, unknown>; touch?: boolean },
 ): Promise<void> {
   const client = await pool.connect();
+  // `touch: false` preserva `updated_at`: o rescue seleciona por `updated_at` recente, então reescrevê-lo
+  // numa falha de relançamento renovava a janela para sempre (post-mortem 30/09/2026, ponto fraco 2).
+  const touch = opts?.touch === false ? "" : "updated_at = now(),";
   try {
     if (opts?.restartCount !== undefined || opts?.extra) {
       await client.query(
         `UPDATE projects
          SET status = $1,
-             updated_at = now(),
+             ${touch}
              restart_count = COALESCE($2, restart_count),
              extra = COALESCE(extra, '{}') || $3::jsonb
          WHERE id = $4`,
@@ -257,6 +260,14 @@ async function getProjectUser(projectId: string): Promise<{ userId: string; emai
   } finally {
     client.release();
   }
+}
+
+/** LLM GUARD (migr. 131): relançar um projeto sem orçamento só gera um run negado na 1ª chamada. */
+async function budgetAllowsRelaunch(projectId: string): Promise<boolean> {
+  const { checkProjectBudgetGate } = await import("./llmGuard.js");
+  const gate = await checkProjectBudgetGate(pool, projectId);
+  if (!gate.ok) console.info(`[Watchdog] ${projectId} não relançado — guarda de custo (${gate.code}).`);
+  return gate.ok;
 }
 
 async function relaunchPipeline(project: OrphanProject): Promise<boolean> {
@@ -427,14 +438,21 @@ async function autoRescueFailedProjects(activeIds: Set<string>): Promise<void> {
       // (se o projeto está failed mas ainda está na lista ativa = processo morreu mas PID não foi limpo)
       if (activeIds.has(project.id) && project.status !== "failed") continue;
 
+      // LLM GUARD: sem orçamento/pausado ⇒ o run seria negado na 1ª chamada. Não relança nem conta
+      // tentativa; sem tocar o projeto, a janela de RESCUE_WINDOW_MINUTES expira sozinha.
+      if (!(await budgetAllowsRelaunch(project.id))) continue;
+
       // Verificar se tem checkpoint salvo (runner.py grava em STATE_DIR)
       // Se não tiver checkpoint, relançar do zero (spec_submitted) — também válido
       console.log(
         `[Watchdog][Rescue] Projeto ${project.id} falhou recentemente — relançando (tentativa ${project.restart_count + 1}/${MAX_RESTART_ATTEMPTS})`,
       );
 
-      // Resetar para spec_submitted para o runner iniciar do checkpoint se disponível
+      // Resetar para spec_submitted para o runner iniciar do checkpoint se disponível. A tentativa
+      // CONTA ANTES de relançar (post-mortem 30/09/2026, ponto fraco 2): antes só o sucesso somava, e
+      // um relançamento que sempre falha voltava a cada ciclo de 60 s sem nunca atingir o teto.
       await markProject(project.id, "spec_submitted", {
+        restartCount: project.restart_count + 1,
         extra: { rescue_attempt: project.restart_count + 1, rescued_at: new Date().toISOString() },
       });
 
@@ -449,6 +467,7 @@ async function autoRescueFailedProjects(activeIds: Set<string>): Promise<void> {
         // Rollback — voltar para failed se não conseguiu relangar
         await markProject(project.id, "failed", {
           extra: { rescue_failed_at: new Date().toISOString() },
+          touch: false,
         });
         console.warn(`[Watchdog][Rescue] Falha ao relangar ${project.id} — mantendo como failed.`);
       }
@@ -627,6 +646,8 @@ async function runWatchdogCycle(): Promise<void> {
         console.log(`[Watchdog] Slots paralelos esgotados (${MAX_PARALLEL_RESTARTS}). Projeto ${project.id} será tentado no próximo ciclo.`);
         break;
       }
+
+      if (!(await budgetAllowsRelaunch(project.id))) continue;
 
       // Tentar relangar
       const launched = await relaunchPipeline(project);

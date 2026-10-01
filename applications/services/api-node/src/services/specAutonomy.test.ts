@@ -286,7 +286,9 @@ const db = {
         if (m) run![col] = values[Number(m[1]) - 1];
       };
       for (const c of ["round", "chat_job_id", "base_spec_sha", "gaps_current", "no_progress_streak",
-        "validation_run_id", "last_error", "max_rounds"]) assign(c);
+        "validation_run_id", "last_error", "max_rounds", "kick_failures", "kick_next_at"]) assign(c);
+      if (/kick_next_at = NULL/.test(s)) run.kick_next_at = null;
+      if (/kick_failures = 0/.test(s)) run.kick_failures = 0;
       if (/validation_run_id = NULL/.test(s)) run.validation_run_id = null;
       if (/chat_job_id = NULL/.test(s)) run.chat_job_id = null;
       if (/rounds = rounds \|\| \$2::jsonb/.test(s)) {
@@ -512,6 +514,32 @@ describe("validação dentro do laço", () => {
     await advanceAutonomyRun(db, r.id);            // tick seguinte tenta de novo
     expect(startValidation).toHaveBeenCalledTimes(2);
     expect(run!.validation_run_id).toBe("vr-1");
+  });
+
+  it("post-mortem 30/09: falha ao DISPARAR a validação recua (persistido) e desiste após 5", async () => {
+    startValidation.mockRejectedValueOnce(new Error("pool esgotado"));
+    const r = await reachValidating();
+    expect(run!.status).toBe("validating");
+    expect(run!.kick_failures).toBe(1);
+    expect(new Date(String(run!.kick_next_at)).getTime()).toBeGreaterThan(Date.now());
+    await advanceAutonomyRun(db, r.id);              // ainda em recuo: NÃO tenta de novo
+    expect(startValidation).toHaveBeenCalledTimes(1);
+
+    run!.kick_failures = 4; run!.kick_next_at = null; // 5ª falha ⇒ desiste
+    startValidation.mockRejectedValueOnce(new Error("pool esgotado"));
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("failed");
+    expect(String(run!.last_error)).toContain("após 5 tentativas");
+  });
+
+  it("post-mortem 30/09: disparo que volta a funcionar zera o contador de recuo", async () => {
+    startValidation.mockRejectedValueOnce(new Error("transitório"));
+    const r = await reachValidating();
+    run!.kick_next_at = new Date(Date.now() - 1000).toISOString(); // recuo vencido
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.validation_run_id).toBe("vr-1");
+    expect(run!.kick_failures).toBe(0);
+    expect(run!.kick_next_at).toBeNull();
   });
 
   /**

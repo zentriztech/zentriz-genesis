@@ -3629,11 +3629,40 @@ async function applyAndValidate(db: Db, run: AutonomyRun): Promise<boolean> {
   return true;
 }
 
+/** Falhas seguidas ao DISPARAR a validação antes de desistir; recuo 2, 4, 8, 16 min entre elas. */
+const KICK_MAX_FAILURES = 5;
+const KICK_BACKOFF_BASE_MS = 2 * 60_000;
+
 /** Dispara a validação; rate-limit NÃO derruba o laço (GAP-A) — espera o tick seguinte. */
 async function kickValidation(db: Db, run: AutonomyRun): Promise<void> {
-  const res = await startValidation(db as Pool, {
-    projectId: run.projectId, tenantId: run.tenantId, requestedBy: run.ownerUserId,
-  });
+  // Post-mortem 30/09/2026 (ponto fraco 1): falha ao DISPARAR conta no banco (migração 132), com
+  // espera crescente e desistência — antes, `startValidation` que lançava era repetido a cada tick.
+  const kick = (await db.query(
+    "SELECT kick_failures, kick_next_at FROM spec_autonomy_runs WHERE id = $1", [run.id],
+  )).rows[0] as { kick_failures?: number | null; kick_next_at?: string | Date | null } | undefined;
+  if (kick?.kick_next_at && new Date(kick.kick_next_at).getTime() > Date.now()) return;
+  let res: Awaited<ReturnType<typeof startValidation>>;
+  try {
+    res = await startValidation(db as Pool, {
+      projectId: run.projectId, tenantId: run.tenantId, requestedBy: run.ownerUserId,
+    });
+  } catch (e) {
+    const failures = Number(kick?.kick_failures ?? 0) + 1;
+    if (failures >= KICK_MAX_FAILURES) {
+      await finishRun(db, run, "failed", `Validação não pôde ser iniciada após ${failures} tentativas: ${msg(e)}`);
+      return;
+    }
+    const nextAt = new Date(Date.now() + KICK_BACKOFF_BASE_MS * 2 ** (failures - 1)).toISOString();
+    await db.query(
+      "UPDATE spec_autonomy_runs SET kick_failures = $2, kick_next_at = $3, last_error = $4, updated_at = now() WHERE id = $1",
+      [run.id, failures, nextAt, `Falha ao iniciar a validação (tentativa ${failures}/${KICK_MAX_FAILURES}): ${msg(e)}. Nova tentativa às ${nextAt}.`],
+    );
+    console.warn(`[SpecAutonomy] run=${run.id} falha ${failures}/${KICK_MAX_FAILURES} ao iniciar validação — recua até ${nextAt}: ${msg(e)}`);
+    return;
+  }
+  if (Number(kick?.kick_failures ?? 0) > 0) {
+    await db.query("UPDATE spec_autonomy_runs SET kick_failures = 0, kick_next_at = NULL WHERE id = $1", [run.id]);
+  }
   // 🔴 GAP-44: o one-flight de validação é por PROJETO. Se já havia uma validação em voo quando o
   // passe terminou, `startValidation` devolve ELA — e ela está medindo o conteúdo de ANTES do passe.
   // Adotá-la é gravar como "a medição deste passe" uma leitura que não viu nada do que o passe
