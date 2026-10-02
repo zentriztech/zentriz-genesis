@@ -14,7 +14,7 @@ import { enrichSpecs, type SpecForEnrichment } from "../services/specEnrichment.
 import { computeFactoryCertificate, computeFactoryCertificates, factoryCertificateEnabled } from "../services/factoryCertificate.js";
 import { validateIntake } from "../services/intakeGate.js";
 import { checkSpecIsMinimallyValid } from "../services/specSemanticGate.js";
-import { resolveWorkbenchLlm, agentsLlmFields } from "../services/tenantLlmConfig.js";
+import { resolveWorkbenchLlm, agentsLlmFields, LlmSlotNotConfiguredError } from "../services/tenantLlmConfig.js";
 import { recordSelfApproval } from "../services/governanceAudit.js";
 import {
   ZIP_TEXT_EXTS,
@@ -401,11 +401,25 @@ export async function specRoutes(app: FastifyInstance) {
         return reply.status(503).send({ code: "SERVICE_UNAVAILABLE", message: "Serviço de agentes não configurado" });
       }
 
+      // 2026-10-02: a prévia era o ÚNICO caminho do CTO sem o slot do tenant — o envelope ia sem
+      // `llm_config` e os agents caíam no env (`anthropic` sem chave) ⇒ 400 no "criar demo" mesmo
+      // com slot Bedrock válido. Agora usa o MESMO slot da Bancada/Fábrica, e sem slot falha aqui.
+      const user = getUser(request);
+      let llm: Record<string, unknown>;
+      try {
+        llm = agentsLlmFields(await resolveWorkbenchLlm({ tenantId: user?.tenantId ?? null }));
+      } catch (err) {
+        if (err instanceof LlmSlotNotConfiguredError) {
+          return reply.status(400).send({ code: err.code, message: err.message });
+        }
+        throw err;
+      }
+
       const jobId = `spj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const job: SpecJob = { id: jobId, status: "pending", createdAt: Date.now() };
       _specJobs.set(jobId, job);
 
-      const message = buildCTOMessage(freeText, body.title, getUser(request)?.id ?? null);
+      const message = { ...buildCTOMessage(freeText, body.title, user?.id ?? null), ...llm };
 
       // Fire and forget — setInterval-based, no Promise to await
       runSpecJob(jobId, message, agentsUrl);
