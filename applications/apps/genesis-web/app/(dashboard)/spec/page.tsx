@@ -59,7 +59,7 @@ import PostAddOutlinedIcon from "@mui/icons-material/PostAddOutlined";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { motion, AnimatePresence } from "framer-motion";
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost, apiPostMultipart, apiPut, withQuery } from "@/lib/api";
-import { BudgetFields, budgetError } from "@/components/ProjectBudget";
+import { BudgetFields, budgetError, ProjectBudgetStrip } from "@/components/ProjectBudget";
 import { projectsStore } from "@/stores/projectsStore";
 import { authStore } from "@/stores/authStore";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
@@ -4204,6 +4204,9 @@ export default function SpecPage() {
           }
           actions={specBarActions}
         />
+
+        {/* 2026-10-02: orçamento · gasto · restante de LLM — o valor do envio não aparecia mais na Bancada. */}
+        <ProjectBudgetStrip projectId={editProjectId} />
 
         {/* Centro de avisos: o mais severo em destaque, os demais em linha compacta. Nada some —
             a revisão adversarial vetou esconder "há um laço rodando" atrás de um clique. */}

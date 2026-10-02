@@ -13,6 +13,7 @@ import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
+import Chip from "@mui/material/Chip";
 import FormControl from "@mui/material/FormControl";
 import InputAdornment from "@mui/material/InputAdornment";
 import InputLabel from "@mui/material/InputLabel";
@@ -21,7 +22,9 @@ import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
+import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
+import Link from "next/link";
 import { apiGet, apiPut } from "@/lib/api";
 
 export const ALERT_STEP_OPTIONS = [10, 20, 30, 40, 50] as const;
@@ -78,6 +81,77 @@ interface BudgetSummary {
 
 const usd = (n: number | null | undefined) => (n == null ? "—" : `US$ ${n.toFixed(2)}`);
 const tok = (n: number) => n.toLocaleString("pt-BR");
+
+/** Recorte que a listagem `/api/specs` anexa por card (`budgetBriefs`) — subconjunto do `BudgetSummary`. */
+export interface BudgetBrief {
+  ownerProjectId: string; inherited: boolean;
+  budgetUsd: number | null; spentUsd: number; remainingUsd: number | null;
+  consumedPct: number | null; paused: boolean;
+}
+
+const pctColor = (pct: number | null, paused: boolean) =>
+  paused || (pct ?? 0) >= 90 ? "error" : (pct ?? 0) >= 70 ? "warning" : "primary";
+
+/**
+ * Faixa compacta "orçamento · gasto · restante" (pedido do Jean 2026-10-02: o valor digitado no
+ * envio sumia depois que o projeto entrava na Bancada). `dense` = card da listagem /specs.
+ */
+export function BudgetStrip({ brief, dense = false }: { brief: BudgetBrief; dense?: boolean }) {
+  const color = pctColor(brief.consumedPct, brief.paused);
+  const pct = Math.min(100, Math.max(0, brief.consumedPct ?? 0));
+  const remainingColor = (brief.remainingUsd ?? 0) <= 0 ? "error.main" : "text.primary";
+  const label = brief.budgetUsd == null
+    ? "Sem orçamento de LLM definido"
+    : `Orçamento ${usd(brief.budgetUsd)} · gasto ${usd(brief.spentUsd)}${brief.consumedPct != null ? ` (${brief.consumedPct}%)` : ""} · restante `;
+  return (
+    <Box sx={{ minWidth: 0 }}>
+      <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
+        <Typography variant="caption" color="text.secondary" sx={{ fontSize: dense ? "0.7rem" : undefined }}>
+          {!dense && <b>LLM: </b>}{label}
+          {brief.budgetUsd != null && (
+            <Box component="span" sx={{ fontWeight: 700, color: remainingColor }}>{usd(brief.remainingUsd)}</Box>
+          )}
+        </Typography>
+        {brief.paused && (
+          <Chip label="pausado por orçamento" size="small" color="error" variant="outlined"
+            sx={{ fontSize: "0.62rem", height: 18 }} />
+        )}
+        {brief.inherited && (
+          <Tooltip title="Este projeto usa o orçamento do projeto de origem (divisão).">
+            <Chip label="herdado" size="small" variant="outlined" sx={{ fontSize: "0.62rem", height: 18 }} />
+          </Tooltip>
+        )}
+      </Stack>
+      {brief.budgetUsd != null && (
+        <LinearProgress variant="determinate" value={pct} color={color}
+          aria-label={`Orçamento de LLM consumido: ${pct}%`}
+          sx={{ mt: 0.5, height: dense ? 3 : 4, borderRadius: 2, maxWidth: dense ? 260 : 420 }} />
+      )}
+    </Box>
+  );
+}
+
+/** Faixa da tela de edição da Bancada: busca o resumo e oferece o atalho para ajustar. */
+export function ProjectBudgetStrip({ projectId }: { projectId: string }) {
+  const [brief, setBrief] = useState<BudgetBrief | null>(null);
+  useEffect(() => {
+    let alive = true;
+    apiGet<BudgetSummary>(`/api/projects/${projectId}/budget`)
+      .then((s) => { if (alive) setBrief(s); })
+      .catch(() => { if (alive) setBrief(null); });
+    return () => { alive = false; };
+  }, [projectId]);
+  if (!brief) return null;
+  return (
+    <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap
+      sx={{ mb: 2, px: 1.5, py: 1, border: "1px solid", borderColor: "divider", borderRadius: 1, bgcolor: "background.paper" }}>
+      <Box sx={{ flex: "1 1 0", minWidth: 220 }}><BudgetStrip brief={brief} /></Box>
+      <Button component={Link} href={`/projects/${brief.ownerProjectId}`} size="small" variant="text">
+        Ajustar orçamento
+      </Button>
+    </Stack>
+  );
+}
 
 export function ProjectBudgetCard({ projectId, readOnly = false }: { projectId: string; readOnly?: boolean }) {
   const [data, setData] = useState<BudgetSummary | null>(null);

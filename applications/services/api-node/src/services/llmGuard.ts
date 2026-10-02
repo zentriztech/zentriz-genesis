@@ -631,6 +631,49 @@ export async function budgetSummary(db: Queryable, projectId: string) {
   };
 }
 
+export interface BudgetBrief {
+  ownerProjectId: string;
+  inherited: boolean;
+  budgetUsd: number | null;
+  spentUsd: number;
+  remainingUsd: number | null;
+  consumedPct: number | null;
+  paused: boolean;
+}
+
+/**
+ * Resumo CURTO em lote para listagens (cards de /specs): orçamento, gasto e saldo do DONO de cada
+ * projeto — mesmas contas do `budgetSummary`, sem previsão. UMA query para N projetos, para a
+ * listagem não virar N chamadas a `/api/projects/:id/budget`.
+ */
+export async function budgetBriefs(db: Queryable, projectIds: string[]): Promise<Map<string, BudgetBrief>> {
+  const ids = projectIds.filter((id) => UUID_RE.test(id));
+  const out = new Map<string, BudgetBrief>();
+  if (!ids.length) return out;
+  const res = await db.query(
+    `SELECT p.id, o.id AS owner_id, o.budget_usd, o.budget_paused_at,
+            COALESCE((SELECT SUM(l.cost_usd) FROM llm_call_ledger l WHERE l.budget_project_id = o.id), 0) AS spent
+       FROM projects p
+       JOIN projects o ON o.id = COALESCE(p.budget_owner_project_id, p.id)
+      WHERE p.id = ANY($1::uuid[])`,
+    [ids],
+  );
+  for (const r of res.rows) {
+    const budget = r.budget_usd == null ? null : num(r.budget_usd);
+    const spent = num(r.spent);
+    out.set(String(r.id), {
+      ownerProjectId: String(r.owner_id),
+      inherited: String(r.owner_id) !== String(r.id),
+      budgetUsd: budget,
+      spentUsd: Math.round(spent * 10000) / 10000,
+      remainingUsd: budget == null ? null : Math.round((budget - spent) * 100) / 100,
+      consumedPct: budget && budget > 0 ? Math.round((spent / budget) * 1000) / 10 : null,
+      paused: !!r.budget_paused_at,
+    });
+  }
+  return out;
+}
+
 /**
  * Gate de DISPARO (run/promote/cascata/watchdog): não deixa a Fábrica começar um run que o guard
  * vai negar na primeira chamada — sem isto o watchdog relançaria o run negado em laço (sem custo,

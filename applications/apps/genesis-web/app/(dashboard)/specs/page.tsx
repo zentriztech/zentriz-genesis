@@ -78,6 +78,7 @@ import {
 } from "@/components/PromotionPlanDialog";
 import { ConfirmActionDialog } from "@/components/ConfirmActionDialog";
 import ActionOverflowBar, { type BarAction } from "@/components/ActionOverflowBar";
+import { BudgetStrip, type BudgetBrief } from "@/components/ProjectBudget";
 // Padronização 2026-09-06: rótulo/tooltip/texto de resultado das ações de fábrica vêm de UM módulo.
 import {
   FACTORY_LABEL, FACTORY_TOOLTIP, PROMOTED_SPEC_NOTICE, promoteConfirmBody, promotedProductNotice,
@@ -122,6 +123,8 @@ interface SpecItem {
   // Certificado Genesis Factory — só vem quando FACTORY_CERTIFICATE=on. Ausente/`null`
   // (flag off ou falha no cálculo) → a tela cai no readiness legado.
   factoryCertificate?: FactoryCertificate | null;
+  /** 2026-10-02 — orçamento · gasto · restante de LLM (`budgetBriefs`). Ausente/`null` → sem faixa. */
+  budget?: BudgetBrief | null;
 }
 // Onda 4 — GET /api/products/proposals (tenant-scoped). Uma proposta é o job do Product
 // Architect: em análise (pending/running), pronta para revisão (done sem consumo), salva
@@ -742,6 +745,7 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
               </Typography>
               {s.estimate && <EstimateChip estimate={s.estimate} />}
             </Stack>
+            {s.budget && <Box sx={{ mt: 0.75 }}><BudgetStrip brief={s.budget} dense /></Box>}
           </Box>
           {!isMaster && (
             // `minWidth: 0` + `maxWidth: 100%`: sem isso a faixa de ações tem a largura do próprio

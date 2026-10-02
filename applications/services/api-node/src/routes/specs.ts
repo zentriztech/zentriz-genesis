@@ -1,4 +1,4 @@
-import { ALERT_STEP_OPTIONS } from "../services/llmGuard.js";
+import { ALERT_STEP_OPTIONS, budgetBriefs, type BudgetBrief } from "../services/llmGuard.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import path from "path";
 import AdmZip from "adm-zip";
@@ -526,14 +526,19 @@ export async function specRoutes(app: FastifyInstance) {
         // Promover apareceu habilitado numa spec que a API só podia recusar.
         const statusById = new Map(rows.map((r) => [String((r as Record<string, unknown>).id), (r as Record<string, unknown>).status as string | null]));
         const promotionOf = (id: string) => decideSpecPromotability(statusById.get(id) ?? null, normOf(id));
+        // 2026-10-02 (pedido do Jean): orçamento/gasto/saldo de LLM no card. Lote de 1 query; falha
+        // ⇒ `budget: null` (o card some com o bloco, a listagem não quebra).
+        const budgets = await budgetBriefs(client, enriched.map((s) => s.id))
+          .catch((err) => { request.log.warn({ err }, "budget briefs failed; specs sem orçamento"); return new Map<string, BudgetBrief>(); });
+        const budgetOf = (id: string) => budgets.get(id) ?? null;
         if (factoryCertificateEnabled()) {
           const certs = await computeFactoryCertificates(client as unknown as { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> }, enriched.map((s) => s.id))
             .catch((err) => { request.log.warn({ err }, "factory certificate failed; specs sem selo"); return new Map(); });
           return reply.send(enriched.map((s) => ({
-            ...s, factoryCertificate: certs.get(s.id) ?? null, normalized: normOf(s.id), promotion: promotionOf(s.id),
+            ...s, factoryCertificate: certs.get(s.id) ?? null, normalized: normOf(s.id), promotion: promotionOf(s.id), budget: budgetOf(s.id),
           })));
         }
-        return reply.send(enriched.map((s) => ({ ...s, normalized: normOf(s.id), promotion: promotionOf(s.id) })));
+        return reply.send(enriched.map((s) => ({ ...s, normalized: normOf(s.id), promotion: promotionOf(s.id), budget: budgetOf(s.id) })));
       } catch (err) {
         request.log.warn({ err }, "spec enrichment failed; returning bare specs");
         return reply.send(rows);
