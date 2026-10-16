@@ -4306,7 +4306,13 @@ export default function SpecPage() {
         {/* 16/10 — em que etapa a spec está e o próximo comando (o MESMO da barra). */}
         {journey && journey.phase !== "unknown" && (
           <FactoryJourneyStrip
-            journey={journeyActionLabel ? { ...journey, actionLabel: journeyActionLabel } : journey}
+            // "· em <spec>" só quando quem trava é OUTRA spec da pasta — sobre a própria spec aberta
+            // era redundante e quebrava a frase em duas linhas.
+            journey={{
+              ...journey,
+              ...(journeyActionLabel ? { actionLabel: journeyActionLabel } : {}),
+              ...(journeyElsewhere ? {} : { blockingProjectTitle: null }),
+            }}
             onAction={journey.action && journey.action !== "promote" ? runJourneyAction : undefined}
             busy={(journey.action === "normalize" && normalizing) || (journey.action === "promote" && approving === "start")}
             disabled={approving !== null || (normalizing && journey.action !== "normalize")}
