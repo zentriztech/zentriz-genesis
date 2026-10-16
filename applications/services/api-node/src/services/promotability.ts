@@ -39,7 +39,7 @@ export type PromotionBlockReason = "NOT_ON_WORKBENCH" | "NOT_NORMALIZED" | "CONN
  */
 export type FactoryReadiness =
   | { ok: true }
-  | { ok: false; reason: "CONNECT_MISSING" | "NOT_VALIDATED"; code: string; message: string; projectId?: string };
+  | { ok: false; reason: "CONNECT_MISSING" | "NOT_VALIDATED"; code: string; message: string; projectId?: string; projectTitle?: string };
 
 export interface Promotability {
   /** `true` pode · `false` não pode · `null` não foi possível decidir (botão continua visível). */
@@ -53,6 +53,12 @@ export interface Promotability {
   normalized: boolean | null;
   /** Código do gate que recusou (`SPEC_VALIDATION_BLOCKED`, `CONNECT_DECLARATION_MISSING`…) — só em recusa de prontidão. */
   code?: string | null;
+  /**
+   * QUAL spec travou a prontidão (no produto, a primeira que falhou). A tela precisa dele para
+   * levar o usuário direto ao arquivo certo — "falta validar" sem dizer onde não é acionável.
+   */
+  blockingProjectId?: string | null;
+  blockingProjectTitle?: string | null;
 }
 
 /** Único estado de produto que a Fábrica aceita promover (`routes/products.ts`). */
@@ -138,7 +144,7 @@ export async function assessProductReadiness(db: Queryable, productId: string): 
   const projects = (await loadProductProjects(db, productId)).filter((p) => p.status === "draft");
   for (const p of projects) {
     const r = await assessProjectReadiness(db, p.projectId);
-    if (!r.ok) return { ...r, message: `${p.title}: ${r.message}` };
+    if (!r.ok) return { ...r, projectTitle: p.title, message: `${p.title}: ${r.message}` };
   }
   return { ok: true };
 }
@@ -173,7 +179,12 @@ export function decidePromotability(
   if (!normalized) return { canPromote: false, reason: "NOT_NORMALIZED", message: MSG_NOT_NORMALIZED, status, normalized: false };
   const r = args.readiness;
   if (r === null) return { canPromote: null, reason: null, message: null, status, normalized: true };
-  if (r && !r.ok) return { canPromote: false, reason: r.reason, message: r.message, code: r.code, status, normalized: true };
+  if (r && !r.ok) {
+    return {
+      canPromote: false, reason: r.reason, message: r.message, code: r.code, status, normalized: true,
+      blockingProjectId: r.projectId ?? null, blockingProjectTitle: r.projectTitle ?? null,
+    };
+  }
   return { canPromote: true, reason: null, message: null, status, normalized: true };
 }
 

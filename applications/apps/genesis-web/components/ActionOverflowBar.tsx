@@ -60,6 +60,12 @@ export interface BarAction {
    * "Promover"). Só faz sentido uma por barra; se houver mais, todas viram botão.
    */
   primary?: boolean;
+  /**
+   * Comando SECUNDÁRIO do fluxo (16/10, pedido do Jean): mora no ⋮ em QUALQUER largura. Sem isso,
+   * no desktop todo comando virava botão com o mesmo peso — "Descartar" e "Modo autônomo" ao lado de
+   * "Normalizar", sem ordem de uso. O ⋮ do desktop só aparece se houver algum `menuOnly`.
+   */
+  menuOnly?: boolean;
 }
 
 interface Props {
@@ -80,7 +86,9 @@ export default function ActionOverflowBar({
   actions, leading, breakpoint = "md", ariaLabel = "Ações",
 }: Props) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
-  const naBarra = actions.filter((a) => !a.mobileOnly);
+  const [deskAnchor, setDeskAnchor] = useState<HTMLElement | null>(null);
+  const naBarra = actions.filter((a) => !a.mobileOnly && !a.menuOnly);
+  const soNoMenu = actions.filter((a) => a.menuOnly && !a.mobileOnly);
   // Quando colapsado: estas continuam na barra — `primarias` com rótulo, `fixas` como ícone — e por
   // isso saem do menu (duplicar o mesmo comando lado a lado é o defeito que este componente existe
   // para evitar).
@@ -93,6 +101,40 @@ export default function ActionOverflowBar({
     ? { xs: "none" } : { xs: "none", [breakpoint]: "flex" };
   const displayIcone: Record<string, string> = sempreColapsado
     ? { xs: "flex" } : { xs: "flex", [breakpoint]: "none" };
+
+  // Um menu só, usado pelo ⋮ do desktop (`menuOnly`) e pelo ⋮ colapsado — os dois têm de listar
+  // o comando do mesmo jeito (rótulo + explicação na 2ª linha).
+  const renderMenu = (items: BarAction[], anc: HTMLElement | null, close: () => void) => (
+    <Menu
+      anchorEl={anc} open={!!anc} onClose={close}
+      anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+      transformOrigin={{ vertical: "top", horizontal: "right" }}
+      slotProps={{ paper: { sx: { maxWidth: 320 } } }}
+    >
+      {items.map((a, i) => (
+        <MenuItem
+          key={a.key} disabled={a.disabled}
+          // O anchor entregue é o ÍCONE da barra, não o item: o item desaparece com o menu, e um
+          // menu ancorado em nó desmontado pula para o canto da tela.
+          onClick={() => { close(); a.onClick(anc ?? document.body); }}
+          sx={{ alignItems: "flex-start", py: 1, ...(i > 0 && a.mobileOnly !== items[i - 1]?.mobileOnly ? { borderTop: "1px solid", borderColor: "divider" } : {}) }}
+        >
+          <ListItemIcon sx={{ minWidth: 32, mt: 0.25 }}>
+            {a.busy ? <CircularProgress size={14} color="inherit" /> : a.icon}
+          </ListItemIcon>
+          <ListItemText
+            primary={<Typography variant="body2" fontWeight={a.variant === "contained" ? 700 : 500}>{a.label}</Typography>}
+            secondary={a.tooltip
+              ? (
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.4, whiteSpace: "normal" }}>
+                  {a.tooltip}
+                </Typography>
+              )
+              : null}
+          />
+        </MenuItem>
+      ))}
+    </Menu>  );
 
   return (
     <>
@@ -115,6 +157,17 @@ export default function ActionOverflowBar({
             ? <Tooltip key={a.key} title={a.tooltip}><span>{botao}</span></Tooltip>
             : <Box key={a.key} component="span">{botao}</Box>;
         })}
+        {soNoMenu.length > 0 && (
+          <>
+            <Tooltip title={`Mais ações — ${ariaLabel}`}>
+              <IconButton size="small" aria-label={`Mais ações — ${ariaLabel}`} onClick={(e) => setDeskAnchor(e.currentTarget)}
+                sx={{ flexShrink: 0 }}>
+                <MoreVertIcon sx={{ fontSize: "1.2rem" }} />
+              </IconButton>
+            </Tooltip>
+            {renderMenu(soNoMenu, deskAnchor, () => setDeskAnchor(null))}
+          </>
+        )}
       </Stack>
 
       {/* < breakpoint: a primária (com rótulo), as fixas como ícone, o resto no ⋮. */}
@@ -156,41 +209,15 @@ export default function ActionOverflowBar({
             </span>
           </Tooltip>
         ))}
-        <Tooltip title={ariaLabel}>
-          <IconButton size="small" aria-label={ariaLabel} onClick={(e) => setAnchor(e.currentTarget)}>
-            <MoreVertIcon sx={{ fontSize: "1.2rem" }} />
-          </IconButton>
-        </Tooltip>
-        <Menu
-          anchorEl={anchor} open={!!anchor} onClose={() => setAnchor(null)}
-          anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
-          transformOrigin={{ vertical: "top", horizontal: "right" }}
-          slotProps={{ paper: { sx: { maxWidth: 320 } } }}
-        >
-          {noMenu.map((a, i) => (
-            <MenuItem
-              key={a.key} disabled={a.disabled}
-              // O anchor entregue é o ÍCONE da barra, não o item: o item desaparece com o menu, e um
-              // menu ancorado em nó desmontado pula para o canto da tela.
-              onClick={() => { setAnchor(null); a.onClick(anchor ?? document.body); }}
-              sx={{ alignItems: "flex-start", py: 1, ...(i > 0 && a.mobileOnly !== noMenu[i - 1]?.mobileOnly ? { borderTop: "1px solid", borderColor: "divider" } : {}) }}
-            >
-              <ListItemIcon sx={{ minWidth: 32, mt: 0.25 }}>
-                {a.busy ? <CircularProgress size={14} color="inherit" /> : a.icon}
-              </ListItemIcon>
-              <ListItemText
-                primary={<Typography variant="body2" fontWeight={a.variant === "contained" ? 700 : 500}>{a.label}</Typography>}
-                secondary={a.tooltip
-                  ? (
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.4, whiteSpace: "normal" }}>
-                      {a.tooltip}
-                    </Typography>
-                  )
-                  : null}
-              />
-            </MenuItem>
-          ))}
-        </Menu>
+        {/* ⋮ só quando há o que listar: um menu vazio é um clique que não leva a nada. */}
+        {noMenu.length > 0 && (
+          <Tooltip title={ariaLabel}>
+            <IconButton size="small" aria-label={ariaLabel} onClick={(e) => setAnchor(e.currentTarget)} sx={{ flexShrink: 0 }}>
+              <MoreVertIcon sx={{ fontSize: "1.2rem" }} />
+            </IconButton>
+          </Tooltip>
+        )}
+        {renderMenu(noMenu, anchor, () => setAnchor(null))}
       </Box>
     </>
   );

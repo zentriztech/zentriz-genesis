@@ -90,8 +90,11 @@ export interface PromotionVerdict {
   reason: string | null;
   message: string | null;
   normalized: boolean | null;
-  /** Código fino do gate (ex.: `SPEC_WARNINGS_UNACKED`, `BLOCKED`) — escolhe a ação sugerida. */
+  /** Código fino do gate (ex.: `SPEC_WARNINGS_UNACKED`, `SPEC_VALIDATION_BLOCKED`) — escolhe a ação sugerida. */
   code?: string | null;
+  /** Spec que travou a prontidão (no produto, a primeira que falhou) — leva o usuário direto a ela. */
+  blockingProjectId?: string | null;
+  blockingProjectTitle?: string | null;
 }
 
 /** Ordem que o servidor exige para liberar o Promover (`PROMOTION_STEPS` da api). */
@@ -111,7 +114,9 @@ export function promoteNextAction(p: PromotionVerdict | null | undefined): "norm
   if (!p || p.canPromote !== false) return null;
   if (p.reason === "NOT_NORMALIZED" || p.reason === "CONNECT_MISSING") return "normalize";
   if (p.reason === "NOT_VALIDATED") {
-    return p.code === "SPEC_WARNINGS_UNACKED" || p.code === "BLOCKED" ? "gaps" : "validate";
+    // O servidor emite `SPEC_VALIDATION_BLOCKED` (não `BLOCKED`): com o nome errado, um GAP crítico
+    // sugeria "Validar agora" — revalidar a mesma spec só reproduz o mesmo bloqueio.
+    return p.code === "SPEC_WARNINGS_UNACKED" || p.code === "SPEC_VALIDATION_BLOCKED" ? "gaps" : "validate";
   }
   return null;
 }

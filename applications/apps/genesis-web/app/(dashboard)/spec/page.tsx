@@ -68,9 +68,11 @@ import { tenantScopeStore } from "@/stores/tenantScopeStore";
 import {
   FACTORY_LABEL, FACTORY_TOOLTIP, PROMOTE_CONFIRM_WORD, PROMOTED_SPEC_NOTICE,
   PROMOTE_HIDDEN_UNTIL_NORMALIZED, normalizedSpecNotice, normalizedProductNotice,
-  promoteNextAction, type ConnectEnsure,
+  type ConnectEnsure, type PromotionVerdict,
   promoteButtonLabel, promoteConfirmBody, promotedProductNotice, type PromoteScope,
 } from "@/lib/factoryActions";
+import { journeyFromVerdict } from "@/lib/factoryJourney";
+import { FactoryJourneyStrip } from "@/components/FactoryJourney";
 import { DecomposeDialog, describeEstimate, estimateProposal, type DecomposeSpecRef } from "@/components/DecomposeDialog";
 // UI/UX 2026-09-06 — `SpecTreePanel` (a segunda lista de arquivos, com editor próprio) saiu daqui:
 // a lista única é o `ProductFolderNav` abaixo e o editor é o desta página. O arquivo do componente
@@ -1942,6 +1944,15 @@ export default function SpecPage() {
   const [promotionSignal, setPromotionSignal] = useState(0);
   // Bump para trazer o editor à aba GAPs (pós-salvar rascunho → revalidação ao vivo).
   const [openGapsSignal, setOpenGapsSignal] = useState(0);
+  // `?tab=gaps` (16/10): o card de /specs leva à etapa Validar/Revisar GAPs — abre a aba UMA vez,
+  // quando o editor já montou (antes disso o sinal se perderia).
+  const tabGapsDone = useRef(false);
+  useEffect(() => {
+    if (tabGapsDone.current || searchParams.get("tab") !== "gaps") return;
+    if (!editProjectId || editLoading || specMarkdown === null) return;
+    tabGapsDone.current = true;
+    setOpenGapsSignal((n) => n + 1);
+  }, [searchParams, editProjectId, editLoading, specMarkdown]);
   // ── Árvore única (UI/UX 2026-09-06) ────────────────────────────────────────────────────────
   // O editor PRINCIPAL passou a editar o arquivo escolhido na lista (antes o `SpecTreePanel` tinha
   // um editor próprio, escondido numa segunda lista). `fileDraft` é o texto não salvo do arquivo;
@@ -3285,10 +3296,6 @@ export default function SpecPage() {
    * o dono, não o estado dele. Agora quem responde "pode promover, e se não, por quê" é a API
    * (`services/promotability.ts`), no MESMO endpoint que o clique usaria.
    */
-  type PromotionVerdict = {
-    canPromote: boolean | null; reason: string | null; message: string | null; normalized: boolean | null;
-    code?: string | null;
-  };
   const [promotion, setPromotion] = useState<PromotionVerdict | null>(null);
   const [normalizing, setNormalizing] = useState(false);
 
@@ -4088,6 +4095,31 @@ export default function SpecPage() {
   // cabeçalho de página viraram UMA barra (`SpecCommandBar`) e (b) ele divergia da toolbar do
   // editor: não tinha [Normalizar] e ignorava o veredito de promoção do servidor — duas barras com
   // regras diferentes para a MESMA ação. Agora as duas leem o mesmo `promotion`/`normalizeHere`.
+  // ── 16/10 (Jean) — JORNADA: a ordem dos comandos segue a etapa em que a spec está ────────────────
+  // Normalizar → Validar → Revisar GAPs → Promover (a ordem que o servidor exige). Só o comando da
+  // etapa ATUAL é primário (cheio, à direita); o que já foi feito ou é ocasional vai para o ⋮. Assim
+  // "Modo autônomo" não aparece antes de existir validação com GAP, e "Descartar" sai do caminho.
+  const journey = promoteScope !== null ? journeyFromVerdict(promotion, null) : null;
+  // No produto, a spec que travou pode ser OUTRA da pasta: aí o comando leva até ela.
+  const journeyElsewhere = !!journey?.blockingProjectId && journey.blockingProjectId !== editProjectId;
+  const runJourneyAction = () => {
+    if (!journey?.action) return;
+    if (journey.action === "normalize") { void normalizeHere(); return; }
+    if (journey.action === "promote") { handlePromote(); return; }
+    if (journeyElsewhere) {
+      router.push(`/spec?editProjectId=${journey.blockingProjectId}${treeProductId ? `&productId=${treeProductId}` : ""}&tab=gaps`);
+      return;
+    }
+    if (journey.action === "validate") { void validateFromPromotion(); return; }
+    setOpenGapsSignal((n) => n + 1);   // ack / gaps: os comandos moram na aba GAPs
+  };
+  const journeyActionLabel = journey?.actionLabel
+    ? (journeyElsewhere && journey.blockingProjectTitle ? `${journey.actionLabel} em ${journey.blockingProjectTitle}` : journey.actionLabel)
+    : null;
+  const atReview = journey?.current === "review";
+  // A faixa mostra o comando das etapas 1–3; o Promover (etapa 4) fica na barra — é a decisão final.
+  const journeyStripShown = !!journey && journey.phase !== "unknown";
+
   const specBarActions: BarAction[] = [
     // No mobile o gatilho dos relatórios é um item do menu; a lista dos três perfis é a instância
     // `hosted` passada em `trailing`, ancorada no ícone da barra.
@@ -4119,10 +4151,15 @@ export default function SpecPage() {
       disabled: autonomyLoopRunning || autonomyStarting || autonomy?.enabled === false || (gapCount ?? 0) === 0,
       busy: autonomyStarting,
       variant: "outlined", color: "secondary",
+      // Só à vista quando é útil: na etapa de revisar GAPs (há validação e há GAP) ou com o laço
+      // rodando. Antes disso o laço não tem o que resolver — fica no ⋮.
+      menuOnly: !(autonomyLoopRunning || (atReview && (gapCount ?? 0) > 0)),
       onClick: () => { setAutonomyStartText(""); setAutonomyStartOpen(true); },
     },
     {
       key: "discard", label: "Descartar", color: "inherit",
+      tooltip: "Sai da Bancada sem salvar o que não foi salvo",
+      menuOnly: true,
       onClick: () => router.push(`/projects/${editProjectId}`),
     },
     // [Normalizar] — escreve RFC/ADR/registro de decisão a partir do que a spec já diz. Existia só
@@ -4132,12 +4169,15 @@ export default function SpecPage() {
         key: "normalize",
         label: normalizing
           ? FACTORY_LABEL.normalizing
-          : (promotion?.normalized === true ? FACTORY_LABEL.renormalize : FACTORY_LABEL.normalize),
+          : (promotion?.normalized === true && journey?.action !== "normalize" ? FACTORY_LABEL.renormalize : FACTORY_LABEL.normalize),
         icon: <ArchitectureOutlinedIcon sx={{ fontSize: "0.95rem" }} />,
         tooltip: promoteScope === "spec" ? FACTORY_TOOLTIP.normalizeSpec : FACTORY_TOOLTIP.normalize,
         disabled: normalizing || approving !== null,
         busy: normalizing,
-        variant: "outlined", color: "info",
+        // Primário só na 1ª etapa; depois "Normalizar de novo" é refazer, não o próximo passo.
+        ...(journey?.current === "normalize" && !journeyStripShown
+          ? { variant: "contained" as const, color: "info" as const, primary: true }
+          : { variant: "outlined" as const, color: "info" as const, menuOnly: journey !== null && journey.phase !== "unknown" }),
         onClick: () => { void normalizeHere(); },
       } as BarAction]
       : []),
@@ -4155,6 +4195,21 @@ export default function SpecPage() {
       keepInBar: true,
       onClick: handleSaveCurrent,
     },
+    // Etapas 2 e 3 (Validar · Revisar GAPs): o comando mora na FAIXA da jornada, ao lado do porquê.
+    // Na barra ele só aparece se a faixa não estiver na tela (repetir o mesmo botão a 80 px de
+    // distância é o defeito que a SpecCommandBar foi criada para eliminar).
+    ...(journey && !journeyStripShown && journeyActionLabel && (journey.action === "validate" || journey.action === "ack" || journey.action === "gaps")
+      ? [{
+        key: "journey", label: journeyActionLabel,
+        icon: <FactCheckOutlinedIcon sx={{ fontSize: "0.95rem" }} />,
+        tooltip: journey.detail ?? journey.headline,
+        disabled: approving !== null || normalizing,
+        variant: "contained",
+        color: journey.severity === "error" ? "error" : journey.severity === "warning" ? "warning" : "primary",
+        primary: true,
+        onClick: runJourneyAction,
+      } as BarAction]
+      : []),
     // Onda 3 (b): promover ADMITE a spec na fábrica. O rótulo diz o escopo real (produto inteiro ×
     // só esta spec) — fonte única em factoryActions. 2026-09-11: some quando o SERVIDOR já disse
     // que não pode; o motivo aparece no centro de avisos, para o lugar não ficar mudo.
@@ -4166,7 +4221,7 @@ export default function SpecPage() {
         icon: <RocketLaunchIcon sx={{ fontSize: "0.95rem" }} />,
         tooltip: promoteScope === "spec" ? FACTORY_TOOLTIP.promoteSpec : FACTORY_TOOLTIP.promoteProduct,
         disabled: !!approving, busy: approving === "start",
-        variant: "contained", color: "success",
+        variant: "contained", color: "success", primary: true,
         onClick: handlePromote,
       } as BarAction]),
   ];
@@ -4215,20 +4270,12 @@ export default function SpecPage() {
       actionLabel: recoveredSpec ? "Recuperar no editor" : undefined,
       onAction: recoveredSpec ? handleApplyRecovered : undefined,
     },
-    // O [Promover] sai da barra quando o servidor já disse que não vai funcionar — mas o motivo
-    // tem de estar escrito na tela (pedido do Jean, 2026-09-11).
-    // 16/10 (VNX Judge): o aviso diz O QUE falta e oferece a ação que destrava (antes era sempre
-    // "aparece depois de normalizar", mesmo quando faltava validar ou o connect.yaml).
-    promotion?.canPromote === false && {
+    // O motivo de o [Promover] não estar na barra (pedido do Jean, 2026-09-11) agora é a faixa da
+    // JORNADA (`FactoryJourneyStrip`, abaixo da barra): etapa atual + frase curta + o comando. Só
+    // quando a jornada não sabe dizer (código novo do gate) o texto do servidor volta como aviso.
+    promotion?.canPromote === false && journey?.phase === "blocked" && journey.current === null && {
       key: "promote-blocked", severity: "info" as const,
       text: promotion.message ?? PROMOTE_HIDDEN_UNTIL_NORMALIZED,
-      ...(() => {
-        const next = promoteNextAction(promotion);
-        if (next === "normalize") return { actionLabel: FACTORY_LABEL.normalize, onAction: () => { void normalizeHere(); } };
-        if (next === "validate") return { actionLabel: "Validar agora", onAction: () => { void validateFromPromotion(); } };
-        if (next === "gaps") return { actionLabel: "Ver GAPs", onAction: () => setOpenGapsSignal((n) => n + 1) };
-        return {};
-      })(),
     },
   ];
 
@@ -4255,6 +4302,16 @@ export default function SpecPage() {
           }
           actions={specBarActions}
         />
+
+        {/* 16/10 — em que etapa a spec está e o próximo comando (o MESMO da barra). */}
+        {journey && journey.phase !== "unknown" && (
+          <FactoryJourneyStrip
+            journey={journeyActionLabel ? { ...journey, actionLabel: journeyActionLabel } : journey}
+            onAction={journey.action && journey.action !== "promote" ? runJourneyAction : undefined}
+            busy={(journey.action === "normalize" && normalizing) || (journey.action === "promote" && approving === "start")}
+            disabled={approving !== null || (normalizing && journey.action !== "normalize")}
+          />
+        )}
 
         {/* 2026-10-02: orçamento · gasto · restante de LLM — o valor do envio não aparecia mais na Bancada. */}
         <ProjectBudgetStrip projectId={editProjectId} />

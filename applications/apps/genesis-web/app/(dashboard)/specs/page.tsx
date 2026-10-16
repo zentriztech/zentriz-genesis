@@ -85,6 +85,9 @@ import {
   normalizedSpecNotice, normalizedProductNotice, promoteGate, normalizeLabel, connectNotice, type ConnectEnsure,
   type PromotionVerdict,
 } from "@/lib/factoryActions";
+import { journeyFromVerdict, type Journey } from "@/lib/factoryJourney";
+import { FactoryJourneyCompact } from "@/components/FactoryJourney";
+import FactCheckOutlinedIcon from "@mui/icons-material/FactCheckOutlined";
 
 interface SpecItem {
   id: string;
@@ -634,10 +637,35 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
    * ação do fluxo — e o resto no ⋮. Acima de `lg` a barra completa volta, porque lá os cinco cabem
    * em uma linha e esconder alvo sem ganhar espaço seria perda pura.
    */
+  /**
+   * 16/10 (Jean): o botão PRIMÁRIO é o da etapa atual da jornada (Normalizar → Validar → Revisar
+   * GAPs → Promover). Validar e revisar GAPs moram na Bancada (aba GAPs), então aqui o comando LEVA
+   * até lá — não dispara nada pago a partir da lista.
+   */
+  const openGapsTab = (projectId: string, productId?: string | null) =>
+    router.push(`/spec?editProjectId=${projectId}${productId ? `&productId=${productId}` : ""}&tab=gaps`);
+  const journeyStepAction = (j: Journey, projectId: string, productId?: string | null): BarAction | null => {
+    if (j.action !== "validate" && j.action !== "ack" && j.action !== "gaps") return null;
+    const target = j.blockingProjectId ?? projectId;
+    return {
+      key: "journey", label: j.actionLabel ?? "Abrir GAPs",
+      icon: <FactCheckOutlinedIcon sx={{ fontSize: "0.9rem" }} />,
+      tooltip: `${j.headline}${j.blockingProjectTitle ? ` (${j.blockingProjectTitle})` : ""} — abre a spec na aba GAPs da Bancada.`,
+      variant: "contained", color: j.severity === "error" ? "error" : j.severity === "warning" ? "warning" : "primary",
+      primary: true,
+      onClick: () => openGapsTab(target, productId),
+    };
+  };
+
   const specCardActions = (s: SpecItem): BarAction[] => {
     const busy = busyId === s.id;
     const gate = promoteGate(s.promotion, s.normalized ?? null);
     const normalizado = (s.promotion?.normalized ?? s.normalized) === true;
+    const journey = journeyFromVerdict(s.promotion, s.normalized ?? null);
+    // Organizar (vincular/decompor) vem ANTES de documentar: só fica à vista enquanto a spec ainda
+    // está na 1ª etapa. Depois disso continua no ⋮ — refazer é legítimo, mas não é o próximo passo.
+    const earlyStage = journey.current === "normalize" || journey.phase === "unknown";
+    const normalizar = journey.action === "normalize" || (journey.phase === "unknown" && !normalizado);
     const acoes: BarAction[] = [
       {
         key: "edit", label: "Editar", icon: <EditIcon sx={{ fontSize: "0.9rem" }} />,
@@ -648,7 +676,7 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
       {
         key: "link", label: "Vincular", icon: <LinkIcon sx={{ fontSize: "0.9rem" }} />,
         tooltip: "Move esta spec para um produto (ou de volta à caixa de entrada)",
-        variant: "outlined", disabled: busy,
+        variant: "outlined", disabled: busy, menuOnly: !earlyStage,
         onClick: () => { setLinkTarget(s); setLinkProductId(s.product_id ?? ""); },
       },
     ];
@@ -658,7 +686,7 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
       acoes.push({
         key: "decompose", label: "Decompor", icon: <CallSplitIcon sx={{ fontSize: "0.9rem" }} />,
         tooltip: "Quebra a spec em vários projetos (proposta do Product Architect)",
-        variant: "outlined", color: "secondary", disabled: busy,
+        variant: "outlined", color: "secondary", disabled: busy, menuOnly: !earlyStage,
         onClick: () => setDecomposeSpec({ id: s.id, title: s.title }),
       });
     }
@@ -666,13 +694,18 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
     // novo" (refazer por cima é legítimo: a spec pode ter mudado de intenção) e deixa de ser primária.
     acoes.push({
       key: "normalize",
-      label: busy ? FACTORY_LABEL.normalizing : normalizeLabel(s.promotion, s.normalized ?? null),
+      label: busy ? FACTORY_LABEL.normalizing
+        : (journey.action === "normalize" ? FACTORY_LABEL.normalize : normalizeLabel(s.promotion, s.normalized ?? null)),
       icon: <HandymanIcon sx={{ fontSize: "0.9rem" }} />,
       tooltip: FACTORY_TOOLTIP.normalizeSpec,
-      variant: normalizado ? "outlined" : "contained", color: "secondary",
-      disabled: busy, busy, primary: !normalizado,
+      // A etapa manda (não só "está normalizado?"): com o connect.yaml faltando a spec está
+      // normalizada e mesmo assim o próximo passo é Normalizar — é ele que gera o arquivo.
+      variant: normalizar ? "contained" : "outlined", color: "secondary",
+      disabled: busy, busy, primary: normalizar, menuOnly: !normalizar,
       onClick: () => { void normalizeSpec(s.id); },
     });
+    const step = journeyStepAction(journey, s.id, s.product_is_inbox === false ? s.product_id : null);
+    if (step) acoes.push({ ...step, disabled: busy });
     if (gate.show) {
       acoes.push({
         key: "promote", label: FACTORY_LABEL.promoteSpec,
@@ -747,6 +780,11 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
               {s.estimate && <EstimateChip estimate={s.estimate} />}
             </Stack>
             {s.budget && <Box sx={{ mt: 0.75 }}><BudgetStrip brief={s.budget} dense /></Box>}
+            {/* 16/10: em que etapa a spec está e o que falta — no lugar do parágrafo cru do servidor. */}
+            {!isMaster && (() => {
+              const j = journeyFromVerdict(s.promotion, s.normalized ?? null);
+              return j.phase === "unknown" ? null : <Box sx={{ mt: 1, maxWidth: 520 }}><FactoryJourneyCompact journey={j} /></Box>;
+            })()}
           </Box>
           {!isMaster && (
             // `minWidth: 0` + `maxWidth: 100%`: sem isso a faixa de ações tem a largura do próprio
@@ -759,7 +797,9 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
               {/* Pedido do Jean (2026-09-11): promover só APARECE depois de normalizado — e quem
                   decide é o SERVIDOR (`promotability.ts`), que também distingue "falta doc" de "já
                   saiu da Bancada". O lugar dele nunca fica mudo: sem botão, fica o motivo. */}
-              {!gate.show && (
+              {/* O motivo de não haver Promover agora vive na jornada, ao lado do título. Só sobra aqui
+                  quando a jornada não sabe dizer (veredito não conferido). */}
+              {!gate.show && journeyFromVerdict(s.promotion, s.normalized ?? null).phase === "unknown" && (
                 <Typography variant="caption" color="text.secondary" sx={{ alignSelf: "center" }}>
                   {gate.message}
                 </Typography>
@@ -977,7 +1017,9 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                         const first = g.specs[0]?.id;
                         if (first) router.push(`/spec?editProjectId=${first}&productId=${g.productId}`);
                       }}
-                      sx={{ flexGrow: 1 }}>
+                      // Conteúdo no TOPO: o CardActionArea centraliza por padrão e, numa grade com
+                      // rodapés de alturas diferentes, os títulos ficavam desalinhados entre cards.
+                      sx={{ flexGrow: 1, display: "flex", flexDirection: "column", alignItems: "stretch", justifyContent: "flex-start" }}>
                       <CardContent sx={{ pb: 1 }}>
                         <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75 }}>
                           <FolderOpenOutlinedIcon sx={{ fontSize: "1.1rem", color: "#8B5CF6" }} />
@@ -1023,6 +1065,7 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                         const owner = products.find((p) => p.id === g.productId);
                         const norm = owner?.promotion?.normalized ?? owner?.normalized ?? null;
                         const prodGate = promoteGate(owner?.promotion, owner?.normalized ?? null);
+                        const journey = journeyFromVerdict(owner?.promotion, owner?.normalized ?? null);
                         // UI/UX 2026-09-11 — o rodapé do card cabia em UMA linha e ocupava DUAS:
                         // dois botões `fullWidth` `contained` (secondary e success são ambos verdes
                         // no tema) empilhados, sem hierarquia entre eles. Agora é a próxima ação do
@@ -1031,17 +1074,23 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                         const acoesProduto: BarAction[] = [];
                         acoesProduto.push({
                           key: "normalize",
+                          // "de novo" só quando NÃO é a etapa atual (connect.yaml faltando ⇒ é o passo).
                           label: prodBusy ? FACTORY_LABEL.normalizing
-                            : (norm === true ? FACTORY_LABEL.renormalize : FACTORY_LABEL.normalize),
+                            : (norm === true && journey.action !== "normalize" ? FACTORY_LABEL.renormalize : FACTORY_LABEL.normalize),
                           icon: <HandymanIcon sx={{ fontSize: "0.9rem" }} />,
                           tooltip: FACTORY_TOOLTIP.normalize,
                           color: "secondary", variant: "contained",
                           disabled: prodBusy, busy: prodBusy,
-                          // Normalizar é a primária enquanto os documentos NÃO estão em dia: é ele
-                          // que destrava o promover. Em dia, vira "de novo" e cai no menu.
-                          primary: norm !== true,
+                          // Normalizar é a primária enquanto é a ETAPA atual (docs fora de dia OU
+                          // connect.yaml faltando — ele gera). Fora disso vira "de novo" e cai no menu.
+                          primary: journey.action === "normalize" || (journey.phase === "unknown" && norm !== true),
                           onClick: () => { void normalizeProductDocs(g.productId); },
                         });
+                        // 16/10 (Jean): normalizado mas sem Promover, o card mostrava SÓ o ⋮ numa linha
+                        // própria e um parágrafo do servidor embaixo. Agora a etapa atual (Validar /
+                        // Reconhecer avisos / Resolver GAPs) é a primária e leva à spec que travou.
+                        const step = journeyStepAction(journey, g.specs[0]?.id ?? "", g.productId);
+                        if (step && (journey.blockingProjectId || g.specs[0]?.id)) acoesProduto.push({ ...step, disabled: prodBusy });
                         if (prodGate.show) {
                           acoesProduto.push({
                             key: "promote",
@@ -1055,19 +1104,33 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                             onClick: () => setConfirmProduct({ id: g.productId, name: g.name, specs: g.specs.length }),
                           });
                         }
+                        // O lugar do promover nunca fica mudo: a jornada diz a etapa e o motivo REAL
+                        // do servidor (detalhe completo no ⓘ).
+                        const estado = journey.phase !== "unknown"
+                          ? <FactoryJourneyCompact journey={journey} />
+                          : !prodGate.show && (
+                            <Typography variant="caption" color="text.secondary">{prodGate.message}</Typography>
+                          );
+                        const barra = (
+                          <ActionOverflowBar actions={acoesProduto} breakpoint="always"
+                            ariaLabel={`Ações do produto ${g.name}`} />
+                        );
+                        // Sem ação primária (ex.: já na fábrica) o ⋮ ficaria sozinho numa linha:
+                        // ele vai para a direita da jornada, na mesma linha.
+                        if (!acoesProduto.some((a) => a.primary)) {
+                          return (
+                            <Stack direction="row" alignItems="flex-start" spacing={0.5}>
+                              <Box sx={{ flex: "1 1 auto", minWidth: 0 }}>{estado}</Box>
+                              <Box sx={{ flexShrink: 0, display: "flex" }}>{barra}</Box>
+                            </Stack>
+                          );
+                        }
                         return (
-                          <Stack spacing={0.75}>
+                          <Stack spacing={1}>
+                            {estado}
                             <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, "& > *": { minWidth: 0 } }}>
-                              <ActionOverflowBar actions={acoesProduto} breakpoint="always"
-                                ariaLabel={`Ações do produto ${g.name}`} />
+                              {barra}
                             </Box>
-                            {/* O lugar do promover nunca fica mudo: sem ele, o motivo REAL do
-                                servidor ("falta doc" ≠ "já saiu da Bancada") ocupa a linha. */}
-                            {!prodGate.show && (
-                              <Typography variant="caption" color="text.secondary" align="center">
-                                {prodGate.message}
-                              </Typography>
-                            )}
                           </Stack>
                         );
                       })()}

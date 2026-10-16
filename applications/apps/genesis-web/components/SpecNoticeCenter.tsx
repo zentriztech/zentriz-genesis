@@ -66,7 +66,8 @@ export default function SpecNoticeCenter({ notices, sx }: {
         aria-live={principal.live ? "polite" : undefined}
         onClose={principal.onClose}
         action={principal.actionLabel && principal.onAction
-          ? <Button size="small" color="inherit" onClick={principal.onAction}>{principal.actionLabel}</Button>
+          // `nowrap`: medido em 1440 px, "Ver GAPs" quebrava em duas linhas ao lado de um aviso longo.
+          ? <Button size="small" color="inherit" onClick={principal.onAction} sx={{ whiteSpace: "nowrap", flexShrink: 0 }}>{principal.actionLabel}</Button>
           : undefined}
         sx={{ mb: resto.length ? 0.75 : 0, alignItems: "center" }}
       >
@@ -100,7 +101,7 @@ export default function SpecNoticeCenter({ notices, sx }: {
               </Typography>
               {n.actionLabel && n.onAction && (
                 <Button size="small" color="inherit" onClick={n.onAction}
-                  sx={{ flexShrink: 0, fontSize: "0.72rem", py: 0.25, minHeight: 28 }}>
+                  sx={{ flexShrink: 0, whiteSpace: "nowrap", fontSize: "0.72rem", py: 0.25, minHeight: 28 }}>
                   {n.actionLabel}
                 </Button>
               )}

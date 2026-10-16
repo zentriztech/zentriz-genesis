@@ -256,5 +256,7 @@ describe("prontidão (achado do Jean 2026-10-16, VNX Judge) — normalizado NÃO
     const v = await evaluateProductPromotability(DB, { ...PRODUCT, lifecycleStatus: "draft", normalizedHash: "abc" });
     expect(v.canPromote).toBe(false);
     expect(v.reason).toBe("NOT_VALIDATED");
+    // A tela leva direto à spec que travou (16/10): id + título no veredito, não só no texto.
+    expect(v).toMatchObject({ code: "SPEC_VALIDATION_BLOCKED", blockingProjectId: "b", blockingProjectTitle: "Judge Worker" });
   });
 });
