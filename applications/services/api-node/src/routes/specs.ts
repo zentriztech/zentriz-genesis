@@ -1272,8 +1272,19 @@ export async function specRoutes(app: FastifyInstance) {
     const { id } = request.params;
     const proj = await loadAccessibleProject(id, user);
     if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+    // 16/10: sem o slot do tenant o roteador caía em `anthropic` sem chave nos agents (500) —
+    // mesmo com slot Bedrock válido. Usa o MESMO slot da Bancada; sem slot, falha aqui (400).
+    let llm: Record<string, unknown>;
+    try {
+      llm = agentsLlmFields(await resolveWorkbenchLlm({ projectId: id, tenantId: user.tenantId ?? null }));
+    } catch (err) {
+      if (err instanceof LlmSlotNotConfiguredError) {
+        return reply.status(400).send({ code: err.code, message: err.message });
+      }
+      throw err;
+    }
     const { ensureGapScope, toWire } = await import("../services/specGapScope.js");
-    const { scope, routing } = await ensureGapScope(pool, id, { route: true });
+    const { scope, routing } = await ensureGapScope(pool, id, { route: true, llm });
     return reply.send({ ...toWire(scope), routing });
   });
 

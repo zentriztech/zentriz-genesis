@@ -2499,7 +2499,9 @@ export async function specChatRoutes(app: FastifyInstance) {
       let fileGaps: ValidationFinding[] = [];
       if (gapsPerFile) {
         const { ensureGapScope } = await import("../services/specGapScope.js");
-        const { scope, routing } = await ensureGapScope(pool, projectId!, { route: true });
+        // 16/10: o roteador ia sem o slot do tenant ⇒ agents caíam em `anthropic` sem chave (500).
+        const routeLlm = agentsLlmFields(await resolveWorkbenchLlm({ projectId, tenantId: user.tenantId }));
+        const { scope, routing } = await ensureGapScope(pool, projectId!, { route: true, llm: routeLlm });
         if (routing) {
           console.log(`[SpecChat] roteamento de GAPs projeto=${projectId!.slice(0, 8)} routed=${routing.routed} restantes=${routing.stillUnrouted}${routing.skipped ? ` (skip: ${routing.reason})` : ""}`);
         }

@@ -51,6 +51,33 @@ vi.mock("../db/client.js", () => ({
   },
 }));
 
+// O slot do tenant (Bedrock) TEM de chegar ao roteador — sem ele os agents caíam em `anthropic`
+// sem chave (500 em prod, 16/10). `slotState` controla o slot por teste.
+const SLOT = { llm_provider: "bedrock", model_id: "us.anthropic.claude-sonnet-5-5" };
+let slotState: "ok" | "missing" = "ok";
+vi.mock("../services/tenantLlmConfig.js", async (orig) => {
+  const real = await orig<typeof import("../services/tenantLlmConfig.js")>();
+  return {
+    ...real,
+    resolveWorkbenchLlm: async () => {
+      if (slotState === "missing") throw new real.LlmSlotNotConfiguredError();
+      return SLOT;
+    },
+    agentsLlmFields: (o: unknown) => o,
+  };
+});
+const ensureCalls: Array<Record<string, unknown>> = [];
+vi.mock("../services/specGapScope.js", async (orig) => {
+  const real = await orig<typeof import("../services/specGapScope.js")>();
+  return {
+    ...real,
+    ensureGapScope: async (db: unknown, id: string, opts: Record<string, unknown>) => {
+      ensureCalls.push(opts);
+      return real.ensureGapScope(db as Parameters<typeof real.ensureGapScope>[0], id, opts);
+    },
+  };
+});
+
 let app: FastifyInstance;
 beforeEach(async () => {
   const { specRoutes } = await import("./specs.js");
@@ -59,6 +86,8 @@ beforeEach(async () => {
   await app.ready();
   currentUser = { id: USER_ID, role: "user", tenantId: TENANT };
   captured.length = 0;
+  ensureCalls.length = 0;
+  slotState = "ok";
   delete process.env.API_AGENTS_URL;
 });
 afterEach(() => { delete process.env.API_AGENTS_URL; });
@@ -115,6 +144,19 @@ describe("POST /api/specs/:id/gap-routes", () => {
     expect(b.routing).toMatchObject({ skipped: true, routed: 0 });
     expect(b.unrouted).toBe(1);
     expect(captured.some((s) => s.includes("UPDATE spec_validation_runs"))).toBe(false);
+  });
+
+  it("passa o slot de LLM do tenant ao roteador (sem ele os agents caíam em anthropic sem chave)", async () => {
+    expect((await app.inject({ method: "POST", url: `/api/specs/${PROJ}/gap-routes` })).statusCode).toBe(200);
+    expect(ensureCalls).toHaveLength(1);
+    expect(ensureCalls[0]).toMatchObject({ route: true, llm: SLOT });
+  });
+
+  it("tenant sem slot de LLM → 400 com o código do slot, sem rotear", async () => {
+    slotState = "missing";
+    const res = await app.inject({ method: "POST", url: `/api/specs/${PROJ}/gap-routes` });
+    expect(res.statusCode).toBe(400);
+    expect(ensureCalls).toHaveLength(0);
   });
 
   it("token de serviço (runner) → 403 (roteamento é ação paga do dono da spec)", async () => {
