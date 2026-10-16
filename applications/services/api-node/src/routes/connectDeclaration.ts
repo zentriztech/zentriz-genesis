@@ -19,6 +19,7 @@ import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { SPEC_EDITABLE_STATUSES } from "../services/projectStatus.js";
 import { httpPost } from "./specs.js";
 import { generateConnectDeclaration, CONNECT_DECL_PATH } from "../services/connectDeclaration.js";
+import { writeConnectKeepingStamps } from "../services/productNormalizer.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -45,11 +46,13 @@ export async function connectDeclarationRoutes(app: FastifyInstance) {
       const base = agentsUrl.replace(/\/$/, "");
 
       try {
-        const result = await generateConnectDeclaration(
+        // 2026-10-16 (VNX Judge): gravar o connect.yaml vencia o carimbo de normalização e o Promover
+        // sumia. A escrita é do SISTEMA: o que estava em dia antes dela continua em dia (auditado).
+        const { result, restamped } = await writeConnectKeepingStamps(pool, proj.id, () => generateConnectDeclaration(
           pool, proj.id,
           (body) => httpPost(`${base}/invoke/raw`, JSON.stringify(body), 240_000),
           { overwrite: request.body?.overwrite === true },
-        );
+        ), { by: "connect_declaration" });
         if (result.action === "skipped") {
           return reply.status(409).send({
             code: "EXISTS", path: result.path,
@@ -62,6 +65,7 @@ export async function connectDeclarationRoutes(app: FastifyInstance) {
           // GAP-135: a tela precisa saber SOBRE O QUE a declaração foi decidida e quem escolheu a
           // leitura — "gerado com sucesso" sem isso esconde a metade que importa numa spec grande.
           read: result.read,
+          restamped,
         });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);

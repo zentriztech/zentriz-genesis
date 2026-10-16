@@ -55,7 +55,7 @@ import {
   normalizeProduct, computeProductSpecHash, loadProductProjects, isProductNormalized,
   debitNormalizerUsage, NormalizationError, type NormalizeOutcome, type ProductProjectRow,
 } from "../services/productNormalizer.js";
-import { evaluateProductPromotability } from "../services/promotability.js";
+import { assessProductReadiness, evaluateProductPromotability } from "../services/promotability.js";
 
 /** Teto de produtos cujo estado de normalização é recomputado numa listagem (R2 do adversarial). */
 const NORMALIZED_CHECK_MAX_PRODUCTS = 40;
@@ -1254,7 +1254,10 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       if (outcome.status === "already_normalized") {
         return reply.status(200).send({
           productId: id, status: "already_normalized", normalized: true,
-          message: "A spec não mudou desde a última normalização — nada a refazer.",
+          message: outcome.connect?.generated.length
+            ? `A spec não mudou desde a última normalização; o connect.yaml foi gerado para ${outcome.connect.generated.map((g) => g.title).join(", ")} e o carimbo segue em dia.`
+            : "A spec não mudou desde a última normalização — nada a refazer.",
+          connect: outcome.connect ?? null,
         });
       }
       const r = outcome.result!;
@@ -1277,6 +1280,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         warnings: r.warnings,
         truncated: r.truncated,
         rfcProblems: r.rfcProblems,
+        connect: outcome.connect ?? null,
         modelUsed: r.modelUsed,
       });
     },
@@ -1374,6 +1378,18 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
             currentHash: fp.hash,
           });
         }
+      }
+    }
+
+    // TRAVA DE PRONTIDÃO (achado do Jean 2026-10-16, VNX Judge): normalizado NÃO basta — o produto
+    // entrava na Fábrica com GAP blocker ativo e sem `connect.yaml`. Mesma função do veredito da
+    // tela (`assessProductReadiness`). Erro de avaliação NUNCA libera: sobe como 500.
+    {
+      const ready = await assessProductReadiness(pool, id);
+      if (!ready.ok) {
+        return reply.status(409).send({
+          code: ready.reason, gate: ready.code, message: ready.message, projectId: ready.projectId ?? null,
+        });
       }
     }
 

@@ -81,6 +81,16 @@ vi.mock("../services/productLifecycle.js", () => ({
   recomputeProductLifecycle: async () => ({ changed: false }),
 }));
 
+// Gate de prontidão (16/10): connect.yaml + validação. A regra é provada em promotability.test.ts;
+// aqui só se prova que a ROTA respeita o veredito.
+type FakeReadiness = { ok: true } | { ok: false; reason: string; code: string; message: string; projectId?: string };
+let readiness: FakeReadiness = { ok: true };
+vi.mock("../services/promotability.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/promotability.js")>()),
+  assessProjectReadiness: async () => readiness,
+  assessProductReadiness: async () => readiness,
+}));
+
 let app: FastifyInstance;
 
 beforeEach(async () => {
@@ -92,6 +102,7 @@ beforeEach(async () => {
   queryHandler = () => ({ rows: [] });
   currentUser = { id: "u1", role: "zentriz_admin", tenantId: null };
   dispatchSpy.mockClear();
+  readiness = { ok: true };
 });
 
 describe("GET /api/products — escopo por tenant (B3)", () => {
@@ -345,6 +356,17 @@ describe("POST /api/products/:id/promote — o PRODUTO TODO, na ORDEM, SEM inici
   });
 
   // ── TRAVA [Normalizar] (RFC-0008 Emenda 01) ────────────────────────────────
+  it("normalizado mas com GAP crítico em um projeto → 409 NOT_VALIDATED, sem planejador nem UPDATE (16/10, VNX Judge)", async () => {
+    readiness = { ok: false, reason: "NOT_VALIDATED", code: "BLOCKED", message: "Backend: validação com bloqueio.", projectId: "p1" };
+    queryHandler = promoteHandler({ normalizedHash: await normalizedHashFor() });
+    const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toMatchObject({ code: "NOT_VALIDATED", gate: "BLOCKED", projectId: "p1" });
+    await flushImmediate();
+    expect(plannerSpy).not.toHaveBeenCalled();
+    expect(captured.some((q) => /UPDATE products SET lifecycle_status|UPDATE projects SET status/.test(q.sql))).toBe(false);
+  });
+
   it("produto nunca normalizado → 409 NOT_NORMALIZED, sem gastar o planejador", async () => {
     queryHandler = promoteHandler({ normalizedHash: null });
     const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });

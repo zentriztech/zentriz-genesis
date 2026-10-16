@@ -922,8 +922,13 @@ export async function ensureConnectDeclarationsTick(
     out.started += 1;
     console.info(`[ConnectDecl] run=${runId} projeto=${projectId} → pedindo a declaração Connect (${ctx.files.length} arquivo(s) na spec)`);
     // Fora do await: ver o comentário do cabeçalho desta função.
-    void generateConnectDeclaration(db, projectId, (body) => post(`${base}/invoke/raw`, JSON.stringify(body), 240_000))
-      .then(async (res) => {
+    // Re-carimbo (2026-10-16): a escrita do connect não pode vencer o carimbo de normalização que
+    // estava em dia. Import dinâmico: productNormalizer importa este módulo (ciclo estático).
+    void import("./productNormalizer.js")
+      .then(({ writeConnectKeepingStamps }) => writeConnectKeepingStamps(db as never, projectId,
+        () => generateConnectDeclaration(db, projectId, (body) => post(`${base}/invoke/raw`, JSON.stringify(body), 240_000)),
+        { by: "connect_tick" }))
+      .then(async ({ result: res }) => {
         await recordDeclResult(db, runId, {
           action: res.action, path: res.path, warnings: res.warnings,
           truncated: res.truncated, model: res.modelUsed,

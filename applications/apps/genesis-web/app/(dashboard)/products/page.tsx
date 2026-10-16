@@ -71,6 +71,7 @@ import { TraceabilityReportsButton } from "@/components/TraceabilityReports";
 // Padronização 2026-09-06: rótulo/tooltip/texto de resultado das ações de fábrica vêm de UM módulo.
 import {
   FACTORY_LABEL, FACTORY_TOOLTIP, promoteConfirmBody, promotedProductNotice, normalizedProductNotice,
+  connectNotice, type ConnectEnsure,
   promoteGate, normalizeLabel, type PromotionVerdict,
 } from "@/lib/factoryActions";
 
@@ -215,15 +216,15 @@ function ProductsPageInner() {
       const res = await apiPost<{
         status: "normalized" | "already_normalized"; summary?: string;
         written?: Array<{ path: string }>; skippedProjects?: Array<{ title: string; reason: string }>;
-        warnings?: string[]; truncated?: string[]; message?: string;
+        warnings?: string[]; truncated?: string[]; message?: string; connect?: ConnectEnsure | null;
       }>(`/api/products/${p.id}/normalize`, {});
       if (res.status === "already_normalized") {
-        showNotice(res.message ?? "A spec não mudou desde a última normalização — nada a refazer.");
+        showNotice(res.message ?? `A spec não mudou desde a última normalização — nada a refazer.${connectNotice(res.connect)}`);
       } else {
         const skipped = res.skippedProjects?.length ?? 0;
         showNotice(
-          `${normalizedProductNotice(res.written?.length ?? 0, skipped, p.lifecycle_status === "draft")}${res.summary ? ` — ${res.summary}` : ""}`,
-          skipped > 0 || (res.warnings?.length ?? 0) > 0 ? "warning" : "success",
+          `${normalizedProductNotice(res.written?.length ?? 0, skipped, p.lifecycle_status === "draft", res.connect ?? null)}${res.summary ? ` — ${res.summary}` : ""}`,
+          skipped > 0 || (res.warnings?.length ?? 0) > 0 || (res.connect?.failed.length ?? 0) > 0 ? "warning" : "success",
         );
       }
       await load();

@@ -245,6 +245,9 @@ export function runStageA(files: Array<SpecFileRow & { content: string }>, opts:
   for (const f of files) {
     const rel = (f.rel_dir ?? "").replace(/^\/+|\/+$/g, "").toLowerCase();
     if (rel !== RFC_DIR) continue;
+    // O índice da pasta (`docs/rfc/README.md`, escrito pelo Normalizar) não é RFC — acusá-lo como
+    // "RFC fora do padrão" era um aviso que a própria Bancada criava (achado 2026-10-16, VNX Judge).
+    if (f.filename.toLowerCase() === "readme.md") continue;
     const label = `${RFC_DIR}/${f.filename}`;
     if (!RFC_FILENAME_RE.test(f.filename)) {
       // Mesmo critério do gate: arquivo fora do padrão em docs/rfc/ é IGNORADO pela promoção

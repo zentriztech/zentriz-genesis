@@ -89,6 +89,16 @@ vi.mock("../services/productNormalizer.js", () => ({
   NormalizationError: FakeNormalizationError,
 }));
 
+// Gate de prontidão (16/10): connect.yaml + validação. A regra é provada em promotability.test.ts;
+// aqui só se prova que a ROTA respeita o veredito.
+type FakeReadiness = { ok: true } | { ok: false; reason: string; code: string; message: string; projectId?: string };
+let readiness: FakeReadiness = { ok: true };
+vi.mock("../services/promotability.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/promotability.js")>()),
+  assessProjectReadiness: async () => readiness,
+  assessProductReadiness: async () => readiness,
+}));
+
 /** Roteia as consultas do promote de projeto. */
 function promoteHandler(opts: {
   status?: string; productId?: string | null; isInbox?: boolean; exists?: boolean;
@@ -122,6 +132,7 @@ beforeEach(async () => {
   debitSpy.mockClear();
   normState ={ normalized: true, storedHash: "hash-atual", currentHash: "hash-atual" };
   normCheckThrows = false;
+  readiness = { ok: true };
   currentUser = { id: "u1", role: "tenant_admin", tenantId: TENANT };
   const { pipelineRoutes } = await import("./pipeline.js");
   app = Fastify();
@@ -229,6 +240,15 @@ describe("POST /api/projects/:id/promote — trava de normalização", () => {
     const res = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/promote` });
     expect(res.statusCode).toBe(500);
     expect(res.json().code).toBe("NORMALIZATION_CHECK_FAILED");
+    expect(captured.some((c) => c.sql.includes("UPDATE projects SET status = 'promoted'"))).toBe(false);
+  });
+
+  it("normalizada mas SEM connect.yaml (ou com validação bloqueada) → 409 com o motivo e NENHUM UPDATE", async () => {
+    readiness = { ok: false, reason: "CONNECT_MISSING", code: "CONNECT_DECLARATION_MISSING", message: "Falta o connect.yaml." };
+    queryHandler = promoteHandler({});
+    const res = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/promote` });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: "CONNECT_MISSING", gate: "CONNECT_DECLARATION_MISSING" });
     expect(captured.some((c) => c.sql.includes("UPDATE projects SET status = 'promoted'"))).toBe(false);
   });
 

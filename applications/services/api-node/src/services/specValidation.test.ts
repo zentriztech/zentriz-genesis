@@ -85,6 +85,12 @@ describe("estágio A (determinístico)", () => {
     const good = file("RFC-0002-ok.md", "# RFC\n\n## Critérios de aceite\n- Dado x\n- Quando y\n- Então z\n\n## Impacto\n- `apps/api/src/a.ts`\n\n## Compatibilidade\nMINOR\n\n**Não-objetivos:** nada.\n", "docs/rfc");
     expect(runStageA([file("spec.md", RICH), good], { evolution: true }).filter((x) => x.file.startsWith("docs/rfc/") && x.severity === "blocker")).toEqual([]);
   });
+
+  it("docs/rfc/README.md (índice que o Normalizar escreve) NÃO é RFC fora do padrão — aviso auto-infligido (16/10)", () => {
+    const idx = file("README.md", "# RFCs\n\n- [RFC-0001-x.md](./RFC-0001-x.md)\n", "docs/rfc");
+    const out = runStageA([file("spec.md", RICH), idx], { evolution: true });
+    expect(out.filter((x) => x.file.startsWith("docs/rfc/"))).toEqual([]);
+  });
 });
 
 describe("parseStageBFindings (schema fechado — saída de LLM nunca entra crua)", () => {

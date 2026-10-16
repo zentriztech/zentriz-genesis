@@ -7,6 +7,9 @@
  *   • os ÍNDICES são deterministas e com links relativos.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import fs from "fs";
+import os from "os";
+import path from "path";
 
 const { computeCurrentSpecHashMock, upsertSpecFileMock } = vi.hoisted(() => ({
   computeCurrentSpecHashMock: vi.fn(),
@@ -25,6 +28,11 @@ import {
   loadProductProjects,
   parseNormalization,
   applyNormalization,
+  buildNormalizationContext,
+  renderNormalizationPortrait,
+  parseExistingDocName,
+  writeConnectKeepingStamps,
+  ensureConnectDeclarations,
   isProductNormalized,
   renderFolderReadme,
   renderProjectReadme,
@@ -315,6 +323,194 @@ describe("applyNormalization — anti-lavagem e numeração", () => {
     }
     expect(rec.createdBy).toBe("workbench");
     expect(rec.path).toBe("docs/rfc/RFC-0007-ingestao.md");
+  });
+});
+
+describe("re-normalizar ATUALIZA (16/10, VNX Judge) — mesmo slug reaproveita o número", () => {
+  const ctxWith = (existingRfcs: string[], existingAdrs: string[] = []): NormalizationContext => ({
+    productId: PRODUCT, productName: "VNX Judge", systemId: null, description: null,
+    projects: [{ ...proj(P1, "Backend"), files: ["spec.md"], specHead: "spec", existingRfcs, existingAdrs }],
+    truncated: [], nextRfcSeq: 3, nextAdrSeq: 2, anchorProjectId: P1,
+  });
+  const body = "## Sumário\nconteúdo longo o bastante para passar no veto.";
+
+  it("slug existente mantém RFC-0001; só o slug NOVO consome número do produto", async () => {
+    computeCurrentSpecHashMock.mockResolvedValue({ specHash: "x", files: [] });
+    const seen: unknown[][] = [];
+    const db = fakeDb((sql, params) => {
+      if (sql.includes("UPDATE products")) { seen.push(params ?? []); return { rows: [{ next_rfc_seq: 4, next_adr_seq: 3 }] }; }
+      return { rows: [] };
+    });
+    await applyNormalization(db as never, ctxWith(["RFC-0001-chat-api.md", "RFC-0002-fila.md"], ["ADR-001-postgres.md"]), {
+      summary: "", ready: true, blockers: [], warnings: [], decisions: [],
+      rfcs: [
+        { target: "product", slug: "chat-api", title: "Chat API", content: body },
+        { target: "product", slug: "auditoria", title: "Auditoria", content: body },
+      ],
+      adrs: [{ target: "product", slug: "postgres", title: "Postgres", content: body }],
+    });
+    const paths = upsertSpecFileMock.mock.calls.map((c) => String(c[2]));
+    expect(paths).toContain("docs/rfc/RFC-0001-chat-api.md");
+    expect(paths).toContain("docs/rfc/RFC-0003-auditoria.md");
+    expect(paths).toContain("docs/adr/ADR-001-postgres.md");
+    expect(seen[0]).toEqual([PRODUCT, 3, 1, 2, 0]); // 1 RFC novo, 0 ADR novo
+  });
+
+  it("parseExistingDocName lê número e slug; nome fora do padrão → null", () => {
+    expect(parseExistingDocName("RFC-0012-chat-api.md")).toEqual({ num: 12, slug: "chat-api" });
+    expect(parseExistingDocName("ADR-004-x-y.md")).toEqual({ num: 4, slug: "x-y" });
+    expect(parseExistingDocName("README.md")).toBeNull();
+  });
+
+  it("slug repetido na mesma resposta é descartado com aviso (senão o último venceria em silêncio)", () => {
+    const plan = parseNormalization(JSON.stringify({
+      summary: "s", ready: true, blockers: [],
+      rfcs: [
+        { target: "product", slug: "a", title: "A", content: body },
+        { target: "product", slug: "a", title: "A de novo", content: body },
+      ],
+      adrs: [], decisions: [],
+    }), new Set([P1]));
+    expect(plan.rfcs).toHaveLength(1);
+    expect(plan.warnings.join(" ")).toContain("repetido");
+  });
+});
+
+describe("buildNormalizationContext — lê TODOS os arquivos autorais (16/10, VNX Judge)", () => {
+  let dir: string;
+  beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "norm-")); });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  function rowsFor(files: Array<{ rel: string; name: string; content: string; primary?: boolean }>) {
+    return files.map((f) => {
+      const fp = path.join(dir, `${f.rel.replace(/\//g, "_")}_${f.name}`);
+      fs.writeFileSync(fp, f.content);
+      return { project_id: P1, filename: f.name, rel_dir: f.rel, file_path: fp, is_primary: !!f.primary };
+    });
+  }
+  const dbFor = (rows: Record<string, unknown>[]) => fakeDb((sql) => {
+    if (sql.includes("project_spec_files")) return { rows };
+    if (sql.includes("next_rfc_seq")) return { rows: [{ next_rfc_seq: 1, next_adr_seq: 1 }] };
+    return { rows: [] };
+  });
+  const product = { id: PRODUCT, name: "VNX Judge", systemId: null, description: null };
+
+  it("entram primário + secundários com cabeçalho; docs/, README raiz e connect.yaml ficam fora", async () => {
+    const rows = rowsFor([
+      { rel: "", name: "spec.md", content: "INDICE", primary: true },
+      { rel: "", name: "modelo-dados.md", content: "ENTIDADES" },
+      { rel: "api", name: "rotas.md", content: "ROTAS" },
+      { rel: "", name: "README.md", content: "README-GERADO" },
+      { rel: "", name: "connect.yaml", content: "CONNECT" },
+      { rel: "docs/rfc", name: "RFC-0001-x.md", content: "RFC-ANTIGO" },
+    ]);
+    const ctx = await buildNormalizationContext(dbFor(rows), product, [proj(P1, "Backend")]);
+    const head = ctx.projects[0].specHead ?? "";
+    expect(head).toContain("### arquivo: spec.md\nINDICE");
+    expect(head).toContain("### arquivo: modelo-dados.md\nENTIDADES");
+    expect(head).toContain("### arquivo: api/rotas.md\nROTAS");
+    for (const no of ["README-GERADO", "CONNECT", "RFC-ANTIGO"]) expect(head).not.toContain(no);
+    expect(head.indexOf("INDICE")).toBeLessThan(head.indexOf("ENTIDADES"));
+    expect(ctx.projects[0].existingRfcs).toEqual(["RFC-0001-x.md"]);
+    expect(ctx.nextRfcSeq).toBe(2);
+    expect(ctx.truncated).toEqual([]);
+  });
+
+  it("o que não cabe no teto é DECLARADO em truncated (nunca cortado em silêncio)", async () => {
+    const big = "x".repeat(150_000);
+    const rows = rowsFor([
+      { rel: "", name: "a.md", content: big, primary: true },
+      { rel: "", name: "b.md", content: big },
+      { rel: "", name: "c.md", content: big },
+    ]);
+    const ctx = await buildNormalizationContext(dbFor(rows), product, [proj(P1, "Backend")]);
+    expect((ctx.projects[0].specHead ?? "").length).toBeLessThanOrEqual(200_000);
+    const t = ctx.truncated.join(" | ");
+    expect(t).toContain("b.md");          // cortado
+    expect(t).toContain("não couberam");  // c.md inteiro fora
+    expect(t).toContain("c.md");
+    expect(renderNormalizationPortrait(ctx)).toContain("TRUNCAGEM DECLARADA");
+  });
+});
+
+describe("connect.yaml não vence o carimbo (16/10, VNX Judge — o aviso voltava após salvar)", () => {
+  const f = (filename: string, sha: string) => ({ rel_dir: "", filename, contentSha256: sha });
+  const tree = (files: ReturnType<typeof f>[], hash: string) => ({ specHash: hash, files });
+
+  it("só o connect mudou → re-carimba normalized_hash e spec_hash (WHERE = carimbo anterior)", async () => {
+    computeCurrentSpecHashMock
+      .mockResolvedValueOnce(tree([f("spec.md", "a")], "H-ANTES"))
+      .mockResolvedValueOnce(tree([f("spec.md", "a"), f("connect.yaml", "c")], "H-DEPOIS"));
+    const seen: Array<{ sql: string; params?: unknown[] }> = [];
+    const db = fakeDb((sql, params) => { seen.push({ sql, params }); return { rows: [], rowCount: 1 }; });
+    const out = await writeConnectKeepingStamps(db as never, P1, async () => "ok", { by: "teste", product: false });
+    expect(out.result).toBe("ok");
+    expect(out.restamped).toEqual({ project: true, approval: true, product: false });
+    const ups = seen.filter((s) => s.sql.includes("UPDATE projects"));
+    expect(ups).toHaveLength(2);
+    for (const u of ups) expect(u.params?.slice(0, 3)).toEqual([P1, "H-DEPOIS", "H-ANTES"]);
+    expect(ups[1].sql).toContain("spec_approved");
+  });
+
+  it("outro arquivo mudou junto → NÃO re-carimba (edição alheia não se lava)", async () => {
+    computeCurrentSpecHashMock
+      .mockResolvedValueOnce(tree([f("spec.md", "a")], "H-ANTES"))
+      .mockResolvedValueOnce(tree([f("spec.md", "EDITADO"), f("connect.yaml", "c")], "H-DEPOIS"));
+    const seen: string[] = [];
+    const db = fakeDb((sql) => { seen.push(sql); return { rows: [], rowCount: 1 }; });
+    const out = await writeConnectKeepingStamps(db as never, P1, async () => 1, { by: "teste", product: false });
+    expect(out.restamped).toEqual({ project: false, approval: false, product: false });
+    expect(seen.some((s) => s.includes("UPDATE"))).toBe(false);
+  });
+
+  it("falha do re-carimbo nunca derruba a escrita (o resultado volta)", async () => {
+    computeCurrentSpecHashMock
+      .mockResolvedValueOnce(tree([f("spec.md", "a")], "H1"))
+      .mockResolvedValueOnce(tree([f("spec.md", "a"), f("connect.yaml", "c")], "H2"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const db = fakeDb(() => { throw new Error("db fora"); });
+    await expect(writeConnectKeepingStamps(db as never, P1, async () => "gravado", { by: "t", product: false }))
+      .resolves.toMatchObject({ result: "gravado" });
+  });
+
+  it("ensureConnectDeclarations pula quem já tem connect e quem não está na Bancada; sem transporte → failed (não lança)", async () => {
+    computeCurrentSpecHashMock.mockImplementation(async (_db: unknown, pid: string) =>
+      pid === P1 ? tree([f("spec.md", "a"), f("connect.yaml", "c")], "H") : tree([f("spec.md", "a")], "H"));
+    const prev = process.env.API_AGENTS_URL;
+    delete process.env.API_AGENTS_URL;
+    try {
+      const out = await ensureConnectDeclarations(fakeDb(() => ({ rows: [] })) as never, [
+        { projectId: P1, title: "Com connect", status: "draft" },
+        { projectId: P2, title: "Sem connect", status: "draft" },
+        { projectId: PRODUCT, title: "Na Fábrica", status: "running" },
+      ], { product: false });
+      expect(out.generated).toEqual([]);
+      expect(out.failed.map((x) => x.projectId)).toEqual([P2]);
+      expect(out.failed[0].error).toContain("API_AGENTS_URL");
+    } finally {
+      if (prev !== undefined) process.env.API_AGENTS_URL = prev;
+    }
+  });
+});
+
+describe("README do projeto preserva o manifesto do decompositor (16/10)", () => {
+  const folders = [{ dir: "docs/rfc", label: "RFC", count: 1 }];
+  it("frontmatter e corpo AUTORAIS ficam; o índice vai num bloco delimitado e é idempotente", () => {
+    const authored = "---\nkind: project\narchetype: backend-service\ndepends_on: [lib]\n---\n\n# Backend\n\nTexto do humano.\n";
+    const once = renderProjectReadme("Backend", "VNX Judge", folders, ["spec.md"], { existing: authored, archetype: "web-frontend" });
+    expect(once.startsWith("---\nkind: project\narchetype: backend-service\ndepends_on: [lib]\n---")).toBe(true);
+    expect(once).toContain("Texto do humano.");
+    expect(once).toContain("<!-- genesis:normalize-index:start -->");
+    expect(once).not.toContain("web-frontend");
+    const twice = renderProjectReadme("Backend", "VNX Judge", folders, ["spec.md"], { existing: once });
+    expect(twice).toBe(once);
+  });
+
+  it("README nosso (sem frontmatter, versão antiga) é regenerado COM frontmatter e arquétipo", () => {
+    const old = "# Backend\n\n> Índice gerado automaticamente pelo passo **Normalizar** da Bancada — não edite à mão.\n";
+    const md = renderProjectReadme("Backend", "VNX Judge", folders, ["spec.md"], { existing: old, archetype: "backend-service" });
+    expect(md.startsWith("---\nkind: project\narchetype: backend-service\n---\n")).toBe(true);
+    expect(md).not.toContain("genesis:normalize-index:start");
   });
 });
 

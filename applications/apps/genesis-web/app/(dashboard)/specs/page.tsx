@@ -82,7 +82,7 @@ import { BudgetStrip, type BudgetBrief } from "@/components/ProjectBudget";
 // Padronização 2026-09-06: rótulo/tooltip/texto de resultado das ações de fábrica vêm de UM módulo.
 import {
   FACTORY_LABEL, FACTORY_TOOLTIP, PROMOTED_SPEC_NOTICE, promoteConfirmBody, promotedProductNotice,
-  normalizedSpecNotice, normalizedProductNotice, promoteGate, normalizeLabel,
+  normalizedSpecNotice, normalizedProductNotice, promoteGate, normalizeLabel, connectNotice, type ConnectEnsure,
   type PromotionVerdict,
 } from "@/lib/factoryActions";
 
@@ -474,12 +474,12 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
     setBusyId(id);
     setError(null);
     try {
-      const res = await apiPost<{ status: string; written?: Array<{ path: string }>; modelUsed?: string | null }>(
+      const res = await apiPost<{ status: string; written?: Array<{ path: string }>; modelUsed?: string | null; connect?: ConnectEnsure | null }>(
         `/api/projects/${id}/normalize`, {},
       );
       setNotice(res.status === "already_normalized"
-        ? "A spec não mudou desde a última normalização — os documentos já estão em dia."
-        : normalizedSpecNotice(res.written?.length ?? 0));
+        ? `A spec não mudou desde a última normalização — os documentos já estão em dia.${connectNotice(res.connect)}`
+        : normalizedSpecNotice(res.written?.length ?? 0, res.connect ?? null));
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Falha ao normalizar a spec");
@@ -493,15 +493,16 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
     setBusyId(`prod:${productId}`);
     setError(null);
     try {
-      const res = await apiPost<{ status: string; written?: Array<{ path: string }>; skippedProjects?: unknown[] }>(
+      const res = await apiPost<{ status: string; written?: Array<{ path: string }>; skippedProjects?: unknown[]; connect?: ConnectEnsure | null }>(
         `/api/products/${productId}/normalize`, {},
       );
       setNotice(res.status === "already_normalized"
-        ? "A spec do produto não mudou desde a última normalização — os documentos já estão em dia."
+        ? `A spec do produto não mudou desde a última normalização — os documentos já estão em dia.${connectNotice(res.connect)}`
         : normalizedProductNotice(
           res.written?.length ?? 0, res.skippedProjects?.length ?? 0,
           // Se o produto já saiu da Bancada, normalizar documenta mas não destrava promoção.
           products.find((p) => p.id === productId)?.promotion?.reason !== "NOT_ON_WORKBENCH",
+          res.connect ?? null,
         ));
       await loadProducts();
       await load();

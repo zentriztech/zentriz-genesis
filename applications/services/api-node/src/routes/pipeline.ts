@@ -22,7 +22,7 @@ import {
 } from "../services/productNormalizer.js";
 // O veredito de "posso promover?" é do SERVIDOR (achado do Jean 2026-09-11: três telas decidiam
 // sozinhas e divergiram) — ver `services/promotability.ts`.
-import { decideSpecPromotability } from "../services/promotability.js";
+import { assessProjectReadiness, decideSpecPromotability, safeReadiness } from "../services/promotability.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 
@@ -187,6 +187,22 @@ export async function pipelineRoutes(app: FastifyInstance) {
         }
       }
 
+      // TRAVA DE PRONTIDÃO (2026-10-16): `connect.yaml` + validação do conteúdo atual — a mesma
+      // função do veredito da tela. Falha de avaliação ⇒ 500, nunca promoção às cegas.
+      {
+        let ready: Awaited<ReturnType<typeof assessProjectReadiness>>;
+        try {
+          ready = await assessProjectReadiness(client, projectId);
+        } catch (err) {
+          request.log.error({ err, projectId }, "[Pipeline/promote] falha ao avaliar a prontidão");
+          return reply.status(500).send({
+            code: "READINESS_CHECK_FAILED",
+            message: "Não foi possível verificar a validação e o connect.yaml desta spec. Tente de novo.",
+          });
+        }
+        if (!ready.ok) return reply.status(409).send({ code: ready.reason, gate: ready.code, message: ready.message });
+      }
+
       // §4.11 (migração 064): um App que ENTRA na fábrica não pode viver no INBOX. Promover é
       // entrar — então gradua para o produto homônimo aqui, e não só no /run. Falha ⇒ 500 e o
       // projeto continua rascunho (nada meio-promovido).
@@ -306,7 +322,10 @@ export async function pipelineRoutes(app: FastifyInstance) {
         if (outcome.status === "already_normalized") {
           return reply.status(200).send({
             projectId, status: "already_normalized", normalized: true,
-            message: "A spec não mudou desde a última normalização — nada a refazer.",
+            message: outcome.connect?.generated.length
+            ? `A spec não mudou desde a última normalização; o connect.yaml foi gerado para ${outcome.connect.generated.map((g) => g.title).join(", ")} e o carimbo segue em dia.`
+            : "A spec não mudou desde a última normalização — nada a refazer.",
+          connect: outcome.connect ?? null,
           });
         }
         const r = outcome.result!;
@@ -329,6 +348,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
           warnings: r.warnings,
           truncated: r.truncated,
           rfcProblems: r.rfcProblems,
+          connect: outcome.connect ?? null,
           modelUsed: r.modelUsed,
         });
       } finally {
@@ -362,7 +382,11 @@ export async function pipelineRoutes(app: FastifyInstance) {
       // O veredito reaproveita a conferência acima — perguntar de novo leria o disco duas vezes na
       // MESMA requisição. `st === null` (a conferência falhou) ⇒ `normalized: null` ⇒ `canPromote`
       // nulo ⇒ a tela mantém o botão: erro nosso não esconde função do usuário.
-      const promotion = decideSpecPromotability(row.status ?? null, st ? st.normalized : null);
+      // Prontidão (connect + validação) só quando é ela que decide: na Bancada e normalizado.
+      const readiness = row.status === "draft" && st?.normalized === true
+        ? await safeReadiness(() => assessProjectReadiness(client, projectId))
+        : null;
+      const promotion = decideSpecPromotability(row.status ?? null, st ? st.normalized : null, readiness);
       return reply.send({
         projectId,
         normalized: st ? st.normalized : null,

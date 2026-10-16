@@ -101,6 +101,20 @@ const STATUS_META: Record<string, { label: string; color: "default" | "success" 
   interrupted: { label: "Interrompida", color: "warning" },
   error: { label: "Erro na validação", color: "error" },
 };
+/** O resultado existente deixou de valer para a spec atual. */
+function needsRevalidation(status: string): boolean {
+  return status === "stale" || status === "superseded" || status === "interrupted" || status === "error";
+}
+function validateLabel(status: string): string {
+  if (status === "validating") return "Validando…";
+  return status === "never_validated" ? "Validar" : "Revalidar";
+}
+function validateTooltip(status: string): string {
+  if (status === "never_validated") return "Roda os juízes sobre a spec atual. O Promover só libera com a validação desta versão da spec.";
+  if (needsRevalidation(status)) return "O resultado mostrado é de outra versão da spec (ou não terminou). Revalide — o Promover só libera com a validação da versão atual.";
+  return "Roda os juízes de novo sobre a spec atual (útil depois de corrigir GAPs).";
+}
+
 const SEV_COLOR: Record<Severity, "error" | "warning" | "info"> = { blocker: "error", warning: "warning", info: "info" };
 const SEV_ORDER: Record<Severity, number> = { blocker: 0, warning: 1, info: 2 };
 
@@ -332,12 +346,19 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
         {state.factoryCertificate && <FactoryCertificateBadge certificate={state.factoryCertificate} />}
         {acked && <Chip size="small" color={run?.acked_role === "zentriz_admin" && hasBlockerActive ? "error" : "success"}
                         label={run?.acked_role === "zentriz_admin" && hasBlockerActive ? "forçada (admin)" : "avisos reconhecidos"} />}
-        <Button size="small" variant="outlined"
-                startIcon={busy === "validate" || state.derivedStatus === "validating" ? <CircularProgress size={14} /> : undefined}
-                disabled={busy !== null || state.derivedStatus === "validating"}
-                onClick={() => void validate()}>
-          {state.derivedStatus === "validating" ? "Validando…" : "Validar"}
-        </Button>
+        {/* 16/10 (VNX Judge): UM botão, rótulo pelo estado — "Validar" na primeira vez, "Revalidar"
+            quando já há resultado (e destacado quando ele ficou velho). O tooltip diz o porquê. */}
+        <Tooltip title={validateTooltip(state.derivedStatus)}>
+          <span>
+            <Button size="small" variant={needsRevalidation(state.derivedStatus) ? "contained" : "outlined"}
+                    color={needsRevalidation(state.derivedStatus) ? "warning" : "primary"}
+                    startIcon={busy === "validate" || state.derivedStatus === "validating" ? <CircularProgress size={14} /> : undefined}
+                    disabled={busy !== null || state.derivedStatus === "validating"}
+                    onClick={() => void validate()}>
+              {validateLabel(state.derivedStatus)}
+            </Button>
+          </span>
+        </Tooltip>
         {canAck && (
           <Tooltip title="Reconhece os avisos SÓ para esta versão da spec (não cria triagens). Para ignorar de forma durável, use Ignorar por finding ou em lote.">
             <Button size="small" color={hasBlockerActive ? "error" : "warning"} variant="outlined" disabled={busy !== null} onClick={() => void ack()}>
@@ -349,7 +370,7 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
       {error && <Alert severity="error" sx={{ mt: 1 }} onClose={() => setError(null)}>{error}</Alert>}
       {state.derivedStatus === "stale" && (
         <Alert severity="warning" sx={{ mt: 1 }}>
-          A spec foi editada depois da última validação — o resultado abaixo é da versão anterior. Revalide antes de promover.
+          A spec mudou depois da última validação (edição, Normalizar ou connect.yaml gerado) — o resultado abaixo é da versão anterior e não libera o Promover. Clique em <strong>Revalidar</strong>.
         </Alert>
       )}
       {/* 🔴 GAP-139 (Jean, 2026-09-09): "Erro na validação" + aba `GAPs (0)` era lido como spec limpa.

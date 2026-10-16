@@ -68,6 +68,7 @@ import { tenantScopeStore } from "@/stores/tenantScopeStore";
 import {
   FACTORY_LABEL, FACTORY_TOOLTIP, PROMOTE_CONFIRM_WORD, PROMOTED_SPEC_NOTICE,
   PROMOTE_HIDDEN_UNTIL_NORMALIZED, normalizedSpecNotice, normalizedProductNotice,
+  promoteNextAction, type ConnectEnsure,
   promoteButtonLabel, promoteConfirmBody, promotedProductNotice, type PromoteScope,
 } from "@/lib/factoryActions";
 import { DecomposeDialog, describeEstimate, estimateProposal, type DecomposeSpecRef } from "@/components/DecomposeDialog";
@@ -2546,6 +2547,7 @@ export default function SpecPage() {
       setTreeDirty(false);
       setTreeReloadSignal((n) => n + 1);
       setValidationReloadSignal((n) => n + 1);
+      setPromotionSignal((n) => n + 1);            // hash da árvore mudou ⇒ reperguntar ao servidor
       setStaleValidation(true);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -3285,6 +3287,7 @@ export default function SpecPage() {
    */
   type PromotionVerdict = {
     canPromote: boolean | null; reason: string | null; message: string | null; normalized: boolean | null;
+    code?: string | null;
   };
   const [promotion, setPromotion] = useState<PromotionVerdict | null>(null);
   const [normalizing, setNormalizing] = useState(false);
@@ -3308,14 +3311,35 @@ export default function SpecPage() {
 
   useEffect(() => { void loadPromotion(); }, [loadPromotion, promotionSignal]);
 
-  /** [Normalizar] desta tela — escopo igual ao do promover (produto inteiro × esta spec). */
+  /**
+   * [Normalizar] desta tela — escopo igual ao do promover (produto inteiro × esta spec).
+   *
+   * Pedido do Jean (2026-10-16): normalizar SALVA antes (o normalizador lê o DISCO — texto só no
+   * editor ficaria fora do RFC) e RECARREGA depois (árvore, arquivo aberto, validação e promoção:
+   * o passo grava RFC/ADR/README/connect.yaml e muda o hash da árvore).
+   */
   const normalizeHere = useCallback(async () => {
     if (!editProjectId) return;
     setNormalizing(true);
     setApproveError(null);
     try {
+      // 1) Salvar o que está só no editor. Falha aqui ABORTA: normalizar sobre o disco velho e
+      //    depois gravar o editor por cima deixaria o RFC descrevendo outra spec.
+      const cur = activeFileRef.current;
+      if (cur && treeDirtyRef.current) {
+        const r = await apiPut<{ ok: boolean; contentSha256: string }>(
+          `/api/projects/${editProjectId}/spec-file?path=${encodeURIComponent(cur.path)}`,
+          { content: fileDraft, baseSha: cur.baseSha },
+        );
+        setActiveFile((prev) => (prev && prev.path === cur.path ? { ...prev, content: fileDraft, baseSha: r.contentSha256 } : prev));
+        setTreeDirty(false);
+      } else if (!cur && specMarkdown) {
+        const disk = await apiGet<{ specMarkdown?: string }>(`/api/projects/${editProjectId}/spec-content`).catch(() => null);
+        if (disk && disk.specMarkdown !== specMarkdown) await persistSpecMarkdown();
+      }
+      // 2) Normalizar.
       if (promoteScope === "product" && ownerProduct?.id) {
-        const res = await apiPost<{ written?: unknown[]; skippedProjects?: unknown[] }>(
+        const res = await apiPost<{ written?: unknown[]; skippedProjects?: unknown[]; connect?: ConnectEnsure | null }>(
           `/api/products/${ownerProduct.id}/normalize`, {},
         );
         setStartedNotice(normalizedProductNotice(
@@ -3323,18 +3347,36 @@ export default function SpecPage() {
           // Produto já na Fábrica: documenta, mas não há promoção a destravar — não prometer o que
           // o servidor vai recusar.
           promotion?.reason !== "NOT_ON_WORKBENCH",
+          res.connect ?? null,
         ));
       } else {
-        const res = await apiPost<{ written?: unknown[] }>(`/api/projects/${editProjectId}/normalize`, {});
-        setStartedNotice(normalizedSpecNotice((res.written ?? []).length));
+        const res = await apiPost<{ written?: unknown[]; connect?: ConnectEnsure | null }>(`/api/projects/${editProjectId}/normalize`, {});
+        setStartedNotice(normalizedSpecNotice((res.written ?? []).length, res.connect ?? null));
       }
-      setPromotionSignal((n) => n + 1);
     } catch (e) {
       setApproveError(e instanceof Error ? e.message : String(e));
     } finally {
+      // 3) Recarregar SEMPRE (também na falha parcial: o salvar do passo 1 pode ter gravado).
+      setTreeReloadSignal((n) => n + 1);
+      setValidationReloadSignal((n) => n + 1);
+      setPromotionSignal((n) => n + 1);
+      setStaleValidation(true);
+      projectsStore.loadProjects();
       setNormalizing(false);
     }
-  }, [editProjectId, promoteScope, ownerProduct, promotion]);
+  }, [editProjectId, promoteScope, ownerProduct, promotion, fileDraft, specMarkdown, persistSpecMarkdown]);
+
+  /**
+   * [Validar] disparado pelo aviso do Promover — o mesmo caminho do "Salvar rascunho" (abre a aba
+   * GAPs, pede a validação e o painel acompanha ao vivo). Ao terminar, reperguntar a promoção.
+   */
+  const validateFromPromotion = useCallback(async () => {
+    if (!editProjectId) return;
+    setOpenGapsSignal((n) => n + 1);
+    try { await apiPost(`/api/specs/${editProjectId}/validate`, {}); } catch { /* dedupe/rate-limit → o painel mostra o estado */ }
+    setValidationReloadSignal((n) => n + 1);
+    setPromotionSignal((n) => n + 1);
+  }, [editProjectId]);
 
   /** Projetos ainda na Bancada no mesmo produto — só para o humano dimensionar o escopo. */
   const promoteSiblings = useMemo(() => {
@@ -4175,9 +4217,18 @@ export default function SpecPage() {
     },
     // O [Promover] sai da barra quando o servidor já disse que não vai funcionar — mas o motivo
     // tem de estar escrito na tela (pedido do Jean, 2026-09-11).
+    // 16/10 (VNX Judge): o aviso diz O QUE falta e oferece a ação que destrava (antes era sempre
+    // "aparece depois de normalizar", mesmo quando faltava validar ou o connect.yaml).
     promotion?.canPromote === false && {
       key: "promote-blocked", severity: "info" as const,
       text: promotion.message ?? PROMOTE_HIDDEN_UNTIL_NORMALIZED,
+      ...(() => {
+        const next = promoteNextAction(promotion);
+        if (next === "normalize") return { actionLabel: FACTORY_LABEL.normalize, onAction: () => { void normalizeHere(); } };
+        if (next === "validate") return { actionLabel: "Validar agora", onAction: () => { void validateFromPromotion(); } };
+        if (next === "gaps") return { actionLabel: "Ver GAPs", onAction: () => setOpenGapsSignal((n) => n + 1) };
+        return {};
+      })(),
     },
   ];
 

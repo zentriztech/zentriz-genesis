@@ -71,7 +71,8 @@ const LEVEL_META: Record<
   certified: { label: "Genesis Factory", color: "success", variant: "filled", Icon: VerifiedRoundedIcon },
   // A7: mesmo rótulo, moldura vazada — certificado COM ressalva humana não é certificado pleno.
   certified_with_acks: { label: "Genesis Factory · com ressalvas", color: "success", variant: "outlined", Icon: VerifiedRoundedIcon },
-  stale: { label: "Revalidar", color: "warning", variant: "outlined", Icon: HistoryToggleOffRoundedIcon },
+  // 16/10 (VNX Judge): "Revalidar" parecia um BOTÃO ao lado do botão Validar — é um estado.
+  stale: { label: "Certificado vencido", color: "warning", variant: "outlined", Icon: HistoryToggleOffRoundedIcon },
   blocked: { label: "Fábrica recusa", color: "error", variant: "outlined", Icon: BlockRoundedIcon },
   unknown: { label: "Sem certificado", color: "default", variant: "outlined", Icon: HelpCenterRoundedIcon },
 };

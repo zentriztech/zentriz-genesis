@@ -82,10 +82,49 @@ export const PROMOTE_HIDDEN_UNTIL_NORMALIZED =
 export interface PromotionVerdict {
   /** `true` pode · `false` não pode · `null` o servidor NÃO conferiu (botão continua visível). */
   canPromote: boolean | null;
-  /** `NOT_ON_WORKBENCH` (já saiu da Bancada) · `NOT_NORMALIZED` (falta doc) · `null`. */
+  /**
+   * `NOT_ON_WORKBENCH` (já saiu da Bancada) · `NOT_NORMALIZED` (falta doc) · `CONNECT_MISSING`
+   * (sem `connect.yaml` completo) · `NOT_VALIDATED` (validação ausente, vencida, com bloqueio ou
+   * aviso não reconhecido) · `null`.
+   */
   reason: string | null;
   message: string | null;
   normalized: boolean | null;
+  /** Código fino do gate (ex.: `SPEC_WARNINGS_UNACKED`, `BLOCKED`) — escolhe a ação sugerida. */
+  code?: string | null;
+}
+
+/** Ordem que o servidor exige para liberar o Promover (`PROMOTION_STEPS` da api). */
+export const PROMOTION_STEPS = "Normalizar → Validar → Reconhecer avisos → Promover";
+
+/** Resultado da geração automática do `connect.yaml` dentro do [Normalizar]. */
+export interface ConnectEnsure {
+  generated: Array<{ projectId: string; title: string }>;
+  failed: Array<{ projectId: string; title: string; error: string }>;
+}
+
+/**
+ * A AÇÃO que destrava o Promover, a partir do motivo do servidor (16/10, VNX Judge: a tela dizia
+ * "Promover aparece depois de normalizar" mesmo quando o que faltava era validar).
+ */
+export function promoteNextAction(p: PromotionVerdict | null | undefined): "normalize" | "validate" | "gaps" | null {
+  if (!p || p.canPromote !== false) return null;
+  if (p.reason === "NOT_NORMALIZED" || p.reason === "CONNECT_MISSING") return "normalize";
+  if (p.reason === "NOT_VALIDATED") {
+    return p.code === "SPEC_WARNINGS_UNACKED" || p.code === "BLOCKED" ? "gaps" : "validate";
+  }
+  return null;
+}
+
+export function connectNotice(c: ConnectEnsure | null | undefined): string {
+  if (!c) return "";
+  const parts: string[] = [];
+  if (c.generated.length) parts.push(`connect.yaml gerado em ${c.generated.length} projeto(s).`);
+  if (c.failed.length) {
+    parts.push(`connect.yaml NÃO foi gerado em ${c.failed.map((f) => f.title).join(", ")} (${c.failed[0].error}) — `
+      + "o Promover continua travado até ele existir; clique em Normalizar de novo ou gere pelo checklist Connect.");
+  }
+  return parts.length ? ` ${parts.join(" ")}` : "";
 }
 
 /**
@@ -120,8 +159,9 @@ export function normalizeLabel(promotion: PromotionVerdict | null | undefined, n
 }
 
 /** Resultado de `POST /projects/:id/normalize` (uma spec). */
-export function normalizedSpecNotice(documents: number): string {
-  return `Spec normalizada: ${documents} arquivo(s) de documentação gravados. Promover já aparece no card.`;
+export function normalizedSpecNotice(documents: number, connect?: ConnectEnsure | null): string {
+  return `Spec normalizada: ${documents} arquivo(s) de documentação gravados.${connectNotice(connect)} `
+    + "Próximo passo: Validar (a árvore mudou, a validação anterior não vale mais).";
 }
 
 /**
@@ -131,11 +171,15 @@ export function normalizedSpecNotice(documents: number): string {
  * único jeito de ele ter RFC/ADR), mas prometer que isso "liberou o promover" seria mentira — o
  * promover daquele produto está fechado por ESTADO, não por falta de documento.
  */
-export function normalizedProductNotice(documents: number, skipped: number, unlocksPromote = true): string {
+export function normalizedProductNotice(
+  documents: number, skipped: number, unlocksPromote = true, connect?: ConnectEnsure | null,
+): string {
+  // 16/10 (VNX Judge): "Promover está liberado" era falso — falta validar a árvore nova e o
+  // connect.yaml pode não ter sido gerado. Quem libera é o servidor; aqui só o próximo passo.
   const tail = unlocksPromote
-    ? "Promover está liberado."
+    ? `Próximo passo: Validar cada projeto (${PROMOTION_STEPS}).`
     : "O produto já saiu da Bancada — a documentação fica em dia, mas não há promoção a destravar.";
-  const base = `Produto normalizado: ${documents} arquivo(s) de documentação gravados. ${tail}`;
+  const base = `Produto normalizado: ${documents} arquivo(s) de documentação gravados.${connectNotice(connect)} ${tail}`;
   return skipped > 0
     ? `${base} ${skipped} projeto(s) ficaram de fora (spec editada após a aprovação) — veja os detalhes.`
     : base;

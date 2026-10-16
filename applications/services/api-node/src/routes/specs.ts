@@ -29,7 +29,7 @@ import {
 } from "../services/specTextExtract.js";
 import { createRateLimiter, clientIp } from "../services/rateLimit.js";
 import { isProjectNormalized, type Queryable } from "../services/productNormalizer.js";
-import { decideSpecPromotability } from "../services/promotability.js";
+import { assessProjectReadiness, decideSpecPromotability, safeReadiness, type FactoryReadiness } from "../services/promotability.js";
 
 const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
 
@@ -43,6 +43,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // do teto o campo vai `null` = "não sei" — e `null` NUNCA esconde o botão (quem decide é o servidor,
 // na hora do promote).
 const NORMALIZED_CHECK_MAX_SPECS = 40;
+/** Teto de specs com prontidão (connect + validação) conferida por listagem — I/O de disco + triagem por spec. */
+const READINESS_CHECK_MAX_SPECS = 25;
 
 /**
  * Diz, por spec, se a documentação de decisão está EM DIA com a spec que ela tem agora. É o que a
@@ -525,7 +527,15 @@ export async function specRoutes(app: FastifyInstance) {
         // veio na listagem). Sem isto, cada tela volta a inventar a sua regra — foi assim que o
         // Promover apareceu habilitado numa spec que a API só podia recusar.
         const statusById = new Map(rows.map((r) => [String((r as Record<string, unknown>).id), (r as Record<string, unknown>).status as string | null]));
-        const promotionOf = (id: string) => decideSpecPromotability(statusById.get(id) ?? null, normOf(id));
+        // Prontidão (connect + validação, 2026-10-16): só para quem está a um passo do promote
+        // (rascunho normalizado), com teto — fora dele `null` ("não conferi"): o botão fica e o
+        // /promote decide.
+        const readyById = new Map<string, FactoryReadiness | null>();
+        const candidates = rows.map((r) => String((r as Record<string, unknown>).id))
+          .filter((id) => statusById.get(id) === "draft" && normOf(id) === true)
+          .slice(0, READINESS_CHECK_MAX_SPECS);
+        for (const pid of candidates) readyById.set(pid, await safeReadiness(() => assessProjectReadiness(client, pid)));
+        const promotionOf = (id: string) => decideSpecPromotability(statusById.get(id) ?? null, normOf(id), readyById.get(id) ?? null);
         // 2026-10-02 (pedido do Jean): orçamento/gasto/saldo de LLM no card. Lote de 1 query; falha
         // ⇒ `budget: null` (o card some com o bloco, a listagem não quebra).
         const budgets = await budgetBriefs(client, enriched.map((s) => s.id))
