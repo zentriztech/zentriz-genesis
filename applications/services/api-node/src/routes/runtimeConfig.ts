@@ -38,6 +38,10 @@ const CONFIG_KEYS: Record<string, { label: string; group: string; unit: string; 
   // spec_intake re-emite a PRODUCT_SPEC inteira no output — specs grandes exigem teto alto.
   // Cap baixo trunca o JSON (BLOCKED). Default 64000 (teto do modelo).
   CLAUDE_MAX_TOKENS_SPEC_INTAKE: { label: "Max tokens Spec Intake (CTO)", group: "tokens", unit: "tk", min: 1000, max: 64000 },
+  // Chat livre da Bancada por arquivo: o modelo devolve o arquivo INTEIRO, então o teto precisa
+  // cobrir a cópia + o que a edição acrescenta. Lido pela api (specChat.ts) a cada pedido — sem deploy.
+  // Faixa = SPEC_CHAT_MAX_TOKENS_BOUNDS (piso histórico da fórmula, teto seguro do SDK).
+  SPEC_CHAT_MAX_TOKENS:   { label: "Max tokens Chat da Bancada (arquivo)", group: "tokens", unit: "tk", min: 8000, max: 32000 },
 };
 
 export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {

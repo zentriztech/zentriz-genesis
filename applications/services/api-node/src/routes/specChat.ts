@@ -71,6 +71,7 @@ import {
   specTreeFactBlock, deadRemissions, deadRemissionFactBlock, type SpecTreeEntry,
 } from "../services/specTreeFacts.js";
 import { siblingBodiesIn } from "../services/specSiblingContext.js";
+import { readRuntimeNumber } from "../services/runtimeTunables.js";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -544,6 +545,33 @@ export function rawMaxTokensFor(chars: number): number {
 }
 
 /**
+ * Chave de `/settings/runtime-config` que fixa o TETO DE SAÍDA do chat livre da Bancada por arquivo.
+ *
+ * MEDIDO EM PROD (16/10/2026, `modelo-dados.md`, 19.325 chars): `rawMaxTokensFor` deu 8.902 e o
+ * Sonnet 5.5 cortou em exatamente 8.902 tokens com 16,4–16,7 mil chars emitidos (~1,87 chars/token,
+ * e não os 2,8 que a fórmula supõe) — a resposta não chegou nem a COPIAR o arquivo de volta. Como o
+ * chat devolve o arquivo INTEIRO, a fórmula por tamanho subestima qualquer arquivo denso (tabelas,
+ * SQL, identificadores). `max_tokens` é teto, não gasto: o knob existe para o humano ajustar sem deploy.
+ */
+export const SPEC_CHAT_MAX_TOKENS_KEY = "SPEC_CHAT_MAX_TOKENS";
+/** Faixa aceita do knob: piso = o piso histórico da fórmula, teto = o limite seguro do SDK (ver `GAP_FILE_MAX_TOKENS`). */
+export const SPEC_CHAT_MAX_TOKENS_BOUNDS = { min: 8_000, max: 32_000 } as const;
+
+/**
+ * Orçamento de saída do chat livre por arquivo. `configured` é o knob já validado (`null` = não
+ * configurado ou inválido → a fórmula histórica por tamanho, intocada).
+ */
+export function chatFileMaxTokens(chars: number, configured: number | null = null): number {
+  if (configured != null
+    && Number.isInteger(configured)
+    && configured >= SPEC_CHAT_MAX_TOKENS_BOUNDS.min
+    && configured <= SPEC_CHAT_MAX_TOKENS_BOUNDS.max) {
+    return configured;
+  }
+  return rawMaxTokensFor(chars);
+}
+
+/**
  * A5.1 (2026-09-06) — orçamento de saída do "Resolver GAPs POR ARQUIVO".
  *
  * MEDIDO EM PROD (run `b3932af7`, rodada 2, `nvx-lastmile-backend.md`): 10.517 chars + 5 GAPs →
@@ -636,6 +664,8 @@ export function buildRawFileRequest(
   scopeProjectId: string | null = null,
   /** 🔴 GAP-163 — remissões deste arquivo que não casam no destino. Vazio = medi e não achei. */
   deadRemissionBlock = "",
+  /** Knob `SPEC_CHAT_MAX_TOKENS` (runtime-config), já validado. `null` = fórmula por tamanho. */
+  maxTokensConfigured: number | null = null,
 ): Record<string, unknown> {
   const history = messages.slice(-12);
   const lastUser = [...history].reverse().find((m) => m.role === "user")?.content?.trim() ?? "";
@@ -701,7 +731,7 @@ export function buildRawFileRequest(
   return {
     prompt_override: RAW_FILE_SYSTEM,
     user_message: userMessage,
-    max_tokens: rawMaxTokensFor(content.length),
+    max_tokens: chatFileMaxTokens(content.length, maxTokensConfigured),
     // Consulta = o PEDIDO humano (a intenção da rodada) + o arquivo; não a spec inteira.
     ...cagBlock(scopeProjectId, `${lastUser}\n${filePath}`),
   };
@@ -2608,6 +2638,11 @@ export async function specChatRoutes(app: FastifyInstance) {
             ...buildRawFileRequest(
               specMarkdown, messages, filePath, ctx, projectId,
               await deadRemissionBlockFor(projectId, filePath),
+              // Teto de saída editável em /settings/runtime-config (override do tenant > global).
+              await readRuntimeNumber(
+                pool, SPEC_CHAT_MAX_TOKENS_KEY, projectTenantId ?? user.tenantId ?? null,
+                SPEC_CHAT_MAX_TOKENS_BOUNDS,
+              ),
             ),
             ...llm,
           },

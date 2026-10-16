@@ -1092,6 +1092,68 @@ describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
   });
 
   /**
+   * Regressão MEDIDA em prod 16/10/2026: `modelo-dados.md` (19.325 chars) → teto 8.902 → o modelo cortou
+   * em 8.902 tokens com ~16,5k chars emitidos (~1,87 chars/token) e a rodada foi descartada. O teto agora
+   * é um knob de /settings/runtime-config (`SPEC_CHAT_MAX_TOKENS`).
+   */
+  it("chatFileMaxTokens: o knob vence a fórmula; ausente/inválido cai na fórmula", async () => {
+    const { chatFileMaxTokens, rawMaxTokensFor, SPEC_CHAT_MAX_TOKENS_BOUNDS } = await import("./specChat.js");
+    // O defeito em uma linha: a fórmula dá 8.902 para o arquivo que truncou.
+    expect(rawMaxTokensFor(19_325)).toBe(8_902);
+    expect(chatFileMaxTokens(19_325, 32_000)).toBe(32_000);          // knob configurado
+    expect(chatFileMaxTokens(19_325, 12_000)).toBe(12_000);          // o humano manda, mesmo menor que o necessário
+    expect(chatFileMaxTokens(19_325, null)).toBe(8_902);             // não configurado = histórico
+    expect(chatFileMaxTokens(19_325)).toBe(8_902);
+    // Fora da faixa / não inteiro nunca vira chamada paga: cai na fórmula.
+    expect(chatFileMaxTokens(19_325, 7_999)).toBe(8_902);
+    expect(chatFileMaxTokens(19_325, 32_001)).toBe(8_902);
+    expect(chatFileMaxTokens(19_325, 9_000.5)).toBe(8_902);
+    expect(chatFileMaxTokens(19_325, Number.NaN)).toBe(8_902);
+    expect(SPEC_CHAT_MAX_TOKENS_BOUNDS).toEqual({ min: 8_000, max: 32_000 });
+  });
+
+  it("chat livre por arquivo: o call site lê SPEC_CHAT_MAX_TOKENS do runtime-config e o envia como max_tokens", async () => {
+    const seen: { sql: string; params: unknown[] }[] = [];
+    const prev = queryHandler;
+    queryHandler = (sql, params) => {
+      if (sql.includes("genesis_runtime_config")) { seen.push({ sql, params }); return { rows: [{ value: "30000" }] }; }
+      return prev(sql, params);
+    };
+    try {
+      rawResponse = JSON.stringify({ response: "# API revisada" });
+      const res = await app.inject({
+        method: "POST", url: "/api/spec-chat",
+        payload: { specMarkdown: "# API\n\ntexto", messages: msg("ajuste"), projectId: PROJ, filePath: "backend/01-api.md" },
+      });
+      expect(res.statusCode).toBe(202);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.params[0]).toBe("SPEC_CHAT_MAX_TOKENS");
+      expect(seen[0]!.params[1]).toBe(TENANT);                        // tenant do PROJETO, não do JWT
+      const payload = JSON.parse(editorCall()!.body) as { max_tokens: number };
+      expect(payload.max_tokens).toBe(30_000);
+    } finally {
+      queryHandler = prev;
+    }
+  });
+
+  it("chat livre por arquivo: valor inválido na tabela é ignorado e a fórmula histórica segue valendo", async () => {
+    const prev = queryHandler;
+    queryHandler = (sql, params) =>
+      sql.includes("genesis_runtime_config") ? { rows: [{ value: "999999" }] } : prev(sql, params);
+    try {
+      rawResponse = JSON.stringify({ response: "# API revisada" });
+      const res = await app.inject({
+        method: "POST", url: "/api/spec-chat",
+        payload: { specMarkdown: "# API\n\ntexto", messages: msg("ajuste"), projectId: PROJ, filePath: "backend/01-api.md" },
+      });
+      expect(res.statusCode).toBe(202);
+      expect((JSON.parse(editorCall()!.body) as { max_tokens: number }).max_tokens).toBe(8_000);
+    } finally {
+      queryHandler = prev;
+    }
+  });
+
+  /**
    * A5.1 — regressão MEDIDA em prod 2026-09-06 (run `b3932af7`, rodada 2): o "Resolver GAPs por
    * arquivo" usava `rawMaxTokensFor(chars + GAPs×900)`, o que dava exatamente o PISO de 8.000 para o
    * `nvx-lastmile-backend.md` (10.517 chars, 5 GAPs) → `spec_cto out=8000 TRUNCATED`, rodada
