@@ -417,7 +417,18 @@ def run(body: RunBody):
                     known = any(x in ml for x in ("claude","sonnet","opus","haiku","gpt","o1","o3","o4","composer","davinci","us.anthropic"))
                     return not known
 
-                if _model_id and not _is_compatible(_raw_provider, _model_id):
+                # 2A.4/2A.5: sob LLM_ROLES_MODE=on o provider do slot NUNCA é "corrigido": cada papel
+                # declarado é validado contra ele e a incompatibilidade FALHA ALTO (422), nomeando o papel.
+                from orchestrator.agents import llm_roles as _llm_roles
+                _roles_on = _llm_roles.is_on()
+                if _roles_on:
+                    _role_models = _llm_roles.models_from_runner_response(_llm_cfg)
+                    try:
+                        _llm_roles.validate_models(_raw_provider, _role_models)
+                    except _llm_roles.RoleResolutionError as _rerr:
+                        raise HTTPException(status_code=422, detail=f"Slot de LLM inválido por papel: {_rerr}")
+                    _effective_provider = _raw_provider
+                elif _model_id and not _is_compatible(_raw_provider, _model_id):
                     # Inferir provider correto para o modelo
                     ml = _model_id.lower()
                     if "gemini" in ml:
@@ -440,6 +451,16 @@ def run(body: RunBody):
 
                 env["GENESIS_LLM_PROVIDER"] = _effective_provider
                 env["CLAUDE_MODEL"]          = _model_id
+                if _roles_on:
+                    # 2A.5: envs de TRANSPORTE (não de escolha) do contrato por papel; sem credencial por
+                    # papel (os 3 papéis usam a credencial do slot injetada abaixo).
+                    for _ek, _ev in _llm_roles.transport_env(_role_models).items():
+                        if _ek == "CLAUDE_MODEL":
+                            continue
+                        if _ev:
+                            env[_ek] = _ev
+                        else:
+                            env.pop(_ek, None)
 
                 # Credentials por provider
                 if _effective_provider == "openai" and _api_key:

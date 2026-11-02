@@ -23,6 +23,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from orchestrator.agents import llm_guard as _llm_guard
+from orchestrator.agents import llm_roles as _llm_roles
 
 # T01: sanitiza AWS_PROFILE="" (string vazia) — boto3 procura profile literal ""
 # e falha com ProfileNotFound. `unset` no compose vira "" via ${VAR:-}, então
@@ -2469,6 +2470,7 @@ def call_qa(
     evolution_scope: list | None = None,       # Evoluir E4: globs do RFC (QA valida ACs + não-regressão dentro do escopo)
     pipeline_ctx: "PipelineContext | None" = None,  # GAP-54b: fonte do dossiê da spec
     task_dict: dict | None = None,                  # GAP-54b: foco do dossiê (o que a task CITA)
+    role_floor: str | None = None,                  # 2A.4: papel EFETIVO do Dev (piso QA >= Dev); só sob LLM_ROLES_MODE=on
 ) -> dict:
     inputs = {
         "spec_ref": spec_ref,
@@ -2478,6 +2480,8 @@ def call_qa(
         "constraints": ["spec-driven", "paths-resilient"],
         "rework_attempt": rework_attempt,  # escalada de modelo: rework>=1 → Opus 4.7
     }
+    if role_floor:
+        inputs["role_floor"] = role_floor
     if code_refs:
         inputs["code_refs"] = code_refs
     # Escopo de validação: apenas os arquivos que esta task entregou.
@@ -2960,6 +2964,10 @@ def _llm_envelope_do_run() -> dict:
         _llm_config["provider"] = _provider
     if _model:
         _llm_config["model"] = _model
+    # 2A.5: contrato por papel, ADITIVO e só com LLM_ROLES_MODE=on (off ⇒ envelope byte-idêntico).
+    # Os 3 papéis compartilham a credencial do slot: só os IDs de modelo viajam, nenhuma credencial nova.
+    if _llm_roles.is_on():
+        _llm_config.update(_llm_roles.envelope_from_env(os.environ))
     # Injetar credenciais por provider
     if _provider == "bedrock" or (not _provider):
         _ak = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
@@ -4038,6 +4046,8 @@ def _run_monitor_loop(
     # Mapeamento task_id → rework_attempt máximo observado pelo Dev.
     # QA: _qa_rework_effective = max(_qa_rework, dev_peak_rework[tid])
     dev_peak_rework: dict[str, int] = {}
+    # 2A.4: piso QA >= Dev pelo papel EFETIVO (só com LLM_ROLES_MODE=on). task_id → maior papel efetivo do Dev.
+    dev_effective_role: dict[str, str] = {}
     # MONITOR_PARALLEL=true enables concurrent processing of multiple tasks of the
     # same type within a single loop iteration. Default false to preserve behavior.
     monitor_parallel = os.environ.get("MONITOR_PARALLEL", "false").strip().lower() in ("1", "true", "yes")
@@ -4214,6 +4224,8 @@ def _run_monitor_loop(
                         spec_ref, charter_summary, backlog_summary, dev_summary, request_id,
                         task_id=tid, task=task_desc, code_refs=code_refs, existing_artifacts=_qa_artifacts,
                         rework_attempt=_qa_rework,
+                        **({"role_floor": dev_effective_role[_norm_qa_tid]}
+                           if _llm_roles.is_on() and dev_effective_role.get(_norm_qa_tid) else {}),
                         task_delivered_files=_task_files,
                         evolution_scope=getattr(pipeline_ctx, "evolution_scope", None) if pipeline_ctx else None,
                         pipeline_ctx=pipeline_ctx,   # GAP-54b: o QA mede contra o CONTRATO, não contra o resumo
@@ -4486,6 +4498,10 @@ def _run_monitor_loop(
                         rework_attempt=_task_rework_count,
                     )
                     _audit_log("dev", request_id, dev_response, task_id=task_id, round_num=_task_rework_count + 1)
+                    if _llm_roles.is_on() and _llm_guard.normalize_role(dev_response.get("_effective_role")):
+                        dev_effective_role[_norm_tid] = _llm_roles.apply_floor(
+                            _llm_guard.normalize_role(dev_response.get("_effective_role")),
+                            dev_effective_role.get(_norm_tid))
                     dev_summary = dev_response.get("summary", "")
                     dev_status = dev_response.get("status", "?")
                     last_dev_artifacts = dev_response.get("artifacts", [])
