@@ -51,6 +51,8 @@ import { buildFileDigest } from "./specFileDigest.js";
 import { loadSpecFiles, resolveFindingPath, type SpecFileRef } from "./specGapScope.js";
 import { buildSiblingContext } from "./specSiblingContext.js";
 import type { ValidationFinding } from "./specValidation.js";
+import { resolveRoleModel, rolesRoutingOn, type RoleModels } from "../lib/llmRoleSlots.js";
+import type { LlmRole } from "../lib/llmRoles.js";
 import {
   agentsLlmFields, resolveReviewerLlmForProject, type ReviewerResolution,
 } from "./tenantLlmConfig.js";
@@ -327,6 +329,28 @@ export function buildAuditMessage(f: ValidationFinding, section: string, purpose
 }
 
 /**
+ * 2A.8 — modelo e papel EFETIVOS do executor para a régua "outra família e não mais fraco".
+ * Com a flag != `on` (ou sem `models` no envelope) devolve `llm.model_id`, como sempre.
+ */
+export function effectiveExecutor(
+  llm: Record<string, unknown> | null | undefined,
+  explicit?: { model: string; role?: LlmRole } | null,
+): { model: string; role?: LlmRole } {
+  const exp = String(explicit?.model ?? "").trim();
+  if (exp) return { model: exp, ...(explicit?.role ? { role: explicit.role } : {}) };
+  const legacy = String((llm as { model_id?: unknown } | null | undefined)?.model_id ?? "").trim();
+  const models = (llm as { models?: RoleModels } | null | undefined)?.models;
+  if (!rolesRoutingOn() || !models) return { model: legacy };
+  const role: LlmRole = explicit?.role ?? "orchestrator";
+  try {
+    const r = resolveRoleModel(models, role);
+    return { model: r.model, role: r.effective_role };
+  } catch {
+    return { model: legacy };
+  }
+}
+
+/**
  * Audita os findings ANCORADOS de uma validação com um modelo de outra família.
  *
  * Só finding ancorado entra: sem âncora não existe trecho verbatim, e auditar sem o texto seria
@@ -345,6 +369,13 @@ export async function auditFindings(db: Db, args: {
   max?: number;
   /** Revisor já resolvido (quem chama em lote resolve uma vez). Ausente ⇒ resolve pelos slots. */
   reviewer?: ReviewerResolution | null;
+  /**
+   * 2A.8: modelo EFETIVAMENTE usado pelo executor (e o papel). Ausente ⇒ derivado de `llm`:
+   * sem `LLM_ROLES_MODE=on` é `llm.model_id` (idêntico ao anterior); com `on` e `llm.models`, é o
+   * modelo do papel pedido (Orchestrator por padrão) — o principal do slot só vale quando o papel
+   * efetivo é o Orchestrator.
+   */
+  executor?: { model: string; role?: LlmRole } | null;
 }): Promise<CrossFamilyAuditResult> {
   const purpose: AuditPurpose = args.purpose ?? "acusacao";
   const max = args.max && args.max > 0 ? args.max : AUDIT_MAX_PER_RUN;
@@ -377,9 +408,9 @@ export async function auditFindings(db: Db, args: {
   // hard-coded (proibido) e, pior, um id de outra família pedido ao provider errado (o Foundry desta
   // conta só serve Claude ⇒ 400). Agora cada slot concorre COM o próprio provider e as próprias
   // credenciais, na ordem que o tenant cadastrou: reordenar slots na tela troca o revisor sem deploy.
-  const executorModel = String((args.llm as { model_id?: unknown } | null | undefined)?.model_id ?? "").trim();
+  const { model: executorModel, role: executorRole } = effectiveExecutor(args.llm, args.executor);
   const pick = args.reviewer
-    ?? (await resolveReviewerLlmForProject({ projectId: args.projectId, executorModel }));
+    ?? (await resolveReviewerLlmForProject({ projectId: args.projectId, executorModel, executorRole }));
   if (!pick.ok) {
     console.warn(`[crossFamilyAudit] ${pick.alert}`);
     return { ...empty(pick.alert, ""), skipped };

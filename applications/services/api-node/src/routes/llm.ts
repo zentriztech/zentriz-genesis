@@ -12,11 +12,11 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { resolveScopedTenantId } from "../lib/tenantScope.js";
-import { slotUsability, hasOwnCredentials } from "../services/tenantLlmConfig.js";
+import { slotUsability, hasOwnCredentials, reviewerFamilies, reviewerRoleCandidates } from "../services/tenantLlmConfig.js";
 import { modelFamilyOf } from "../services/reviewerModel.js";
 import { probeSlot, recordProbe, listModels, type ProbeResult } from "../services/llmSlotProbe.js";
 import { verifyRoles, recordRoleVerdicts, roleVerdictsPayload, roleVerifyFromRow, type RoleModelsIn } from "../services/llmRoleProbe.js";
-import { rolesEnabled, deriveRolesForSave, validateRoleModels, rolesFromRow, type RoleModels } from "../lib/llmRoleSlots.js";
+import { rolesEnabled, rolesRoutingOn, deriveRolesForSave, validateRoleModels, rolesFromRow, type RoleModels } from "../lib/llmRoleSlots.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -332,9 +332,32 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
       // Quantas FAMÍLIAS distintas os slots utilizáveis cobrem. É o número que sustenta a
       // recomendação do Jean ("pelo menos 2 slots de famílias diferentes"): com uma só família não
       // existe revisor cross-family, e auto-revisão mede ZERO ganho (arXiv:2609.04270).
-      const familias = [...new Set(
-        slots.filter((s) => s.usable && s.model_id).map((s) => modelFamilyOf(String(s.model_id)))
-      )];
+      // 2A.8: com `LLM_ROLES_MODE=on` as famílias saem dos PAPÉIS elegíveis a revisor (Orchestrator e
+      // Advisor; Staff nunca revisa) de cada slot utilizável — o Advisor de outra família destrava o
+      // revisor. Papel sem verificação ainda conta (com aviso em `cross_family_warnings`); papel com
+      // probe != ok não conta. Com `off`/`shadow` o cálculo é o de sempre (um modelo por slot).
+      const rolesOn = rolesRoutingOn();
+      const crossWarnings: string[] = [];
+      const familias = rolesOn
+        ? reviewerFamilies(
+            res.rows
+              .filter((row) => formatSlot(row as Record<string, unknown>, byocExempt).usable && (row as Record<string, unknown>).model_id)
+              .map((row) => {
+                const r = row as Record<string, unknown>;
+                const verify = {
+                  orchestrator: r.verify_orchestrator_status ? String(r.verify_orchestrator_status) : null,
+                  advisor: r.verify_advisor_status ? String(r.verify_advisor_status) : null,
+                };
+                const slot = { modelId: String(r.model_id), models: rolesFromRow(r).models, verify };
+                for (const c of reviewerRoleCandidates(slot)) {
+                  if (c.unverified) crossWarnings.push(`slot ${Number(r.priority ?? 0)}: papel ${c.role} ainda não verificado; tratado como elegível`);
+                }
+                return slot;
+              }),
+          )
+        : [...new Set(
+            slots.filter((s) => s.usable && s.model_id).map((s) => modelFamilyOf(String(s.model_id)))
+          )];
 
       // Cyborg defaults do singleton Zentriz (para exibir "herdado" quando slot não configura)
       let zentrizDefaults: { cyborg_model_id: string | null; cyborg_model_id_fallback: string | null } = {
@@ -372,6 +395,7 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
         /** Sem nenhum slot utilizável o tenant não roda NADA — a tela precisa dizer isso. */
         has_usable_slot: slots.some((s) => s.usable),
         cross_family_available: familias.length >= 2,
+        ...(rolesOn ? { cross_family_warnings: crossWarnings } : {}),
       });
     } finally { client.release(); }
   });

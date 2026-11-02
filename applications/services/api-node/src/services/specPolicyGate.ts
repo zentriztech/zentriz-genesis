@@ -65,6 +65,7 @@ import { evidenceIsVerbatim } from "./crossFamilyAudit.js";
 import type { Db } from "./findingTriage.js";
 import { parseCountField, parseListResponse } from "./gapPromotionVerdict.js";
 import { agentsLlmFields, resolveReviewerLlmForProject } from "./tenantLlmConfig.js";
+import { effectiveExecutor } from "./crossFamilyAudit.js";
 
 /** Onde a constraint é verificável. `spec` é o único julgável na Bancada (Mistral B2). */
 export type VerifiableAt = "spec" | "build" | "runtime";
@@ -1135,7 +1136,13 @@ async function policyGateOnce(
     // ⚖️ LEI 2026-09-10: o auditor é um SLOT do tenant de outra família que o juiz — com o envelope
     // dele (provider + credencial), porque o revisor pode morar em outro provider. Sem slot viável a
     // auditoria simplesmente não roda, e o comentário abaixo já diz o que isso significa.
-    const revisor = await resolveReviewerLlmForProject({ projectId: args.projectId, executorModel: judgeModel });
+    // 2A.8: `judgeModel` é o modelo EFETIVO devolvido pelo agent (não o principal do slot); se nenhum passe
+    // devolveu modelo, cai no efetivo do envelope. O juiz roda no papel Orchestrator.
+    const revisor = await resolveReviewerLlmForProject({
+      projectId: args.projectId,
+      executorModel: judgeModel || effectiveExecutor(args.llm).model,
+      executorRole: "orchestrator",
+    });
     if (!revisor.ok) console.warn(`[specPolicyGate] auditoria de constraint não roda — ${revisor.alert}`);
     const res = revisor.ok
       ? await callPolicyAgent({
