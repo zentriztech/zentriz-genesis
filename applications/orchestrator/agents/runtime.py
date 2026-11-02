@@ -862,9 +862,35 @@ def _skill_store_assemble(
         return None
 
 
+def _record_lesson_injection(project_id: str | None, task_id: str | None, lessons: list) -> bool:
+    """SKILL_FEEDBACK (plano 1.2, ADR-025): registra QUAIS lições entraram no prompt desta task.
+
+    É só o insumo do `hit_count` idempotente: o incremento acontece no servidor quando (e só quando)
+    um oráculo positivo fecha o projeto. Flag off ⇒ retorna sem tocar a rede. Best-effort, sem PII
+    (só ids opacos e slugs). Usa a mesma API/token do skill store.
+    """
+    raw = (os.environ.get("SKILL_FEEDBACK", "off") or "off").strip().lower()
+    if raw not in ("shadow", "on") or not project_id or not task_id or not _GENESIS_API_TOKEN:
+        return False
+    slugs = sorted({str(l.get("slug")) for l in (lessons or []) if isinstance(l, dict) and l.get("slug")})
+    if not slugs:
+        return False
+    try:
+        body = json.dumps({"project_id": project_id, "task_id": task_id, "slugs": slugs[:100]}).encode("utf-8")
+        req = _urllib_req.Request(
+            f"{_GENESIS_API_URL}/api/skills/lesson-injections", data=body, method="POST",
+            headers={"Authorization": f"Bearer {_GENESIS_API_TOKEN}", "Content-Type": "application/json"},
+        )
+        with _urllib_req.urlopen(req, timeout=5) as resp:
+            return resp.status in (200, 201, 202)
+    except Exception as exc:
+        logger.debug("[SkillFeedback] registro de lições injetadas falhou (não crítico): %s", exc)
+        return False
+
+
 def _maybe_apply_cag_prefix(
     base_prompt: str, role: str, stack_key: str, project_id: str | None,
-    query: str | None = None,
+    query: str | None = None, task_id: str | None = None,
 ) -> str:
     """
     Aplica CAG (Context-Aware Generation) prefix se CAG_ENABLED=live.
@@ -905,6 +931,8 @@ def _maybe_apply_cag_prefix(
         prefix = pkg.to_prompt_prefix()
         if not prefix:
             return base_prompt
+        # Só lição que ENTROU no prompt (live) pode vir a contar acerto; shadow retornou acima.
+        _record_lesson_injection(project_id, task_id, pkg.lessons_hot)
 
         # INFO (era debug): em prod o nível é INFO, então `live` era INVISÍVEL — não havia como
         # provar que a lição recuperada realmente entrou no prompt. `lessons=` é o número que
@@ -1028,9 +1056,11 @@ def load_system_prompt_with_skills(
     Retorna: (system_prompt_text, bundle_hash_or_None)
     """
     static_prompt = load_system_prompt(system_prompt_path)
+    # task_id só é repassado ao CAG quando existe (mantém a chamada idêntica à legada sem task).
+    _cag_task = {"task_id": task_id} if task_id else {}
 
     if SKILL_STORE_MODE == "off":
-        return _maybe_apply_cag_prefix(static_prompt, role, stack_key, project_id, query), None
+        return _maybe_apply_cag_prefix(static_prompt, role, stack_key, project_id, query, **_cag_task), None
 
     result = _skill_store_assemble(role, stack_key, project_id, task_id)
 
@@ -1048,7 +1078,7 @@ def load_system_prompt_with_skills(
             else:
                 logger.debug("[SkillStore/shadow] role=%s stack=%s — hashes idênticos ✓", role, stack_key)
         # shadow sempre usa o prompt estático em runtime
-        return _maybe_apply_cag_prefix(static_prompt, role, stack_key, project_id, query), None
+        return _maybe_apply_cag_prefix(static_prompt, role, stack_key, project_id, query, **_cag_task), None
 
     # SKILL_STORE_MODE == "active"
     if result is not None:
@@ -1061,11 +1091,11 @@ def load_system_prompt_with_skills(
             opening = "## INÍCIO — Regras críticas (LEI 2)\n\n" + critical + "\n\n---\n\n"
             closing = "\n\n---\n\n## LEMBRETES FINAIS (LEI 2 — leia com atenção)\n\n" + critical + "\n"
             dynamic_prompt = opening + dynamic_prompt.rstrip() + closing
-        return _maybe_apply_cag_prefix(dynamic_prompt, role, stack_key, project_id, query), bundle_hash
+        return _maybe_apply_cag_prefix(dynamic_prompt, role, stack_key, project_id, query, **_cag_task), bundle_hash
 
     # Fallback: skill store indisponível → usar estático
     logger.warning("[SkillStore/active] role=%s stack=%s — sem cobertura, fallback estático", role, stack_key)
-    return _maybe_apply_cag_prefix(static_prompt, role, stack_key, project_id), None
+    return _maybe_apply_cag_prefix(static_prompt, role, stack_key, project_id, **_cag_task), None
 
 
 def _load_product_spec_template() -> str:
