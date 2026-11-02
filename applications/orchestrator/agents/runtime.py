@@ -2178,7 +2178,10 @@ def _run_agent_openai(
     _in = _out = 0
     _gctx = _llm_guard.check(model=model, system=_guard_text(system_content), user=_guard_text(user_content),
                              max_tokens=max_tokens, provider="openai", project_id=_guard_project_of(message),
-                             purpose=f"{role}:{mode}", **_llm_guard.role_kwargs())
+                             purpose=f"{role}:{mode}", **_llm_guard.role_kwargs(),
+                             **_llm_guard.waste_kwargs(
+                                 "primary", task=message.get("task_id") or (message.get("inputs") or message.get("input") or {}).get("task_id"),
+                                 stage=f"{role}:{mode}", attempt="r0.p0"))
     for attempt in range(CLAUDE_RETRY_ATTEMPTS):
         try:
             resp = client.chat.completions.create(
@@ -2666,7 +2669,14 @@ def run_agent(
         _gctx = _llm_guard.check(model=model, system=_guard_text(system_content), user=_guard_text(user_content),
                                  max_tokens=max_tokens, provider=provider, project_id=_guard_project_of(message),
                                  purpose=f"{role}:{mode or 'default'}",
-                                 **_llm_guard.role_kwargs(escalated=_role_escalated))
+                                 **_llm_guard.role_kwargs(escalated=_role_escalated),
+                                 # Plano 1.4: motivo (primary|repair|rework) + chave projeto|task|etapa|tentativa.
+                                 **_llm_guard.waste_kwargs(
+                                     _llm_guard.derive_reason(repair_attempt=repair_attempt,
+                                                              rework_attempt=_rework_attempt,
+                                                              rework_role=_is_rework_role),
+                                     task=task_id, stage=f"{role}:{mode or 'default'}",
+                                     attempt=f"r{_rework_attempt}.p{repair_attempt}"))
         _g_t0 = time.perf_counter()
         for attempt in range(CLAUDE_RETRY_ATTEMPTS):
             try:
@@ -3407,7 +3417,8 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                         cache_prefix: bool = False,
                         thinking: bool = False,
                         llm_role: str | None = None,
-                        escalated_from: str | None = None) -> str:
+                        escalated_from: str | None = None,
+                        waste: dict | None = None) -> str:
     """LLM GUARD (post-mortem 30/09/2026): licença ANTES, registro (tokens + USD) DEPOIS.
 
     Negado ⇒ `LlmGuardDenied` (nenhum byte sai para o provedor). O projeto vem do escopo
@@ -3417,6 +3428,7 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
         model=model_id, system=system, user=user, max_tokens=max_tokens,
         provider=(llm_cfg or {}).get("provider"), project_id=usage_project_id, purpose=usage_agent,
         **({"llm_role": llm_role, "escalated_from": escalated_from} if (llm_role or escalated_from) else {}),
+        **(waste or {}),  # plano 1.4: `_llm_guard.waste_kwargs(...)`; {} com WASTE_TELEMETRY=off
     )
     _t0 = time.time()
     text = _call_bedrock_direct_impl(system, user, model_id, max_tokens=max_tokens,

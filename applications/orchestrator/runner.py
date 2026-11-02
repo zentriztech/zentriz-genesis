@@ -1890,7 +1890,8 @@ def _ask_llm_for_backend_language(text: str) -> str:
         f"Texto:\n{text[:8000]}"
     )
     _gctx = _llm_guard.check(model=model, user=prompt, max_tokens=10, provider=provider,
-                             purpose="runner:backend_language", **_llm_guard.role_kwargs())
+                             purpose="runner:backend_language", **_llm_guard.role_kwargs(),
+                             **_llm_guard.waste_kwargs("support"))
     if provider == "bedrock":
         client = _bedrock_client(_os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
         body = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 10,
@@ -2107,7 +2108,8 @@ Texto:
 {text[:3000]}"""
 
     _gctx = _llm_guard.check(model=model, user=prompt, max_tokens=10, provider=provider,
-                             purpose="runner:module", **_llm_guard.role_kwargs())
+                             purpose="runner:module", **_llm_guard.role_kwargs(),
+                             **_llm_guard.waste_kwargs("support"))
     if provider == "bedrock":
         import json as _json
         client = _bedrock_client(_os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
@@ -2654,7 +2656,8 @@ def _call_autonomous_monitor(project_id: str, task: dict, request_id: str) -> di
                 _gctx = _llm_guard.check(model=_model, user=_monitor_prompt, max_tokens=4096,
                                          provider=_provider, project_id=project_id,
                                          purpose="runner:autonomous_monitor",
-                                         **_llm_guard.role_kwargs())
+                                         **_llm_guard.role_kwargs(),
+                                         **_llm_guard.waste_kwargs("support"))
             except _llm_guard.LlmGuardDenied as _gd:
                 return {"outcome": "ESCALATE", "summary": f"LLM negado pelo guard de custo: {_gd.message}"}
             # Suporta Bedrock (padrão do Genesis) e Anthropic API direta

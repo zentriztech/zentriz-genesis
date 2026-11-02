@@ -918,7 +918,9 @@ Comece analisando o audit (via `zentriz-audit {project_id}`) e o estado atual do
                                  max_tokens=64000, project_id=project_id, purpose="cyborg_v3:engineer_session",
                                  # Plano 1.3: o Cyborg só roda depois que o pipeline falhou (modelo mais forte
                                  # do tenant) ⇒ escalada: advisor, de origem orchestrator.
-                                 **_llm_guard.role_kwargs(escalated=True))
+                                 **_llm_guard.role_kwargs(escalated=True),
+                                 # Plano 1.4: sessão do Cyborg = escalada após falha do pipeline.
+                                 **_llm_guard.waste_kwargs("escalation"))
     except _llm_guard.LlmGuardDenied as _gd:
         return {"ok": False, "error": f"LLM negado pelo guard de custo ({_gd.code}): {_gd.message}",
                 "guard_denied": True}
