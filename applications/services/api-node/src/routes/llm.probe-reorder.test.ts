@@ -42,7 +42,7 @@ const queryMock = vi.fn(async (sql: string, p?: unknown[]) => {
     const pr = Number((p ?? [])[1]);
     return { rows: slotRows.filter((r) => Number(r.priority) === pr) };
   }
-  if (sql.includes("SELECT * FROM tenant_llm_configs")) return { rows: slotRows };
+  if (sql.includes("SELECT priority FROM tenant_llm_configs")) return { rows: slotRows.map((r) => ({ priority: r.priority })) };
   return { rows: [] };
 });
 vi.mock("../db/client.js", () => ({
@@ -115,20 +115,23 @@ describe("POST /api/tenant/llm-config/reorder — permutar sem perder credencial
     verify_model: model, verify_latency_ms: 120,
   });
 
-  it("move a LINHA inteira: credencial e veredicto do teste seguem o slot", async () => {
+  it("move a LINHA inteira por UPDATE de prioridade: nada é recriado, então nenhuma coluna se perde (2A.2)", async () => {
     slotRows = [ROW(0, "m0", { aws_access_key_id: "A0" }), ROW(1, "m1", { aws_access_key_id: "A1" })];
     const res = await app.inject({ method: "POST", url: "/api/tenant/llm-config/reorder",
       payload: { order: [1, 0] } });
     expect(res.statusCode).toBe(200);
-    const inserts = sqlLog.filter((c) => c.sql.includes("INSERT INTO tenant_llm_configs"));
-    expect(inserts).toHaveLength(2);
-    // Posição 0 passa a ser o antigo slot 1 — com a chave DELE, não com credenciais vazias.
-    expect(inserts[0].params?.[1]).toBe(0);
-    expect(inserts[0].params?.[3]).toBe("m1");
-    expect(JSON.parse(String(inserts[0].params?.[5]))).toEqual({ aws_access_key_id: "A1" });
-    // O veredicto do último teste viaja junto: reordenar não é reconfigurar.
-    expect(inserts[0].params?.[13]).toBe("ok");   // verify_status
-    expect(inserts[1].params?.[3]).toBe("m0");
+    // Nenhum INSERT: a linha (id, credencial, verify_*, cyborg_*, colunas dos papéis) nunca é recriada.
+    expect(sqlLog.some((c) => c.sql.includes("INSERT INTO tenant_llm_configs"))).toBe(false);
+    expect(sqlLog.some((c) => c.sql.startsWith("DELETE FROM tenant_llm_configs") && /NOT \(priority = ANY/.test(c.sql))).toBe(true);
+    const updates = sqlLog.filter((c) => c.sql.startsWith("UPDATE tenant_llm_configs SET priority"));
+    // 1 UPDATE de estacionamento (prioridades negativas) + 1 por posição final.
+    expect(updates).toHaveLength(3);
+    expect(updates[0].sql).toContain("-(priority + 1)");
+    // Posição 0 recebe a linha que estava em 1 (estacionada em -2); posição 1 recebe a que estava em 0 (-1).
+    expect(updates[1].params).toEqual([TENANT, -2, 0]);
+    expect(updates[2].params).toEqual([TENANT, -1, 1]);
+    // O SQL de reorder nunca enumera colunas: nada para "esquecer".
+    for (const u of updates) expect(u.sql).not.toMatch(/credentials|verify_|model_|cyborg_/);
   });
 
   it("tudo dentro de uma transação — nenhum instante com o tenant sem slot", async () => {
@@ -137,7 +140,7 @@ describe("POST /api/tenant/llm-config/reorder — permutar sem perder credencial
     const seq = sqlLog.map((c) => c.sql.trim().split(/\s+/).slice(0, 2).join(" "));
     expect(seq[0]).toBe("BEGIN");
     expect(seq[seq.length - 1]).toBe("COMMIT");
-    expect(seq.indexOf("DELETE FROM")).toBeGreaterThan(0);
+    expect(seq.indexOf("UPDATE tenant_llm_configs")).toBeGreaterThan(0);
   });
 
   it("order com prioridade inexistente → 400 e ROLLBACK (não apaga nada)", async () => {
@@ -145,7 +148,7 @@ describe("POST /api/tenant/llm-config/reorder — permutar sem perder credencial
     const res = await app.inject({ method: "POST", url: "/api/tenant/llm-config/reorder",
       payload: { order: [0, 2] } });
     expect(res.statusCode).toBe(400);
-    expect(sqlLog.some((c) => c.sql.startsWith("DELETE"))).toBe(false);
+    expect(sqlLog.some((c) => c.sql.startsWith("DELETE") || c.sql.startsWith("UPDATE"))).toBe(false);
     expect(sqlLog.some((c) => c.sql === "ROLLBACK")).toBe(true);
   });
 

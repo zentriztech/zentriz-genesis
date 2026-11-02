@@ -12,6 +12,7 @@
 
 import { pool } from "../db/client.js";
 import { pickReviewerModel, strongestByDomination } from "./reviewerModel.js";
+import { rolesEnabled, rolesFromRow, type RoleModels } from "../lib/llmRoleSlots.js";
 
 export interface TenantLlmConfig {
   provider: string;
@@ -29,6 +30,8 @@ export interface TenantLlmConfig {
    * `requireZentrizAdmin`): um tenant não consegue se auto-isentar e empurrar a fatura para nós.
    */
   byocExempt: boolean;
+  /** 2A.3: só preenchido com `LLM_ROLES_MODE != off`. Legado autoritativo (ver `rolesFromRow`). */
+  roleModels?: RoleModels;
 }
 
 export interface ResolvedLlmConfig {
@@ -56,6 +59,13 @@ export interface ResolvedLlmConfig {
   azureApiVersion?:    string;
   isDefault:           boolean;
   priority:            number;
+  /**
+   * 2A.3 — modelos por papel do slot. Presente SOMENTE com `LLM_ROLES_MODE != off`; com `off` o
+   * objeto resolvido é byte-idêntico ao anterior. Na transição as colunas legadas são as
+   * autoritativas (Orchestrator = model_id, Advisor = model_id_fallback normalizado, Staff = coluna
+   * nova). Não viaja nos envelopes para agents/runner (isso é a tarefa 2A.5).
+   */
+  models?: RoleModels;
   /**
    * COMO este slot foi escolhido. Só é preenchido quando a estratégia não é a padrão (`priority`),
    * porque quem lê precisa poder AUDITAR a escolha: com `strongest`, o slot que roda pode não ser o
@@ -173,16 +183,18 @@ export function slotUsability(
 /** Carrega todas as configs ativas de um tenant, ordenadas por prioridade. */
 export async function getTenantLlmConfigs(tenantId: string): Promise<TenantLlmConfig[]> {
   try {
+    const withRoles = rolesEnabled();
     const result = await pool.query(
       `SELECT c.provider, c.model_id, c.model_id_fallback, c.credentials, c.max_concurrent_projects,
-              c.daily_token_quota, c.deadpool_token_reserve, c.priority, t.byoc_exempt
+              c.daily_token_quota, c.deadpool_token_reserve, c.priority, t.byoc_exempt${
+                withRoles ? ", c.model_orchestrator, c.model_advisor, c.model_staff" : ""}
        FROM tenant_llm_configs c
        JOIN tenants t ON t.id = c.tenant_id
        WHERE c.tenant_id = $1 AND c.is_active = TRUE
        ORDER BY c.priority ASC`,
       [tenantId]
     );
-    return result.rows.map((row: Record<string, unknown>) => ({
+    return result.rows.map((row: Record<string, unknown>): TenantLlmConfig => ({
       // `provider` e `model_id` são NOT NULL no schema; sem `??` de literal aqui, de propósito —
       // um default silencioso neste ponto é exatamente o que a LEI proíbe.
       provider:              String(row.provider ?? ""),
@@ -195,10 +207,20 @@ export async function getTenantLlmConfigs(tenantId: string): Promise<TenantLlmCo
       isDefault:             false,
       priority:              Number(row.priority ?? 0),
       byocExempt:            !!row.byoc_exempt,
+      ...(withRoles ? { roleModels: roleModelsOf(row) } : {}),
     }));
   } catch {
     return [];
   }
+}
+
+/** 2A.3: papéis do slot; avisa (sem ids nem credenciais) se as colunas novas divergem das legadas. */
+function roleModelsOf(row: Record<string, unknown>): RoleModels {
+  const { models, diverges } = rolesFromRow(row);
+  if (diverges) {
+    console.warn(`[llm-roles] slot priority=${Number(row.priority ?? 0)}: colunas model_orchestrator/model_advisor divergem das legadas (legado autoritativo na transição)`);
+  }
+  return models;
 }
 
 /**
@@ -403,6 +425,7 @@ function toResolved(cfg: TenantLlmConfig): ResolvedLlmConfig {
     azureApiVersion:    c.api_version,
     isDefault:          false,
     priority:           cfg.priority,
+    ...(cfg.roleModels ? { models: cfg.roleModels } : {}),
   };
 }
 

@@ -26,6 +26,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { hasOwnCredentials } from "../services/tenantLlmConfig.js";
+import { rolesEnabled, deriveRolesForSave, validateRoleModels } from "../lib/llmRoleSlots.js";
 import { getPlatformSlots, platformSlotUsable, type PlatformLlmSlot } from "../services/platformLlmConfig.js";
 import { probeSlot, listModels, type ProbeResult } from "../services/llmSlotProbe.js";
 
@@ -194,17 +195,43 @@ export async function managementLlmRoutes(app: FastifyInstance): Promise<void> {
         }
       } catch { /* sem linha anterior */ }
 
-      const fallback = body.model_id_fallback ? String(body.model_id_fallback) : null;
+      let fallback = body.model_id_fallback ? String(body.model_id_fallback) : null;
       const label = body.label ? String(body.label).slice(0, 120) : null;
+
+      // 2A.3 — dupla escrita dos papéis (espelho de routes/llm.ts). Com a flag `off` nada disto roda
+      // e o SQL abaixo é byte-idêntico ao anterior.
+      const withRoles = rolesEnabled();
+      let roleParams: Array<string | null> = [];
+      let staffProvided = false;
+      let roleWarnings: string[] = [];
+      let rolesOut: unknown;
+      if (withRoles) {
+        const d = deriveRolesForSave(body, modelId);
+        if (!d.ok) return reply.status(400).send({ code: "BAD_REQUEST", message: d.message });
+        const v = validateRoleModels(provider, { orchestrator: d.roles.orchestrator, advisor: d.roles.advisor,
+                                                 staff: d.roles.staff === undefined ? null : d.roles.staff });
+        if (v.errors.length) return reply.status(400).send({ code: "BAD_REQUEST", message: v.errors.join(" ") });
+        roleWarnings = v.warnings;
+        staffProvided = d.roles.staff !== undefined;
+        fallback = d.roles.legacyFallback;
+        roleParams = [d.roles.orchestrator, d.roles.advisor, d.roles.staff ?? null];
+        rolesOut = { orchestrator: d.roles.orchestrator, advisor: d.roles.advisor,
+                     staff: staffProvided ? d.roles.staff : undefined };
+      }
+      const roleCols = withRoles ? ", model_orchestrator, model_advisor, model_staff" : "";
+      const roleVals = withRoles ? ",$7,$8,$9" : "";
+      const roleSet = withRoles
+        ? `, model_orchestrator=$7, model_advisor=$8, model_staff=${staffProvided ? "$9" : "zentriz_llm_config.model_staff"}`
+        : "";
 
       await pool.query(
         `INSERT INTO zentriz_llm_config
-           (priority, provider, model_id, model_id_fallback, label, credentials, is_active, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,true,now())
+           (priority, provider, model_id, model_id_fallback, label, credentials, is_active, updated_at${roleCols})
+         VALUES ($1,$2,$3,$4,$5,$6,true,now()${roleVals})
          ON CONFLICT (priority) DO UPDATE SET
            provider=$2, model_id=$3, model_id_fallback=$4, label=$5, credentials=$6,
-           is_active=true, updated_at=now()`,
-        [priority, provider, modelId, fallback, label, JSON.stringify(credentials)],
+           is_active=true, updated_at=now()${roleSet}`,
+        [priority, provider, modelId, fallback, label, JSON.stringify(credentials), ...roleParams],
       );
 
       // Testa DEPOIS de gravar, como no tenant: reprovar não pode impedir cadastrar (a cota pode
@@ -218,6 +245,7 @@ export async function managementLlmRoutes(app: FastifyInstance): Promise<void> {
         own_credentials: hasOwnCredentials(provider, credentials),
         has_credentials: hasOwnCredentials(provider, credentials),
         verify: verifyPayload(verify),
+        ...(withRoles ? { models: rolesOut, warnings: roleWarnings } : {}),
       });
     });
 
@@ -266,28 +294,29 @@ export async function managementLlmRoutes(app: FastifyInstance): Promise<void> {
     if (ordem.length === 0 || ordem.some((p) => !Number.isInteger(p) || p < 0 || p > 3)) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "order deve ser uma lista de prioridades 0..3" });
     }
-    const atuais = await getPlatformSlots();
+    if (new Set(ordem).size !== ordem.length) {
+      return reply.status(400).send({ code: "BAD_REQUEST", message: "order não pode repetir prioridades" });
+    }
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      // ⚠️ NADA de estacionar em prioridade negativa para driblar o UNIQUE: a migration 126 tem
-      // `CHECK (priority BETWEEN 0 AND 3)` e o degrau fora da faixa aborta a transação inteira —
-      // calada, como já aconteceu antes com o mesmo truque nos slots de tenant. Aqui a troca é
-      // apagar e reinserir dentro da transação: o UNIQUE só é avaliado no fim de cada statement,
-      // e a faixa nunca é violada.
-      await client.query("DELETE FROM zentriz_llm_config");
-      for (let i = 0; i < ordem.length; i++) {
-        const slot = atuais.find((s) => s.priority === ordem[i]);
-        if (!slot) continue;
+      // 2A.2 — UPDATE de prioridade em vez de "DELETE tudo + INSERT com lista fixa de colunas",
+      // que apagaria as colunas dos papéis (model_orchestrator/advisor/staff, verify_<papel>_*) e
+      // qualquer coluna futura. O UNIQUE em `priority` não é deferível (o upsert usa
+      // ON CONFLICT (priority)), então a permutação estaciona as linhas em -1..-4 dentro da
+      // transação — faixa liberada pela migration 138 (a 126 só permitia 0..3).
+      const res = await client.query("SELECT priority FROM zentriz_llm_config FOR UPDATE");
+      const existentes = new Set(res.rows.map((r) => Number((r as { priority: unknown }).priority)));
+      // Slot citado que não existe: comportamento anterior era ignorar (`continue`).
+      const validas = ordem.filter((p) => existentes.has(p));
+      // Prioridade fora de `order` = removida (mesma semântica de antes: tudo era apagado e só o citado voltava).
+      await client.query("DELETE FROM zentriz_llm_config WHERE NOT (priority = ANY($1::int[]))", [validas]);
+      await client.query(
+        "UPDATE zentriz_llm_config SET priority = -(priority + 1) WHERE priority = ANY($1::int[])", [validas]);
+      for (let i = 0; i < validas.length; i++) {
         await client.query(
-          `INSERT INTO zentriz_llm_config
-             (id, priority, provider, model_id, model_id_fallback, label, credentials, is_active,
-              verified_at, verify_status, verify_error, verify_model, verify_latency_ms, updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())`,
-          [slot.id, i, slot.provider, slot.modelId, slot.modelIdFallback, slot.label,
-           JSON.stringify(slot.credentials), slot.isActive, slot.verifiedAt, slot.verifyStatus,
-           slot.verifyError, slot.verifyModel, slot.verifyLatencyMs],
-        );
+          "UPDATE zentriz_llm_config SET priority = $2, updated_at = now() WHERE priority = $1",
+          [-(validas[i] + 1), i]);
       }
       await client.query("COMMIT");
     } catch (e) {

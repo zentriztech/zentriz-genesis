@@ -15,6 +15,7 @@ import { resolveScopedTenantId } from "../lib/tenantScope.js";
 import { slotUsability, hasOwnCredentials } from "../services/tenantLlmConfig.js";
 import { modelFamilyOf } from "../services/reviewerModel.js";
 import { probeSlot, recordProbe, listModels, type ProbeResult } from "../services/llmSlotProbe.js";
+import { rolesEnabled, deriveRolesForSave, validateRoleModels, rolesFromRow, type RoleModels } from "../lib/llmRoleSlots.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -41,7 +42,9 @@ type Provider = typeof ALLOWED_PROVIDERS[number];
 function requireProviderAndModel(body: Record<string, unknown>):
   { ok: true; provider: Provider; model_id: string } | { ok: false; message: string } {
   const provider = String(body.provider ?? "").trim();
-  const model_id = String(body.model_id ?? "").trim();
+  // 2A.3: com a flag ligada o portal novo pode mandar só `model_orchestrator` (alias de `model_id`).
+  const model_id = (String(body.model_id ?? "").trim()
+    || (rolesEnabled() ? String(body.model_orchestrator ?? "").trim() : ""));
   if (!provider || !model_id) {
     return { ok: false, message: "provider e model_id são obrigatórios — o slot define o modelo do tenant, não há padrão da plataforma." };
   }
@@ -138,6 +141,8 @@ function formatSlot(row: Record<string, unknown>, byocExempt: boolean) {
     verify_error:            row.verify_error ?? null,
     verify_model:            row.verify_model ?? null,
     verify_latency_ms:       row.verify_latency_ms ?? null,
+    // 2A.3: só com LLM_ROLES_MODE != off (com `off` o payload é byte-idêntico ao anterior).
+    ...(rolesEnabled() ? { models: rolesFromRow(row as Record<string, unknown>).models } : {}),
   };
 }
 
@@ -160,7 +165,26 @@ async function upsertConfig(
   /** Já validados pela rota (`requireProviderAndModel`) — nunca inferidos aqui. */
   provider: Provider,
   model_id: string,
-) {
+): Promise<Record<string, unknown>> {
+  // 2A.3 — papéis (dupla escrita). Com a flag `off` este bloco inteiro é pulado e o SQL abaixo é o de sempre.
+  const withRoles = rolesEnabled();
+  let roles: RoleModels | null = null;
+  let staffProvided = false;
+  let roleWarnings: string[] = [];
+  let legacyFallbackOverride: string | null | undefined;
+  let staffValue: string | null = null;
+  if (withRoles) {
+    const d = deriveRolesForSave(body, model_id);
+    if (!d.ok) return { ok: false, status: 400, message: d.message };
+    const v = validateRoleModels(provider, { orchestrator: d.roles.orchestrator, advisor: d.roles.advisor,
+                                             staff: d.roles.staff === undefined ? null : d.roles.staff });
+    if (v.errors.length) return { ok: false, status: 400, message: v.errors.join(" ") };
+    roleWarnings = v.warnings;
+    staffProvided = d.roles.staff !== undefined;
+    staffValue = d.roles.staff ?? null;
+    roles = { orchestrator: d.roles.orchestrator, advisor: d.roles.advisor, staff: staffValue };
+    legacyFallbackOverride = d.roles.legacyFallback;
+  }
   const incoming         = sanitizeCredentials(provider, (body.credentials as Record<string, string>) ?? {});
   // BUG (achado 2026-09-04 19:47Z em prod): o portal reenvia o formulário SEM as credenciais (só
   // mostra a versão mascarada) → o UPSERT gravava `credentials={}` e APAGAVA as chaves AWS do tenant
@@ -181,29 +205,38 @@ async function upsertConfig(
       credentials = sanitizeCredentials(provider, merged);
     }
   } catch { /* sem linha anterior → usa o que veio */ }
-  const model_id_fallback = body.model_id_fallback ? String(body.model_id_fallback) : null;
+  const model_id_fallback = withRoles && legacyFallbackOverride !== undefined
+    ? legacyFallbackOverride
+    : (body.model_id_fallback ? String(body.model_id_fallback) : null);
   const cyborg_model_id   = body.cyborg_model_id ? String(body.cyborg_model_id) : null;
   const cyborg_model_id_fallback = body.cyborg_model_id_fallback ? String(body.cyborg_model_id_fallback) : null;
   const max_concurrent   = Math.min(Math.max(Number(body.max_concurrent_projects ?? 3), 1), 20);
   const daily_quota      = body.daily_token_quota ? Number(body.daily_token_quota) : null;
   const dp_reserve       = Number(body.deadpool_token_reserve ?? 0);
 
+  // Com `off`: as três variáveis abaixo são "" e o texto do SQL é byte-idêntico ao anterior.
+  const roleCols = withRoles ? ", model_orchestrator, model_advisor, model_staff" : "";
+  const roleVals = withRoles ? ",$12,$13,$14" : "";
+  const roleSet  = withRoles
+    ? `, model_orchestrator=$12, model_advisor=$13, model_staff=${staffProvided ? "$14" : "tenant_llm_configs.model_staff"}`
+    : "";
   await pool.query(
     `INSERT INTO tenant_llm_configs
        (tenant_id, priority, provider, model_id, model_id_fallback, credentials,
         max_concurrent_projects, daily_token_quota, deadpool_token_reserve,
         cyborg_model_id, cyborg_model_id_fallback,
-        is_active, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,now())
+        is_active, updated_at${roleCols})
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,now()${roleVals})
      ON CONFLICT (tenant_id, priority) DO UPDATE SET
        provider=$3, model_id=$4, model_id_fallback=$5, credentials=$6,
        max_concurrent_projects=$7, daily_token_quota=$8,
        deadpool_token_reserve=$9,
        cyborg_model_id=$10, cyborg_model_id_fallback=$11,
-       is_active=true, updated_at=now()`,
+       is_active=true, updated_at=now()${roleSet}`,
     [tenantId, priority, provider, model_id, model_id_fallback, JSON.stringify(credentials),
      max_concurrent, daily_quota, dp_reserve,
-     cyborg_model_id, cyborg_model_id_fallback]
+     cyborg_model_id, cyborg_model_id_fallback,
+     ...(withRoles ? [roles!.orchestrator, roles!.advisor, staffValue] : [])]
   );
 
   // ⚖️ Jean, 2026-09-10: *"o ideal é testar no momento que é adicionado"*.
@@ -217,7 +250,8 @@ async function upsertConfig(
   return { ok: true, priority, priority_label: PRIORITY_LABELS[priority], provider, model_id,
            model_id_fallback, cyborg_model_id, cyborg_model_id_fallback,
            own_credentials: own, has_credentials: own,
-           verify: verifyPayload(verify) };
+           verify: verifyPayload(verify),
+           ...(withRoles ? { models: { ...roles, staff: staffProvided ? staffValue : undefined }, warnings: roleWarnings } : {}) };
 }
 
 export async function llmRoutes(app: FastifyInstance): Promise<void> {
@@ -237,7 +271,8 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
                 cyborg_model_id, cyborg_model_id_fallback,
                 credentials, max_concurrent_projects,
                 daily_token_quota, deadpool_token_reserve, is_active, priority,
-                verified_at, verify_status, verify_error, verify_model, verify_latency_ms
+                verified_at, verify_status, verify_error, verify_model, verify_latency_ms${
+                  rolesEnabled() ? ", model_orchestrator, model_advisor, model_staff" : ""}
          FROM tenant_llm_configs WHERE tenant_id = $1 ORDER BY priority ASC`,
         [scopedTenantId]
       );
@@ -325,6 +360,7 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
       if (!decl.ok) return reply.status(400).send({ code: "BAD_REQUEST", message: decl.message });
 
       const result = await upsertConfig(scopedTenantId, priority, body, decl.provider, decl.model_id);
+      if (result.ok === false) return reply.status(Number(result.status ?? 400)).send({ code: "BAD_REQUEST", message: result.message });
       return reply.send(result);
     }
   );
@@ -342,6 +378,7 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
     if (!decl.ok) return reply.status(400).send({ code: "BAD_REQUEST", message: decl.message });
 
     const result = await upsertConfig(scopedTenantId, 0, body, decl.provider, decl.model_id);
+    if (result.ok === false) return reply.status(Number(result.status ?? 400)).send({ code: "BAD_REQUEST", message: result.message });
     return reply.send(result);
   });
 
@@ -355,6 +392,7 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
   //
   // Aqui a permutação acontece em UMA transação, movendo a linha INTEIRA (credencial, limites e o
   // veredicto do último teste). Reordenar é mudar a ordem de preferência — não é reconfigurar.
+  // 2A.2: desde então é `UPDATE priority` (linha nunca recriada ⇒ nenhuma coluna se perde).
   app.post("/api/tenant/llm-config/reorder", async (request, reply) => {
     const user = getUser(request);
     if (user.role !== "tenant_admin" && user.role !== "zentriz_admin")
@@ -373,32 +411,30 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      // 2A.2 — UPDATE de prioridade, NÃO "DELETE + INSERT com lista fixa de colunas": o INSERT
+      // enumerava colunas à mão e qualquer coluna nova (model_orchestrator/advisor/staff, verify_<papel>_*,
+      // cyborg_*) era APAGADA no reorder. Aqui a linha nunca é recriada: id, credenciais e todas as
+      // colunas, atuais ou futuras, ficam como estão e só `priority` muda.
       const res = await client.query(
-        "SELECT * FROM tenant_llm_configs WHERE tenant_id = $1 FOR UPDATE", [scopedTenantId]);
-      const porPrioridade = new Map<number, Record<string, unknown>>(
-        res.rows.map((r) => [Number((r as Record<string, unknown>).priority), r as Record<string, unknown>]));
-      if (atuais.some((p) => !porPrioridade.has(p))) {
+        "SELECT priority FROM tenant_llm_configs WHERE tenant_id = $1 FOR UPDATE", [scopedTenantId]);
+      const existentes = new Set(res.rows.map((r) => Number((r as { priority: unknown }).priority)));
+      if (atuais.some((p) => !existentes.has(p))) {
         await client.query("ROLLBACK");
         return reply.status(400).send({ code: "BAD_REQUEST", message: "order cita uma prioridade que não existe." });
       }
-      // Apagar e reinserir dentro da MESMA transação: nenhum instante em que o tenant fica sem
-      // slot (a resolução de LLM que rodar concorrente enxerga o estado antigo ou o novo, nunca o vazio).
-      await client.query("DELETE FROM tenant_llm_configs WHERE tenant_id = $1", [scopedTenantId]);
+      // Prioridade fora de `order` = slot removido pelo portal (mesma semântica de antes).
+      await client.query(
+        "DELETE FROM tenant_llm_configs WHERE tenant_id = $1 AND NOT (priority = ANY($2::int[]))",
+        [scopedTenantId, atuais]);
+      // UNIQUE (tenant_id, priority) não é deferível (o upsert usa ON CONFLICT nele), então a
+      // permutação passa por prioridades negativas: -1..-4 (faixa liberada na migration 138).
+      await client.query(
+        "UPDATE tenant_llm_configs SET priority = -(priority + 1) WHERE tenant_id = $1 AND priority = ANY($2::int[])",
+        [scopedTenantId, atuais]);
       for (let i = 0; i < atuais.length; i++) {
-        const r = porPrioridade.get(atuais[i])!;
         await client.query(
-          `INSERT INTO tenant_llm_configs
-             (tenant_id, priority, provider, model_id, model_id_fallback, credentials,
-              max_concurrent_projects, daily_token_quota, deadpool_token_reserve,
-              cyborg_model_id, cyborg_model_id_fallback, is_active, updated_at,
-              verified_at, verify_status, verify_error, verify_model, verify_latency_ms)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now(),$13,$14,$15,$16,$17)`,
-          [scopedTenantId, i, r.provider, r.model_id, r.model_id_fallback,
-           JSON.stringify(r.credentials ?? {}), r.max_concurrent_projects, r.daily_token_quota,
-           r.deadpool_token_reserve, r.cyborg_model_id, r.cyborg_model_id_fallback, r.is_active,
-           r.verified_at ?? null, r.verify_status ?? null, r.verify_error ?? null,
-           r.verify_model ?? null, r.verify_latency_ms ?? null],
-        );
+          "UPDATE tenant_llm_configs SET priority = $3, updated_at = now() WHERE tenant_id = $1 AND priority = $2",
+          [scopedTenantId, -(atuais[i] + 1), i]);
       }
       await client.query("COMMIT");
       return reply.send({ ok: true, order: atuais });

@@ -1,0 +1,20 @@
+{
+  "_comment": "Reconstrução ANÔNIMA por classe do baseline de produção (doc 16, medido em 2026-11-02): 3 tenants com 1 slot cada (2 principais Opus-like, 1 Sonnet-like), fallback nunca nulo, 2 de 3 com fallback da mesma classe do principal, mais 1 slot da plataforma Opus-like. Os ids de modelo são ilustrativos da classe, não a leitura literal de produção. Sem credenciais, sem nomes, sem ids de tenant. Os casos 'borda-*' cobrem o doc 05 §15.2.",
+  "slots": [
+    { "label": "baseline-T1", "table": "tenant", "priority": 0, "provider": "bedrock", "model_id": "us.anthropic.claude-opus-4-8", "model_id_fallback": "us.anthropic.claude-opus-4-7", "cyborg_model_id": "us.anthropic.claude-opus-4-8" },
+    { "label": "baseline-T2", "table": "tenant", "priority": 0, "provider": "bedrock", "model_id": "us.anthropic.claude-opus-5", "model_id_fallback": "us.anthropic.claude-opus-4-8", "cyborg_model_id": "us.anthropic.claude-opus-4-8" },
+    { "label": "baseline-T3", "table": "tenant", "priority": 0, "provider": "bedrock", "model_id": "us.anthropic.claude-sonnet-4-6", "model_id_fallback": "us.anthropic.claude-opus-4-8", "cyborg_model_id": "us.anthropic.claude-opus-4-8" },
+    { "label": "baseline-plataforma", "table": "platform", "priority": 0, "provider": "bedrock", "model_id": "us.anthropic.claude-opus-4-8", "model_id_fallback": "us.anthropic.claude-opus-4-7", "cyborg_model_id": "us.anthropic.claude-opus-4-8" },
+
+    { "label": "borda-fallback-igual-ao-principal", "table": "tenant", "priority": 0, "provider": "bedrock", "model_id": "us.anthropic.claude-opus-4-8", "model_id_fallback": "us.anthropic.claude-opus-4-8", "cyborg_model_id": "us.anthropic.claude-opus-4-7" },
+    { "label": "borda-fallback-nulo-sem-cyborg", "table": "tenant", "priority": 0, "provider": "bedrock", "model_id": "us.anthropic.claude-sonnet-4-6", "model_id_fallback": null, "cyborg_model_id": null },
+    { "label": "borda-fallback-nulo-com-cyborg-carimbado", "table": "tenant", "priority": 0, "provider": "bedrock", "model_id": "us.anthropic.claude-sonnet-4-6", "model_id_fallback": null, "cyborg_model_id": "us.anthropic.claude-opus-4-8" },
+    { "label": "borda-principal-ja-opus-sem-advisor-mais-forte", "table": "tenant", "priority": 0, "provider": "bedrock", "model_id": "us.anthropic.claude-opus-5", "model_id_fallback": "us.anthropic.claude-sonnet-4-6", "cyborg_model_id": null },
+    { "label": "borda-nao-claude-gemini", "table": "tenant", "priority": 0, "provider": "google", "model_id": "gemini-3-flash", "model_id_fallback": "gemini-3-pro", "cyborg_model_id": null },
+    { "label": "borda-nao-claude-id-desconhecido", "table": "tenant", "priority": 0, "provider": "openai", "model_id": "modelo-interno-x", "model_id_fallback": "modelo-interno-y", "cyborg_model_id": null },
+    { "label": "borda-contingencia-1-herda-regra-por-linha", "table": "tenant", "priority": 1, "provider": "anthropic", "model_id": "claude-sonnet-4-6", "model_id_fallback": "claude-opus-4-8", "cyborg_model_id": null },
+    { "label": "borda-contingencia-2-fallback-igual", "table": "tenant", "priority": 2, "provider": "google", "model_id": "gemini-3-pro", "model_id_fallback": "gemini-3-pro", "cyborg_model_id": null },
+    { "label": "borda-advisor-pequeno-invalido-para-papel", "table": "tenant", "priority": 3, "provider": "bedrock", "model_id": "us.anthropic.claude-sonnet-4-6", "model_id_fallback": "global.anthropic.claude-haiku-4-5-20251001-v1:0", "cyborg_model_id": null },
+    { "label": "borda-plataforma-com-cyborg-default-ignorado", "table": "platform", "priority": 1, "provider": "bedrock", "model_id": "us.anthropic.claude-sonnet-4-6", "model_id_fallback": null, "cyborg_model_id": "us.anthropic.claude-opus-4-8" }
+  ]
+}
