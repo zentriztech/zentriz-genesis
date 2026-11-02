@@ -16,6 +16,7 @@ import { slotUsability, hasOwnCredentials, reviewerFamilies, reviewerRoleCandida
 import { modelFamilyOf } from "../services/reviewerModel.js";
 import { probeSlot, recordProbe, listModels, type ProbeResult } from "../services/llmSlotProbe.js";
 import { verifyRoles, recordRoleVerdicts, roleVerdictsPayload, roleVerifyFromRow, type RoleModelsIn } from "../services/llmRoleProbe.js";
+import { llmRolesMode } from "../lib/llmRoles.js";
 import { rolesEnabled, rolesRoutingOn, deriveRolesForSave, validateRoleModels, rolesFromRow, type RoleModels } from "../lib/llmRoleSlots.js";
 
 function getUser(request: FastifyRequest): AuthUser {
@@ -396,6 +397,8 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
         has_usable_slot: slots.some((s) => s.usable),
         cross_family_available: familias.length >= 2,
         ...(rolesOn ? { cross_family_warnings: crossWarnings } : {}),
+        // 2A.10: indicador para o portal (`shadow`|`on`). Com `off` o campo NÃO existe (payload idêntico).
+        ...(rolesEnabled() ? { roles_mode: llmRolesMode() } : {}),
       });
     } finally { client.release(); }
   });

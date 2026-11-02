@@ -83,3 +83,18 @@ describe("families sobre papéis elegíveis", () => {
     expect((await get()).families).toEqual(["anthropic"]);
   });
 });
+
+describe("roles_mode (2A.10) — indicador aditivo para o portal", () => {
+  it.each([[undefined], ["off"], ["lixo"]])("off (%s): o campo NÃO existe", async (mode) => {
+    if (mode === undefined) delete process.env.LLM_ROLES_MODE; else process.env.LLM_ROLES_MODE = mode;
+    slotRows = [row({})];
+    const r = await get();
+    expect("roles_mode" in r).toBe(false);
+  });
+  it.each(["shadow", "on"])("%s: devolve o modo", async (mode) => {
+    process.env.LLM_ROLES_MODE = mode;
+    slotRows = [row({})];
+    const r = await get();
+    expect(r.roles_mode).toBe(mode);
+  });
+});
