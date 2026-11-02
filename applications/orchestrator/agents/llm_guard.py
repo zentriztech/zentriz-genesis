@@ -169,6 +169,13 @@ def waste_kwargs(reason: str, *, task: object = None, stage: str | None = None,
     return kw
 
 
+def waste_call_kwargs(reason: str, **kw) -> dict:
+    """Para `call_bedrock_direct(**...)`: `{}` com a flag off (a chamada fica com os MESMOS argumentos de antes,
+    inclusive para dublês de teste), `{"waste": waste_kwargs(...)}` com a flag ligada."""
+    w = waste_kwargs(reason, **kw)
+    return {"waste": w} if w else {}
+
+
 def _disabled() -> bool:
     # Só para teste unitário isolado. Em prod NÃO existe: o compose não define a variável.
     return os.environ.get("LLM_GUARD_DISABLED_FOR_TESTS", "").strip() == "1"

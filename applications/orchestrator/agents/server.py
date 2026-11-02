@@ -674,7 +674,7 @@ def _run_splitter(document: str, model_id: str, usage_project_id: str | None = N
                                        usage_project_id=usage_project_id,
                                        usage_agent="splitter", llm_cfg=llm_cfg,
                                        **_llm_guard.role_kwargs(),
-                                       waste=_llm_guard.waste_kwargs("primary"))
+                                       **_llm_guard.waste_call_kwargs("primary"))
 
     result = split_document(document, llm_fn=_llm, model_id=model_id)
     if isinstance(result, dict):
@@ -775,7 +775,7 @@ def _run_spec_split(spec_md: str, model_id: str, usage_project_id: str | None = 
                                        usage_project_id=usage_project_id,
                                        usage_agent="spec_split", llm_cfg=llm_cfg,
                                        **_llm_guard.role_kwargs(),
-                                       waste=_llm_guard.waste_kwargs("primary"))
+                                       **_llm_guard.waste_call_kwargs("primary"))
 
     result = split_spec_into_files(spec_md, llm_fn=_llm, model_id=model_id,
                                    project_name=project_name, project_type=project_type)
@@ -1180,7 +1180,7 @@ def invoke_raw(body: dict):
                                        model_id=_model, max_tokens=max_tokens,
                                        temperature=_temp_for(_model), llm_cfg=_cfg,
                                        **_llm_guard.role_kwargs(),
-                                       waste=_llm_guard.waste_kwargs("primary"))
+                                       **_llm_guard.waste_call_kwargs("primary"))
             if resp and resp.strip():
                 return {"response": resp, "model_used": _effective(_model),
                         "model_requested": model_id, **_outcome()}
@@ -1196,7 +1196,7 @@ def invoke_raw(body: dict):
                                         model_id=_fb, max_tokens=max_tokens,
                                         temperature=_temp_for(_fb), llm_cfg=_cfg,
                                         **_llm_guard.role_kwargs(escalated=True),
-                                        waste=_llm_guard.waste_kwargs("escalation"))
+                                        **_llm_guard.waste_call_kwargs("escalation"))
             return {"response": resp2, "model_used": _effective(_fb), "model_requested": model_id,
                     "fallback": True, **_outcome()}
         # Sem fallback e principal veio vazio → devolve o vazio (comportamento antigo, preservado).

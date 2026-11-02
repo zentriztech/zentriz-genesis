@@ -234,3 +234,11 @@ def test_run_agent_off_nao_envia_motivo(api, monkeypatch):
         pytest.skip(f"run_agent não isolável neste ambiente: {exc}")
     assert api.calls and not any(WASTE_KEYS & set(b) for _, b in api.calls)
     assert all(set(b) <= (PREFLIGHT_KEYS_LEGACY | RECORD_KEYS_LEGACY) for _, b in api.calls)
+
+
+def test_waste_call_kwargs_off_nao_acrescenta_argumento(monkeypatch):
+    """Regressão: com a flag off a chamada a `call_bedrock_direct` fica com os MESMOS argumentos (dublês antigos seguem válidos)."""
+    monkeypatch.delenv("WASTE_TELEMETRY", raising=False)
+    assert llm_guard.waste_call_kwargs("primary") == {}
+    monkeypatch.setenv("WASTE_TELEMETRY", "shadow")
+    assert llm_guard.waste_call_kwargs("escalation") == {"waste": {"call_reason": "escalation"}}
