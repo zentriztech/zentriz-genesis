@@ -30,6 +30,7 @@ import { sha256Hex } from "../lib/specTreeHash.js";
 import { costUsd, priceCaseSql } from "../lib/modelPricing.js";
 import { getProjectSpendUsd, getTenantMonthSpendUsd, resolveTenantMonthlyBudgetUsd } from "../services/tenantCostCap.js";
 import { emitValueEvent } from "../services/valueEvents.js";
+import { recordProjectOutcome } from "../services/skillFeedback.js";
 import {
   evolutionRequestHeader, loadTicket, materializeTicketIntoSpecTree, reopenTicketsOfChild,
   ticketCode, type TicketRow,
@@ -723,6 +724,9 @@ export async function projectRoutes(app: FastifyInstance) {
       );
       // Notificação ops (fire-and-forget): projeto produzido 100% (aceite explícito).
       scheduleFactoryDone(pool, id);
+      // SKILL_FEEDBACK (ADR-025): aceite HUMANO é oráculo (b). Aceite do Cyborg (LLM) é sinal fraco e
+      // não gera sinal aqui. Flag off = no-op sem tocar o banco.
+      if (acceptedBy !== "zentriz-cyborg") void recordProjectOutcome(pool, id, "human_approve");
       const updated = await client.query(
         "SELECT id, status, updated_at, product_id, title, tenant_id FROM projects WHERE id = $1",
         [id]
@@ -947,6 +951,7 @@ export async function projectRoutes(app: FastifyInstance) {
         await recomputeProductLifecycle(client, productId);
         // Notificação ops (fire-and-forget): escrita direta no DB (não passa pelo PATCH).
         maybeNotifyBlock(pool, id, "blocked_cyborg", { reason });
+        void recordProjectOutcome(pool, id, "cyborg_reject"); // SKILL_FEEDBACK: sinal fraco (LLM)
         return reply.send({ ok: true, status: "blocked_cyborg", cyborgAttempts: newAttempts, retrying: false });
       }
       void projectType;
@@ -969,6 +974,8 @@ export async function projectRoutes(app: FastifyInstance) {
       await recomputeProductLifecycle(client, productId);
       // Notificação ops (fire-and-forget): escrita direta no DB (não passa pelo PATCH).
       maybeNotifyBlock(pool, id, "failed", { reason });
+      // SKILL_FEEDBACK: rejeição humana = oráculo (b) negativo. Cyborg = sinal fraco.
+      void recordProjectOutcome(pool, id, isCyborg ? "cyborg_reject" : "human_reject");
       // Notificação push Telegram — fire-and-forget
       setImmediate(async () => {
         try {

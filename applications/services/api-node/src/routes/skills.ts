@@ -7,6 +7,7 @@
  * PATCH /api/skills/:id              — atualizar status, body_md, ttl_days
  * GET  /api/skills/assemble          — montar SYSTEM_PROMPT para role+stack_key (usado pelo runner)
  * POST /api/skills/feedback          — registrar sinal de qualidade (runner/cyborg)
+ * POST /api/skills/lesson-injections — registrar lições injetadas numa task (SKILL_FEEDBACK != off)
  * GET  /api/skills/bundles/:projectId — listar bundles de um projeto
  */
 
@@ -14,6 +15,10 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { createHash } from "crypto";
+import {
+  getSkillFeedbackMode, applyOutcome, applySkillSignal, pgFeedbackStore, withTransaction,
+  ALL_SIGNALS, type SkillFeedbackMode,
+} from "../services/skillFeedback.js";
 
 function getUser(r: FastifyRequest): AuthUser {
   return (r as unknown as { user: AuthUser }).user;
@@ -22,6 +27,7 @@ function getUser(r: FastifyRequest): AuthUser {
 const VALID_ROLES    = ["dev","qa","pm","devops","engineer","cto","cyborg"] as const;
 const VALID_STATUSES = ["draft","shadow","trusted","deprecated"] as const;
 const VALID_SIGNALS  = ["qa_pass","qa_fail","cyborg_reject","bug_recurrence","human_fix","human_approve"] as const;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function skillsRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authMiddleware);
@@ -160,9 +166,15 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
       );
 
       // Atualizar last_used_at e use_count
+      // SKILL_FEEDBACK=on (ADR-020 §2 / ADR-025): a mera montagem do prompt NÃO é acerto — use_count
+      // passa a contar só quando o bundle precedeu um oráculo positivo (ver services/skillFeedback.ts).
       if (skillIds.length > 0) {
         await pool.query(
-          `UPDATE skill
+          getSkillFeedbackMode() === "on"
+            ? `UPDATE skill
+           SET last_used_at = NOW()
+           WHERE id = ANY($1::uuid[])`
+            : `UPDATE skill
            SET use_count = use_count + 1, last_used_at = NOW()
            WHERE id = ANY($1::uuid[])`,
           [`{${skillIds.join(",")}}`]
@@ -279,6 +291,18 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
     const { skill_id, bundle_id, task_id, project_id, signal, weight, notes } =
       request.body as Record<string, unknown>;
 
+    // ── SKILL_FEEDBACK (plano 1.1/1.2, ADR-025) ────────────────────────────────
+    // off  → caminho LEGADO abaixo, intocado (a menos que o chamador novo mande v=2: aí é ignorado).
+    // shadow/on → motor novo: idempotente, QA nunca transita estado, hit_count de lições.
+    const fbMode: SkillFeedbackMode = getSkillFeedbackMode();
+    const isV2 = (request.body as Record<string, unknown>).v === 2;
+    if (fbMode === "off" && isV2) {
+      return reply.status(202).send({ ok: true, skipped: "SKILL_FEEDBACK=off" });
+    }
+    if (fbMode !== "off") {
+      return handleFeedbackV2(fbMode, request.body as Record<string, unknown>, reply);
+    }
+
     if (!skill_id || !signal) {
       return reply.status(400).send({ error: "skill_id e signal são obrigatórios" });
     }
@@ -336,6 +360,28 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(201).send({ ok: true });
   });
 
+  // ── POST /api/skills/lesson-injections ───────────────────────────────────────
+  // Runtime registra quais lições entraram no prompt de uma task (insumo do hit_count idempotente).
+  app.post("/api/skills/lesson-injections", async (request, reply) => {
+    if (getSkillFeedbackMode() === "off") {
+      return reply.status(202).send({ ok: true, skipped: "SKILL_FEEDBACK=off" });
+    }
+    const { project_id, task_id, slugs } = request.body as Record<string, unknown>;
+    if (typeof project_id !== "string" || !UUID_RE.test(project_id) || typeof task_id !== "string" || !task_id ||
+        !Array.isArray(slugs) || slugs.some((x) => typeof x !== "string")) {
+      return reply.status(400).send({ error: "project_id (uuid), task_id e slugs[] são obrigatórios" });
+    }
+    const uniq = [...new Set(slugs as string[])].slice(0, 100);
+    for (const slug of uniq) {
+      await pool.query(
+        `INSERT INTO lesson_injection (project_id, task_id, lesson_slug)
+         VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+        [project_id, task_id, slug]
+      );
+    }
+    return reply.status(201).send({ ok: true, recorded: uniq.length });
+  });
+
   // ── POST /api/skills/bundle-result ──────────────────────────────────────────
   // Runner chama ao fechar task: atualiza result_status do bundle
   app.post("/api/skills/bundle-result", async (request, reply) => {
@@ -374,4 +420,48 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
     );
     return reply.send({ data: result.rows });
   });
+}
+
+/**
+ * Motor v2 do feedback (SKILL_FEEDBACK = shadow | on). Duas formas de corpo:
+ *   • por skill:  { project_id, task_id, skill_id, signal, [weight, notes, bundle_id] }
+ *   • por desfecho (fan-out): { project_id, [task_id], signal }  → todas as skills dos bundles
+ *     (e as lições injetadas, se o sinal for de oráculo positivo). Sem task_id = projeto inteiro.
+ * Idempotente: a chave projeto|task|skill|sinal torna a repetição um no-op (HTTP 200, duplicate).
+ * Sem PII: o corpo só carrega ids opacos e o sinal.
+ */
+async function handleFeedbackV2(
+  mode: Exclude<SkillFeedbackMode, "off">,
+  body: Record<string, unknown>,
+  reply: import("fastify").FastifyReply,
+) {
+  const { skill_id, bundle_id, task_id, project_id, signal, weight, notes } = body;
+  if (typeof signal !== "string" || !(ALL_SIGNALS as readonly string[]).includes(signal)) {
+    return reply.status(400).send({ error: `signal inválido: ${String(signal)}` });
+  }
+  if (typeof project_id !== "string" || !UUID_RE.test(project_id)) {
+    return reply.status(400).send({ error: "project_id (uuid) é obrigatório" });
+  }
+  const taskId = typeof task_id === "string" && task_id ? task_id : null;
+  const log = (m: string) => console.info(m);
+
+  if (skill_id !== undefined && skill_id !== null) {
+    if (typeof skill_id !== "string" || !UUID_RE.test(skill_id)) {
+      return reply.status(400).send({ error: "skill_id inválido" });
+    }
+    if (!taskId) return reply.status(400).send({ error: "task_id é obrigatório com skill_id (chave de idempotência)" });
+    const out = await withTransaction(pool as never, (db) =>
+      applySkillSignal(pgFeedbackStore(db), mode, {
+        projectId: project_id, taskRef: taskId, skillId: skill_id, signal,
+        weight: typeof weight === "number" ? weight : undefined,
+        bundleId: typeof bundle_id === "string" ? bundle_id : null,
+        notes: typeof notes === "string" ? notes.slice(0, 500) : null,
+      }, log));
+    return reply.status(out.duplicate ? 200 : 201).send({ ok: true, mode, duplicate: out.duplicate, result: out });
+  }
+
+  const res = await withTransaction(pool as never, (db) =>
+    applyOutcome(pgFeedbackStore(db), mode, { projectId: project_id, taskId, signal }, log));
+  const allDup = res.skills.length > 0 && res.skills.every((s) => s.duplicate);
+  return reply.status(allDup ? 200 : 201).send({ ok: true, mode, duplicate: allDup, skills: res.skills.length, lessons: res.lessons.length });
 }
