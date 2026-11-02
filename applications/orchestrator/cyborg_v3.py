@@ -915,7 +915,10 @@ Comece analisando o audit (via `zentriz-audit {project_id}`) e o estado atual do
     from orchestrator.agents import llm_guard as _llm_guard
     try:
         _gctx = _llm_guard.check(model=model_id or "", system=engineer_prompt, user=user_briefing,
-                                 max_tokens=64000, project_id=project_id, purpose="cyborg_v3:engineer_session")
+                                 max_tokens=64000, project_id=project_id, purpose="cyborg_v3:engineer_session",
+                                 # Plano 1.3: o Cyborg só roda depois que o pipeline falhou (modelo mais forte
+                                 # do tenant) ⇒ escalada: advisor, de origem orchestrator.
+                                 **_llm_guard.role_kwargs(escalated=True))
     except _llm_guard.LlmGuardDenied as _gd:
         return {"ok": False, "error": f"LLM negado pelo guard de custo ({_gd.code}): {_gd.message}",
                 "guard_denied": True}

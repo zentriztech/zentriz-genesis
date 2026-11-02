@@ -24,6 +24,7 @@
  *      não cabe no que resta ⇒ PAUSA o projeto e nega.
  */
 import { costUsd } from "../lib/modelPricing.js";
+import { llmRolesMode, normalizeLlmRole } from "../lib/llmRoles.js";
 import { PRE_FACTORY_STATUSES } from "./projectStatus.js";
 import { isSesConfigured, sendEmail } from "./emailSender.js";
 import { buildEstimator, fetchHistoryBuckets } from "./specEnrichment.js";
@@ -81,6 +82,10 @@ export interface RecordInput extends PreflightInput {
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
   durationMs?: number;
+  /** Plano 1.3: papel exigido / efetivo / de origem da escalada. Só gravados com LLM_ROLES_MODE != off. */
+  llmRole?: string | null;
+  effectiveRole?: string | null;
+  escalatedFrom?: string | null;
 }
 
 export interface BudgetOwner {
@@ -402,16 +407,32 @@ export async function recordCall(pool: Queryable, input: RecordInput): Promise<{
       phase = phaseFor(String(st?.status ?? ""), input.source ?? "agents");
       tenantId = st?.tenant_id ? String(st.tenant_id) : tenantId;
     }
-    await pool.query(
-      `INSERT INTO llm_call_ledger (project_id, budget_project_id, tenant_id, phase, source, purpose, provider, model,
+    const baseParams = [owner ? pid : null, owner?.ownerId ?? null, tenantId, phase, input.source ?? "agents",
+      (input.purpose ?? "").slice(0, 120), input.provider ?? null, input.model ?? null,
+      Math.round(num(input.inputTokens)), Math.round(num(input.outputTokens)),
+      Math.round(num(input.cacheReadTokens)), Math.round(num(input.cacheWriteTokens)),
+      cost, input.promptHash ?? null, input.durationMs == null ? null : Math.round(num(input.durationMs))];
+    if (llmRolesMode() === "off") {
+      // LLM_ROLES_MODE=off: SQL e parâmetros byte-idênticos ao anterior (teste de snapshot).
+      await pool.query(
+        `INSERT INTO llm_call_ledger (project_id, budget_project_id, tenant_id, phase, source, purpose, provider, model,
          input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, prompt_hash, duration_ms)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-      [owner ? pid : null, owner?.ownerId ?? null, tenantId, phase, input.source ?? "agents",
-        (input.purpose ?? "").slice(0, 120), input.provider ?? null, input.model ?? null,
-        Math.round(num(input.inputTokens)), Math.round(num(input.outputTokens)),
-        Math.round(num(input.cacheReadTokens)), Math.round(num(input.cacheWriteTokens)),
-        cost, input.promptHash ?? null, input.durationMs == null ? null : Math.round(num(input.durationMs))],
-    );
+        baseParams,
+      );
+    } else {
+      // Plano 1.3 (shadow/on): papel validado; desconhecido ⇒ NULL. effective_role cai no llm_role (hoje iguais).
+      const llmRole = normalizeLlmRole(input.llmRole);
+      const effectiveRole = normalizeLlmRole(input.effectiveRole) ?? llmRole;
+      const escalatedFrom = normalizeLlmRole(input.escalatedFrom);
+      await pool.query(
+        `INSERT INTO llm_call_ledger (project_id, budget_project_id, tenant_id, phase, source, purpose, provider, model,
+         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, prompt_hash, duration_ms,
+         llm_role, effective_role, escalated_from)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+        [...baseParams, llmRole, effectiveRole, escalatedFrom],
+      );
+    }
 
     // Disjuntor global avaliado também DEPOIS: a chamada que estoura o teto liga a chave na hora.
     const s = await getGuardSettings(pool);

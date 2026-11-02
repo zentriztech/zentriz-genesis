@@ -224,7 +224,7 @@ def _record_agent_metrics(
     if not input_tokens and not output_tokens:
         return  # no usage data — skip (e.g. running in no-API mode)
     try:
-        payload = json.dumps({
+        _metrics = {
             "agent": agent,
             "taskId": task_id,
             "round": round_num,
@@ -233,7 +233,11 @@ def _record_agent_metrics(
             "model": response.get("_model"),
             "durationMs": response.get("_duration_ms"),
             "status": response.get("status"),
-        }).encode()
+        }
+        # Plano 1.3: papel só viaja com LLM_ROLES_MODE != off (off ⇒ payload byte-idêntico).
+        if _llm_guard.roles_mode() != "off" and _llm_guard.normalize_role(response.get("_llm_role")):
+            _metrics["llmRole"] = _llm_guard.normalize_role(response.get("_llm_role"))
+        payload = json.dumps(_metrics).encode()
         req = urllib.request.Request(
             f"{base.rstrip('/')}/api/projects/{project_id}/agent-metrics",
             data=payload,
@@ -1886,7 +1890,7 @@ def _ask_llm_for_backend_language(text: str) -> str:
         f"Texto:\n{text[:8000]}"
     )
     _gctx = _llm_guard.check(model=model, user=prompt, max_tokens=10, provider=provider,
-                             purpose="runner:backend_language")
+                             purpose="runner:backend_language", **_llm_guard.role_kwargs())
     if provider == "bedrock":
         client = _bedrock_client(_os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
         body = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 10,
@@ -2103,7 +2107,7 @@ Texto:
 {text[:3000]}"""
 
     _gctx = _llm_guard.check(model=model, user=prompt, max_tokens=10, provider=provider,
-                             purpose="runner:module")
+                             purpose="runner:module", **_llm_guard.role_kwargs())
     if provider == "bedrock":
         import json as _json
         client = _bedrock_client(_os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
@@ -2649,7 +2653,8 @@ def _call_autonomous_monitor(project_id: str, task: dict, request_id: str) -> di
             try:
                 _gctx = _llm_guard.check(model=_model, user=_monitor_prompt, max_tokens=4096,
                                          provider=_provider, project_id=project_id,
-                                         purpose="runner:autonomous_monitor")
+                                         purpose="runner:autonomous_monitor",
+                                         **_llm_guard.role_kwargs())
             except _llm_guard.LlmGuardDenied as _gd:
                 return {"outcome": "ESCALATE", "summary": f"LLM negado pelo guard de custo: {_gd.message}"}
             # Suporta Bedrock (padrão do Genesis) e Anthropic API direta

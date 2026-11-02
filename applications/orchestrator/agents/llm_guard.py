@@ -89,6 +89,41 @@ def prompt_hash(model: str, system: str, user: str) -> str:
     return h.hexdigest()
 
 
+# ── Papel de LLM (plano de evolução v2, tarefa 1.3) ──────────────────────────────────────────────
+# `LLM_ROLES_MODE` = off | shadow | on (padrão off). Espelho de `api-node/src/lib/llmRoles.ts`.
+# off ⇒ NADA muda: nenhum campo de papel entra no payload do preflight/record (byte-idêntico).
+# shadow/on ⇒ o papel DERIVADO do comportamento atual viaja ao ledger. Ainda não há roteamento por
+# papel (Fase 2A), e uma negativa do guard nunca rebaixa papel nem modelo.
+LLM_ROLES = ("orchestrator", "advisor", "staff")
+
+
+def roles_mode() -> str:
+    """Helper ÚNICO da flag. Ausente ou inválido ⇒ `off` (fail-safe)."""
+    raw = (os.environ.get("LLM_ROLES_MODE", "off") or "off").strip().lower()
+    return raw if raw in ("shadow", "on") else "off"
+
+
+def normalize_role(value: object) -> str | None:
+    s = str(value or "").strip().lower()
+    return s if s in LLM_ROLES else None
+
+
+def role_kwargs(*, escalated: bool = False, staff: bool = False) -> dict:
+    """Papel derivado do comportamento atual, como kwargs para `check`/`call_bedrock_direct`.
+
+    Orchestrator = modelo principal do slot · Advisor = modelo de rework/fallback usado por escalada
+    (`escalated_from="orchestrator"`) · Staff = só quando o chamador afirma de forma inequívoca.
+    Com a flag `off` devolve `{}` — o chamador não passa argumento novo nenhum.
+    """
+    if roles_mode() == "off":
+        return {}
+    if staff:
+        return {"llm_role": "staff"}
+    if escalated:
+        return {"llm_role": "advisor", "escalated_from": "orchestrator"}
+    return {"llm_role": "orchestrator"}
+
+
 def _disabled() -> bool:
     # Só para teste unitário isolado. Em prod NÃO existe: o compose não define a variável.
     return os.environ.get("LLM_GUARD_DISABLED_FOR_TESTS", "").strip() == "1"
@@ -122,12 +157,22 @@ def _merge(project_id: object, purpose: str | None, source: str | None) -> dict:
 
 def check(*, model: str, system: str = "", user: str = "", max_tokens: int = 8000,
           provider: str | None = None, project_id: object = None, purpose: str | None = None,
-          source: str | None = None) -> dict:
+          source: str | None = None, llm_role: str | None = None,
+          escalated_from: str | None = None) -> dict:
     """Pede licença. Devolve o contexto para o `record` ou LANÇA `LlmGuardDenied`."""
     ctx = _merge(project_id, purpose, source)
     ctx["promptHash"] = prompt_hash(model, system, user)
     ctx["model"] = model
     ctx["provider"] = provider
+    # Plano 1.3: só com a flag ligada e papel válido. Sem papel ⇒ nenhuma chave (ledger grava NULL).
+    if roles_mode() != "off":
+        _r = normalize_role(llm_role)
+        if _r:
+            ctx["llmRole"] = _r
+            ctx["effectiveRole"] = _r  # papel exigido = papel efetivo (ainda não há roteamento)
+            _from = normalize_role(escalated_from)
+            if _from:
+                ctx["escalatedFrom"] = _from
     if _disabled():
         return ctx
     # ~4 caracteres por token: estimativa conservadora o bastante para a checagem de saldo.
