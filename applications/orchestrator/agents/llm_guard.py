@@ -108,15 +108,27 @@ def normalize_role(value: object) -> str | None:
     return s if s in LLM_ROLES else None
 
 
-def role_kwargs(*, escalated: bool = False, staff: bool = False) -> dict:
+def role_kwargs(*, escalated: bool = False, staff: bool = False,
+                required: str | None = None, effective: str | None = None) -> dict:
     """Papel derivado do comportamento atual, como kwargs para `check`/`call_bedrock_direct`.
 
     Orchestrator = modelo principal do slot · Advisor = modelo de rework/fallback usado por escalada
     (`escalated_from="orchestrator"`) · Staff = só quando o chamador afirma de forma inequívoca.
     Com a flag `off` devolve `{}` — o chamador não passa argumento novo nenhum.
+
+    2A.4: `required`/`effective` (opcionais) declaram o papel EXIGIDO e o papel que de fato serviu
+    (ex.: Advisor vazio ⇒ `llm_role=advisor, effective_role=orchestrator`; Staff vazio ⇒
+    `llm_role=staff, effective_role=orchestrator`). Sem eles, o resultado é o de sempre.
     """
     if roles_mode() == "off":
         return {}
+    req, eff = normalize_role(required), normalize_role(effective)
+    if req:
+        eff = eff or req
+        out: dict = {"llm_role": req, "effective_role": eff}
+        if eff == "advisor" and escalated:  # o modelo do Advisor SUBSTITUIU o do Orchestrator
+            out["escalated_from"] = "orchestrator"
+        return out
     if staff:
         return {"llm_role": "staff"}
     if escalated:
@@ -210,7 +222,7 @@ def _merge(project_id: object, purpose: str | None, source: str | None) -> dict:
 def check(*, model: str, system: str = "", user: str = "", max_tokens: int = 8000,
           provider: str | None = None, project_id: object = None, purpose: str | None = None,
           source: str | None = None, llm_role: str | None = None,
-          escalated_from: str | None = None, call_reason: str | None = None,
+          escalated_from: str | None = None, effective_role: str | None = None, call_reason: str | None = None,
           call_task: object = None, call_stage: str | None = None,
           call_attempt: object = None) -> dict:
     """Pede licença. Devolve o contexto para o `record` ou LANÇA `LlmGuardDenied`."""
@@ -223,7 +235,9 @@ def check(*, model: str, system: str = "", user: str = "", max_tokens: int = 800
         _r = normalize_role(llm_role)
         if _r:
             ctx["llmRole"] = _r
-            ctx["effectiveRole"] = _r  # papel exigido = papel efetivo (ainda não há roteamento)
+            # 2A.4: `effective_role` só difere do exigido quando o slot não declara o papel
+            # (Staff vazio ⇒ Orchestrator; Advisor vazio ⇒ sem escalada). Sem ele, igual ao exigido.
+            ctx["effectiveRole"] = normalize_role(effective_role) or _r
             _from = normalize_role(escalated_from)
             if _from:
                 ctx["escalatedFrom"] = _from

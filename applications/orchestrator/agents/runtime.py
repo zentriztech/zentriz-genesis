@@ -16,6 +16,7 @@ import contextlib
 import contextvars
 
 from . import llm_guard as _llm_guard
+from . import llm_roles as _llm_roles
 
 logger = logging.getLogger(__name__)
 
@@ -1498,6 +1499,11 @@ def _get_model_for_role(role: str) -> str:
     tenant — por isso, sem nada, isto devolve "" e o chamador FALHA ALTO em vez de inventar modelo.
     """
     role_upper = (role or "").upper()
+    if _llm_roles.is_on():
+        # 2A.4 (LLM_ROLES_MODE=on): só o TRANSPORTE do slot injetado por `runner_server`. As envs
+        # CLAUDE_MODEL_SPEC/CODE e PIPELINE_LLM_MODEL não são injetadas por ninguém (doc 05 §6) e
+        # eram um atalho de escolha fora do slot; todo papel do squad é Orchestrator (doc 05 §16).
+        return (os.environ.get("CLAUDE_MODEL") or "").strip()
     if role_upper in ("CTO", "ENGINEER", "PM"):
         return (os.environ.get("CLAUDE_MODEL_SPEC") or os.environ.get("PIPELINE_LLM_MODEL") or os.environ.get("CLAUDE_MODEL") or "").strip()
     if role_upper == "DEV":
@@ -1810,7 +1816,7 @@ def _scrub_secrets(text: str, llm_cfg: dict | None) -> str:
     """
     out = str(text or "")
     for k, v in (llm_cfg or {}).items():
-        if k in ("provider", "model", "model_rework"):
+        if k in ("provider", "model", "model_rework", "models", "roles_contract_version"):
             continue
         s = str(v or "").strip()
         if len(s) >= 8:
@@ -2111,12 +2117,15 @@ _OPENAI_MODEL_LIMITS: dict[str, dict[str, int]] = {
 _OPENAI_DEFAULT_LIMITS = {"context": 128_000, "max_output": 16_384}
 
 
-def _stamp_role(out: dict, escalated: bool) -> None:
+def _stamp_role(out: dict, escalated: bool, required: str | None = None, effective: str | None = None) -> None:
     """Plano 1.3: papel derivado na resposta (`_llm_role`), lido pelo runner ao postar /agent-metrics.
-    Com LLM_ROLES_MODE=off não escreve nada (resposta byte-idêntica)."""
-    _kw = _llm_guard.role_kwargs(escalated=escalated)
+    Com LLM_ROLES_MODE=off não escreve nada (resposta byte-idêntica). 2A.4: em shadow/on, `_llm_role`
+    é o papel EXIGIDO e `_effective_role` o papel que de fato serviu (QA usa como piso do Dev)."""
+    _kw = _llm_guard.role_kwargs(escalated=escalated, required=required, effective=effective)
     if _kw:
         out["_llm_role"] = _kw["llm_role"]
+        if required:
+            out["_effective_role"] = _kw["effective_role"]
 
 
 def _guard_text(v: object) -> str:
@@ -2287,6 +2296,12 @@ def run_agent(
     _provider_override = (_llm_cfg.get("provider") or "").strip().lower()
     _api_key_override  = (_llm_cfg.get("api_key")  or "").strip()
     _model_override    = (_llm_cfg.get("model")    or "").strip()
+    # 2A.4: resolução por papel só com LLM_ROLES_MODE=on. O Orchestrator vem do ENVELOPE do slot
+    # (`models.orchestrator` ou `model`), nunca de env/literal; sem ele, falha alto abaixo.
+    _roles_on = _llm_roles.is_on()
+    _role_models = _llm_roles.models_from_llm_cfg(_llm_cfg) if _roles_on else None
+    if _roles_on:
+        _model_override = _role_models.orchestrator
 
     # Auto-detectar provider pelo nome do modelo quando há conflito
     # Ex: provider=openai mas model=claude-sonnet-4-5 → usar bedrock/anthropic
@@ -2310,10 +2325,11 @@ def run_agent(
     # guarda abaixo falha alto em vez de rotear para um provider que ninguém pediu.
     _env_provider = os.environ.get("GENESIS_LLM_PROVIDER", "").strip().lower()
     _raw_provider = resolve_provider(_llm_cfg, _env_provider)
-    _model_for_inference = _model_override or _get_model_for_role(role)
+    _model_for_inference = _model_override or ("" if _roles_on else _get_model_for_role(role))
     _inferred = _infer_provider_from_model(_model_for_inference)
     # Se o provider declarado é openai mas o modelo é Claude → corrigir silenciosamente
-    if _raw_provider == "openai" and _inferred and _inferred != "openai":
+    # (2A.4: com LLM_ROLES_MODE=on NÃO se corrige: `validate_provider` abaixo falha alto por papel)
+    if (not _roles_on) and _raw_provider == "openai" and _inferred and _inferred != "openai":
         logger.warning(
             "[FT-13] provider='openai' mas modelo '%s' é %s — corrigindo provider automaticamente.",
             _model_for_inference, _inferred,
@@ -2355,9 +2371,9 @@ def run_agent(
                 "Corrija o modelo do slot em Configurações → LLM."
             )
         else:
-            model = _get_model_for_role(role)
+            model = "" if _roles_on else _get_model_for_role(role)
     else:
-        model = _model_override or _get_model_for_role(role)
+        model = _model_override or ("" if _roles_on else _get_model_for_role(role))
 
     # ⚖️ LEI 2026-09-10 — sem modelo resolvido a chamada FALHA. Não existe mais um default da
     # plataforma para cair: rodar no modelo da Zentriz é exatamente a fatura que a lei fecha.
@@ -2371,6 +2387,9 @@ def run_agent(
             "nenhum provider de LLM resolvido: o slot do tenant não declarou provider. "
             "Configure um slot em Configurações → LLM."
         )
+    if _roles_on:
+        # 2A.4: provider↔modelo por PAPEL, falhando alto (antes: "correção" silenciosa do provider).
+        _llm_roles.validate_provider(provider, _llm_roles.ORCHESTRATOR, model)
     _msg_limits_early = message.get("limits") or {}
     timeout = int(
         _msg_limits_early.get("timeout_sec")
@@ -2580,6 +2599,22 @@ def run_agent(
     # Se QA reprovar 3x → BLOCKED (revisão humana). Opus paga para evitar BLOCKED.
     _is_rework_role = (role or "").upper() in ("DEV", "QA")
     _role_escalated = False  # plano 1.3: True só se o modelo de rework REALMENTE substituiu o principal
+    _role_required = _role_effective = None  # 2A.4: papel exigido × efetivo (ledger); só shadow/on
+    if _roles_on:
+        # Papel EXIGIDO só por fato duro (rework_attempt >= 1 em Dev/QA) + piso QA >= Dev pelo papel
+        # EFETIVO do Dev (`role_floor`). Não muda ao trocar de slot: a cascata re-resolve por candidato.
+        _role_required = _llm_roles.apply_floor(
+            _llm_roles.required_role(role, rework_attempt=_rework_attempt),
+            inp.get("role_floor") if (role or "").upper() == "QA" else None)
+        _res = _llm_roles.resolve_model(_role_required, _role_models)
+        _llm_roles.validate_provider(provider, _res.effective_role, _res.model)
+        _role_effective, _role_escalated = _res.effective_role, _res.escalated
+        if _res.model != model:
+            logger.info("[ROLES] %s papel=%s efetivo=%s → modelo do slot %s", role, _role_required,
+                        _role_effective, _res.model)
+            model = _res.model
+        elif _res.note:
+            logger.info("[ROLES] %s papel=%s efetivo=%s (%s)", role, _role_required, _role_effective, _res.note)
     if _is_rework_role and _rework_attempt >= 1:
         # ⚖️ LEI 2026-09-10: o modelo de rework é o `model_id_fallback` DO SLOT — ele chega no
         # envelope como `model_rework` (Bancada) ou no env do run como `CLAUDE_MODEL_REWORK`
@@ -2589,6 +2624,8 @@ def run_agent(
             (_llm_cfg.get("model_rework") or "").strip()
             or os.environ.get("CLAUDE_MODEL_REWORK", "").strip()
         )
+        if _roles_on:
+            _rework_model = ""  # 2A.4: o Advisor vem de `_role_resolution` (slot), nunca de env
         if _rework_model and _rework_model != model:
             model = _rework_model
             _role_escalated = True
@@ -2597,6 +2634,11 @@ def run_agent(
         env_max = max(env_max, _rework_boost)
         logger.info("[REWORK-ESCALATE] %s rework %d → tokens aumentados para %d", role, _rework_attempt, env_max)
 
+    if (not _roles_on) and _llm_guard.roles_mode() == "shadow":
+        # shadow: só REGISTRA o papel que seria exigido; o modelo acima segue a lógica legada intacta.
+        _role_required = _llm_roles.shadow_role(role, rework_attempt=_rework_attempt)
+        _role_effective = "advisor" if _role_escalated else "orchestrator"
+
     last_thinking: str = ""
 
     # Cascata de modelo indisponível na CONTA (ex.: Bedrock sem acesso ao opus-4-8):
@@ -2604,7 +2646,10 @@ def run_agent(
     # CLAUDE_MODEL_FALLBACK — documentado no .env, mas até aqui era config morta neste caminho.
     # Preserva a escolha do modelo principal (volta a ser usado quando o acesso retornar) e
     # só ativa em prod-bedrock (no Foundry a var fica vazia → nenhuma mudança de comportamento).
-    _fallback_model = os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
+    # 2A.4 (doc 19, semântica 5): sob LLM_ROLES_MODE=on o modelo de substituição por env NÃO existe —
+    # modelo negado na conta é falha do SLOT (classe `model`/`auth`) e segue a cascata de slots, nunca
+    # um modelo escolhido pela plataforma nem o Advisor.
+    _fallback_model = "" if _roles_on else os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
     _model_downgraded = False
     # A4.1 (2026-09-06): modelo já negado pela conta neste processo → nasce no fallback. Antes, todo
     # agente queimava a 1ª das CLAUDE_RETRY_ATTEMPTS num 403 conhecido (9 vezes em 24 h em prod).
@@ -2669,7 +2714,8 @@ def run_agent(
         _gctx = _llm_guard.check(model=model, system=_guard_text(system_content), user=_guard_text(user_content),
                                  max_tokens=max_tokens, provider=provider, project_id=_guard_project_of(message),
                                  purpose=f"{role}:{mode or 'default'}",
-                                 **_llm_guard.role_kwargs(escalated=_role_escalated),
+                                 **_llm_guard.role_kwargs(escalated=_role_escalated, required=_role_required,
+                                                          effective=_role_effective),
                                  # Plano 1.4: motivo (primary|repair|rework) + chave projeto|task|etapa|tentativa.
                                  **_llm_guard.waste_kwargs(
                                      _llm_guard.derive_reason(repair_attempt=repair_attempt,
@@ -2865,7 +2911,7 @@ def run_agent(
             out["_output_tokens"] = _output_tokens
             out["_duration_ms"] = int(duration_ms)
             out["_model"] = model
-            _stamp_role(out, _role_escalated)
+            _stamp_role(out, _role_escalated, _role_required, _role_effective)
             _mark_truncation(out, stop_reason, agent_name)
             _mark_usage_totals(out, _acc_input_tokens, _acc_output_tokens, _llm_calls,
                                _acc_cache_read, _acc_cache_write)
@@ -2908,7 +2954,7 @@ def run_agent(
         out["_output_tokens"] = _output_tokens
         out["_duration_ms"] = int((time.perf_counter() - t0_run) * 1000)
         out["_model"] = model
-        _stamp_role(out, _role_escalated)
+        _stamp_role(out, _role_escalated, _role_required, _role_effective)
         _mark_truncation(out, stop_reason, agent_name)
         _mark_usage_totals(out, _acc_input_tokens, _acc_output_tokens, _llm_calls,
                            _acc_cache_read, _acc_cache_write)

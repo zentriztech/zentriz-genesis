@@ -24,6 +24,7 @@ if _dotenv.exists():
 
 from .runtime import run_agent, SHOW_TRACEBACK
 from . import llm_guard as _llm_guard
+from . import llm_roles as _llm_roles
 from . import pm, dev, qa, monitor, devops
 from .cto import CTO_SYSTEM_PROMPT_PATH
 from .engineer import ENGINEER_SYSTEM_PROMPT_PATH
@@ -464,6 +465,11 @@ def _wrap_with_llm_config(body: dict) -> dict:
         # `llm_config` porque é lá que o runtime procura o envelope do tenant.
         rework = str(body.get("model_id_rework") or "").strip()
         message["llm_config"] = {**llm_cfg, "model_rework": rework} if rework else llm_cfg
+        # 2A.5: contrato por papel (ADITIVO). `model_rework` (legado) e `models.*` convivem; quem lê
+        # `models` é o runtime sob LLM_ROLES_MODE=on. Sem os campos (API antiga) nada é acrescentado.
+        _ver, _models = body.get("roles_contract_version"), body.get("models")
+        if isinstance(_models, dict) and _ver:
+            message["llm_config"] = {**message["llm_config"], "roles_contract_version": _ver, "models": _models}
     # Mesmo lift para a lista de contingências (`llm_candidates`): sem ela no topo, `_slot_cascade`
     # não a enxerga e o tenant volta a ter um slot só — que é o defeito que a cascata fecha.
     cands = body.get("llm_candidates")
@@ -1175,6 +1181,10 @@ def invoke_raw(body: dict):
 
     def _tentar(_model: str, _fb: str, _cfg: dict | None) -> dict | None:
         """Um slot: principal e, se ele falhar/vier vazio, o fallback DELE. `None` = slot esgotado."""
+        if _llm_roles.is_on():
+            # 2A.4 (doc 19, semântica 4): falha/exceção/resposta vazia é DISPONIBILIDADE, não escalada.
+            # O Advisor NÃO é chamado aqui: o failover segue a cascata de slots (mesmo papel exigido).
+            _fb = ""
         try:
             resp = call_bedrock_direct(system=system_prompt, user=user_message,
                                        model_id=_model, max_tokens=max_tokens,
@@ -1216,6 +1226,13 @@ def _invoke_raw_cascade(_cands, _tentar, _is_slot_fail, _kind_of, _scrub, llm_cf
         try:
             # `llm_candidates` já preenche o fallback do 1º candidato a partir de `model_id_fallback`.
             _out = _tentar(_c["model"], _c["fallback"], _cfg)
+            if (_out is not None and _llm_roles.is_on() and _i < len(_cands) - 1
+                    and not str(_out.get("response") or "").strip()):
+                # 2A.4: resposta vazia = falha do slot ⇒ próximo slot (nunca Advisor); no último, devolve
+                # o vazio como sempre (comportamento antigo preservado).
+                logger.warning("[cascata-slot] /invoke/raw: slot %d/%d devolveu resposta vazia — próximo slot",
+                               _i + 1, len(_cands))
+                continue
             if _out is not None:
                 if _i > 0:
                     _out["slot_cascade"] = _i  # quantos slots foram queimados antes deste

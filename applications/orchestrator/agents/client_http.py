@@ -136,6 +136,14 @@ def run_agent_http(agent_key: str, message: dict) -> dict:
     # Fallback de modelo: na tentativa 2+, trocar para CLAUDE_MODEL_REWORK (ex: Opus)
     # se houver fallback configurado. O runtime.py lê llm_config.model do envelope.
     _fallback_model = os.environ.get("CLAUDE_MODEL_REWORK", "").strip()
+    try:
+        from . import llm_roles as _llm_roles
+        if _llm_roles.is_on():
+            # 2A.4 (ADR-024): timeout/erro de transporte NÃO sobe para o Advisor (custaria ≈2× sem
+            # política). Com LLM_ROLES_MODE=on a nova tentativa repete o mesmo modelo.
+            _fallback_model = ""
+    except Exception:  # pragma: no cover — import defensivo: a flag nunca derruba o transporte
+        pass
     _primary_model  = (body.get("llm_config") or {}).get("model", "") if isinstance(body, dict) else ""
 
     for attempt in range(max_attempts):
