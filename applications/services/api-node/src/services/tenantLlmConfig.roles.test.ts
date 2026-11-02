@@ -65,8 +65,8 @@ describe("LLM_ROLES_MODE=off — objeto resolvido e payload byte-idênticos", ()
   }
 });
 
-describe("LLM_ROLES_MODE=shadow|on — models presente, payload dos agents inalterado", () => {
-  for (const mode of ["shadow", "on"]) {
+describe("LLM_ROLES_MODE=shadow — models presente, payload dos agents inalterado (o `on` é a 2A.5: ver tenantLlmConfig.roles-routing.test.ts)", () => {
+  for (const mode of ["shadow"]) {
     it(`${mode}: models = {orchestrator, advisor, staff}; envelope para agents continua o mesmo`, async () => {
       process.env.LLM_ROLES_MODE = mode;
       tenantRows = [WITH_ROLES];

@@ -1,0 +1,29 @@
+{
+  "guard_project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "model_id": "us.anthropic.claude-sonnet-4-6",
+  "model_id_rework": "us.anthropic.claude-opus-4-8",
+  "llm_config": {
+    "provider": "bedrock",
+    "model": "us.anthropic.claude-sonnet-4-6",
+    "aws_access_key_id": "AKIA_FAKE_0",
+    "aws_secret_access_key": "SECRET_FAKE_0",
+    "aws_region": "us-east-1"
+  },
+  "llm_candidates": [
+    {
+      "provider": "bedrock",
+      "model": "us.anthropic.claude-sonnet-4-6",
+      "aws_access_key_id": "AKIA_FAKE_0",
+      "aws_secret_access_key": "SECRET_FAKE_0",
+      "aws_region": "us-east-1",
+      "model_rework": "us.anthropic.claude-opus-4-8"
+    },
+    {
+      "provider": "bedrock",
+      "model": "us.anthropic.claude-sonnet-4-5",
+      "aws_access_key_id": "AKIA_FAKE_1",
+      "aws_secret_access_key": "SECRET_FAKE_1",
+      "aws_region": "us-east-1"
+    }
+  ]
+}

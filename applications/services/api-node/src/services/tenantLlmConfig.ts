@@ -12,7 +12,7 @@
 
 import { pool } from "../db/client.js";
 import { pickReviewerModel, strongestByDomination } from "./reviewerModel.js";
-import { rolesEnabled, rolesFromRow, type RoleModels } from "../lib/llmRoleSlots.js";
+import { rolesEnabled, rolesFromRow, rolesRoutingOn, ROLES_CONTRACT_VERSION, type RoleModels } from "../lib/llmRoleSlots.js";
 
 export interface TenantLlmConfig {
   provider: string;
@@ -63,9 +63,11 @@ export interface ResolvedLlmConfig {
    * 2A.3 — modelos por papel do slot. Presente SOMENTE com `LLM_ROLES_MODE != off`; com `off` o
    * objeto resolvido é byte-idêntico ao anterior. Na transição as colunas legadas são as
    * autoritativas (Orchestrator = model_id, Advisor = model_id_fallback normalizado, Staff = coluna
-   * nova). Não viaja nos envelopes para agents/runner (isso é a tarefa 2A.5).
+   * nova). Só viaja nos envelopes para agents/runner com `LLM_ROLES_MODE=on` (2A.5, abaixo).
    */
   models?: RoleModels;
+  /** 2A.5: versão do contrato aditivo. Presente SOMENTE com `LLM_ROLES_MODE=on` (junto de `models`). */
+  roles_contract_version?: number;
   /**
    * COMO este slot foi escolhido. Só é preenchido quando a estratégia não é a padrão (`priority`),
    * porque quem lê precisa poder AUDITAR a escolha: com `strongest`, o slot que roda pode não ser o
@@ -247,6 +249,13 @@ export interface AgentsLlmOverride {
   guard_project_id?: string;
   model_id?: string;
   model_id_rework?: string;
+  /**
+   * 2A.5 — contrato por papel, ADITIVO e VERSIONADO. Só com `LLM_ROLES_MODE=on`. Os 3 papéis
+   * compartilham a credencial do slot: aqui viajam só ids de modelo, nunca credencial por papel.
+   * Consumidor antigo ignora os campos; sem eles um consumidor novo cai no legado (`model_id_rework`).
+   */
+  roles_contract_version?: number;
+  models?: RoleModels;
   llm_config: Record<string, string>;
   /**
    * ⚖️ Jean, 2026-09-10: *"sempre testando se funciona e em caso de não funcionar testa o próximo"*.
@@ -259,7 +268,7 @@ export interface AgentsLlmOverride {
    * Cada slot tem credencial PRÓPRIA: sem o envelope inteiro, cair para a contingência pediria o
    * modelo dela ao provider da primária — 400, ou pior, consumo na fatura errada.
    */
-  llm_candidates?: Record<string, string>[];
+  llm_candidates?: Array<Record<string, string | RoleModels>>;
   /** true quando nada foi resolvido (env default) — os agents usam o próprio env. */
   isDefault: boolean;
 }
@@ -269,6 +278,7 @@ export function toAgentsOverride(cfg: ResolvedLlmConfig, contingencias: Resolved
   // Nomes EXATOS que `_build_foundry_client`/`_build_google_client` procuram no envelope
   // (runtime.py): envelope > env. Só viajam se o tenant tiver credencial própria.
   const llm = credentialEnvelope(cfg);
+  const roles = rolesRoutingOn(); // 2A.5: off e shadow ⇒ envelope byte-idêntico ao anterior
   // A lista de candidatos começa NO PRÓPRIO slot escolhido: os agents deduplicam por
   // (modelo, provider), e mandar o escolhido junto deixa o envelope auto-contido — quem lê o corpo
   // vê a fila inteira que será tentada, na ordem em que será tentada.
@@ -276,11 +286,16 @@ export function toAgentsOverride(cfg: ResolvedLlmConfig, contingencias: Resolved
     .filter((c) => c.modelId && c.provider)
     .map((c) => {
       const env = c === cfg ? llm : credentialEnvelope(c);
-      return { ...env, ...(c.fallbackModelId ? { model_rework: c.fallbackModelId } : {}) };
+      return {
+        ...env,
+        ...(c.fallbackModelId ? { model_rework: c.fallbackModelId } : {}),
+        ...(roles && c.models ? { models: c.models } : {}),
+      };
     });
   return {
     model_id: cfg.modelId,
     ...(cfg.fallbackModelId ? { model_id_rework: cfg.fallbackModelId } : {}),
+    ...(roles && cfg.models ? { roles_contract_version: ROLES_CONTRACT_VERSION, models: cfg.models } : {}),
     llm_config: llm,
     ...(candidatos.length > 1 ? { llm_candidates: candidatos } : {}),
     isDefault: false,
@@ -426,6 +441,7 @@ function toResolved(cfg: TenantLlmConfig): ResolvedLlmConfig {
     isDefault:          false,
     priority:           cfg.priority,
     ...(cfg.roleModels ? { models: cfg.roleModels } : {}),
+    ...(cfg.roleModels && rolesRoutingOn() ? { roles_contract_version: ROLES_CONTRACT_VERSION } : {}),
   };
 }
 
@@ -436,6 +452,9 @@ export function agentsLlmFields(o: AgentsLlmOverride): Record<string, unknown> {
     ...(o.guard_project_id ? { guard_project_id: o.guard_project_id } : {}),
     ...(o.model_id ? { model_id: o.model_id } : {}),
     ...(o.model_id_rework ? { model_id_rework: o.model_id_rework } : {}),
+    // 2A.5 (aditivo, só com LLM_ROLES_MODE=on): agents antigos ignoram; sem eles, agents novos usam o legado.
+    ...(o.roles_contract_version ? { roles_contract_version: o.roles_contract_version } : {}),
+    ...(o.models ? { models: o.models } : {}),
     llm_config: o.llm_config,
     // Contingências do tenant (LEI 2026-09-10). Aditivo: agents antigos ignoram o campo.
     ...(o.llm_candidates && o.llm_candidates.length > 1 ? { llm_candidates: o.llm_candidates } : {}),

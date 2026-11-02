@@ -10,7 +10,7 @@
  * regra e um teste de integração em Postgres real compara os dois.
  */
 import { isSmallModel, modelFamilyOf, modelPower, servableBy } from "../services/reviewerModel.js";
-import { llmRolesMode } from "./llmRoles.js";
+import { llmRolesMode, type LlmRole } from "./llmRoles.js";
 
 export interface RoleModels {
   orchestrator: string;
@@ -176,4 +176,50 @@ export function rolesFromRow(row: {
     (clean(row.model_orchestrator) ?? null) !== (legacy.orchestrator || null) ||
     (clean(row.model_advisor) ?? null) !== legacy.advisor;
   return { models, diverges };
+}
+
+// ── 2A.4/2A.5: resolução por papel e contrato de transporte ──────────────────────────────────────
+
+/** Versão do contrato aditivo `roles_contract_version` (api → agents/runner). Espelho do Python. */
+export const ROLES_CONTRACT_VERSION = 1;
+
+/** O roteamento por papel só vale com `LLM_ROLES_MODE=on`; `off` e `shadow` não mudam NADA no envelope. */
+export function rolesRoutingOn(env: NodeJS.ProcessEnv = process.env): boolean {
+  return llmRolesMode(env) === "on";
+}
+
+/** Papel de modelo EXIGIDO por uma chamada do squad (doc 05 §16): só fato duro `rework_attempt >= 1`. */
+export function requiredRoleFor(squadRole: string, reworkAttempt = 0): LlmRole {
+  const up = (squadRole || "").toUpperCase();
+  return (up === "DEV" || up === "QA") && reworkAttempt >= 1 ? "advisor" : "orchestrator";
+}
+
+export interface RoleResolution {
+  llm_role: LlmRole;
+  effective_role: LlmRole;
+  model: string;
+  /** true só se o modelo do papel substituiu o Orchestrator. */
+  escalated: boolean;
+  note: string;
+}
+
+/**
+ * Modelo do papel exigido DENTRO de um slot (D1/D1b). Sem Orchestrator ⇒ lança (LEI dos slots: nada de
+ * modelo de env/literal). Staff vazio ⇒ Orchestrator declarado; Advisor vazio ⇒ sem escalada.
+ * Espelho de `orchestrator/agents/llm_roles.py::resolve_model`.
+ */
+export function resolveRoleModel(models: RoleModels, required: LlmRole): RoleResolution {
+  const orch = clean(models.orchestrator);
+  if (!orch) throw new Error("nenhum modelo Orchestrator no slot do tenant (LEI dos slots: sem modelo de env/literal)");
+  if (required === "orchestrator") return { llm_role: required, effective_role: "orchestrator", model: orch, escalated: false, note: "" };
+  if (required === "staff") {
+    const st = clean(models.staff);
+    return st
+      ? { llm_role: "staff", effective_role: "staff", model: st, escalated: false, note: "" }
+      : { llm_role: "staff", effective_role: "orchestrator", model: orch, escalated: false, note: "staff_empty_uses_orchestrator" };
+  }
+  const adv = clean(models.advisor);
+  if (!adv) return { llm_role: "advisor", effective_role: "orchestrator", model: orch, escalated: false, note: "advisor_empty_no_escalation" };
+  if (adv === orch) return { llm_role: "advisor", effective_role: "orchestrator", model: orch, escalated: false, note: "advisor_same_as_orchestrator" };
+  return { llm_role: "advisor", effective_role: "advisor", model: adv, escalated: true, note: "" };
 }
