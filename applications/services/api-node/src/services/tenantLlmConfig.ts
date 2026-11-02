@@ -11,7 +11,9 @@
  */
 
 import { pool } from "../db/client.js";
-import { pickReviewerModel, strongestByDomination } from "./reviewerModel.js";
+import { pickReviewerModel, strongestByDomination, modelFamilyOf } from "./reviewerModel.js";
+import { isRoleEligible } from "./llmRoleProbe.js";
+import type { LlmRole } from "../lib/llmRoles.js";
 import { rolesEnabled, rolesFromRow, rolesRoutingOn, ROLES_CONTRACT_VERSION, type RoleModels } from "../lib/llmRoleSlots.js";
 
 export interface TenantLlmConfig {
@@ -32,6 +34,11 @@ export interface TenantLlmConfig {
   byocExempt: boolean;
   /** 2A.3: só preenchido com `LLM_ROLES_MODE != off`. Legado autoritativo (ver `rolesFromRow`). */
   roleModels?: RoleModels;
+  /**
+   * 2A.8: `verify_<papel>_status` gravado pelo probe por papel (2A.9). Presente SOMENTE com
+   * `LLM_ROLES_MODE=on` (o SQL só ganha as colunas nesse modo). `null`/ausente = nunca verificado.
+   */
+  roleVerify?: Partial<Record<LlmRole, string | null>>;
 }
 
 export interface ResolvedLlmConfig {
@@ -186,10 +193,13 @@ export function slotUsability(
 export async function getTenantLlmConfigs(tenantId: string): Promise<TenantLlmConfig[]> {
   try {
     const withRoles = rolesEnabled();
+    // 2A.8: o veredicto do probe por papel só é lido com `on` (a elegibilidade de revisor depende dele).
+    const withVerify = rolesRoutingOn();
     const result = await pool.query(
       `SELECT c.provider, c.model_id, c.model_id_fallback, c.credentials, c.max_concurrent_projects,
               c.daily_token_quota, c.deadpool_token_reserve, c.priority, t.byoc_exempt${
-                withRoles ? ", c.model_orchestrator, c.model_advisor, c.model_staff" : ""}
+                withRoles ? ", c.model_orchestrator, c.model_advisor, c.model_staff" : ""}${
+                withVerify ? ", c.verify_orchestrator_status, c.verify_advisor_status" : ""}
        FROM tenant_llm_configs c
        JOIN tenants t ON t.id = c.tenant_id
        WHERE c.tenant_id = $1 AND c.is_active = TRUE
@@ -210,6 +220,10 @@ export async function getTenantLlmConfigs(tenantId: string): Promise<TenantLlmCo
       priority:              Number(row.priority ?? 0),
       byocExempt:            !!row.byoc_exempt,
       ...(withRoles ? { roleModels: roleModelsOf(row) } : {}),
+      ...(withVerify ? { roleVerify: {
+        orchestrator: row.verify_orchestrator_status ? String(row.verify_orchestrator_status) : null,
+        advisor: row.verify_advisor_status ? String(row.verify_advisor_status) : null,
+      } } : {}),
     }));
   } catch {
     return [];
@@ -381,6 +395,19 @@ function pickUsableSlot(configs: TenantLlmConfig[]): TenantLlmConfig | null {
 }
 
 /**
+ * 2A.8 — CONDIÇÃO que liga a comparação de Advisors no `pickStrongestSlot`.
+ *
+ * O Cyborg (`cyborg_v3.py`) MANTÉM começar no modelo principal do slot (Orchestrator) e só escala
+ * para o Advisor na 2ª tentativa. Enquanto for assim, quem decide o slot do Cyborg é o Orchestrator:
+ * comparar Advisors escolheria um slot por um modelo que a 1ª tentativa nem usa (e, trocando de slot,
+ * trocaria a credencial/fatura por causa de um papel de escalada). Se um dia o Cyborg passar a
+ * usar o Advisor desde a 1ª tentativa, mude esta constante E o teste que a trava
+ * (`tenantLlmConfig.cyborg-roles.test.ts`) — nunca uma sem a outra. Com Advisor vazio, o slot
+ * compara o Orchestrator (fallback declarado, D1b).
+ */
+export const CYBORG_STARTS_ON_ADVISOR = false;
+
+/**
  * O slot MAIS FORTE entre os utilizáveis — regra do Cyborg (Jean, 2026-09-10):
  * *"cyborg usa sempre o melhor modelo entre os cadastrados nos slots"*.
  *
@@ -394,21 +421,27 @@ function pickUsableSlot(configs: TenantLlmConfig[]): TenantLlmConfig | null {
  * e a Fábrica seguem no haiku (ordem dele) e só o CYBORG sobe para o opus. É o pedido — o Cyborg é
  * o último recurso, roda uma vez por projeto e é onde modelo fraco custa entrega, não token.
  */
-function pickStrongestSlot(configs: TenantLlmConfig[]): { slot: TenantLlmConfig | null; why: string; slotModels: string[] } {
+export function pickStrongestSlot(
+  configs: TenantLlmConfig[],
+  opts: { compareAdvisors?: boolean } = {},
+): { slot: TenantLlmConfig | null; why: string; slotModels: string[] } {
   const usaveis = configs.filter(
     (c) => c.provider && c.modelId && slotUsability(c.provider, c.credentials, c.byocExempt).usable,
   );
-  const slotModels = usaveis.map((c) => c.modelId);
+  // Sem `compareAdvisors` (padrão, e SEMPRE com a flag `off`/`shadow`): compara `modelId`, como antes.
+  const compared = (c: TenantLlmConfig): string =>
+    opts.compareAdvisors ? (c.roleModels?.advisor?.trim() || c.roleModels?.orchestrator?.trim() || c.modelId) : c.modelId;
+  const slotModels = usaveis.map(compared);
   if (usaveis.length === 0) return { slot: null, why: "nenhum slot utilizável", slotModels };
 
   const { winners, eliminados } = strongestByDomination(slotModels);
   // `winners` preserva a ordem de entrada, que é a prioridade do tenant ⇒ o primeiro já é o desempate.
   const vencedor = winners[0] ?? slotModels[0];
-  const slot = usaveis.find((c) => c.modelId === vencedor) ?? usaveis[0];
+  const slot = usaveis.find((c) => compared(c) === vencedor) ?? usaveis[0];
   const why =
     usaveis.length === 1
-      ? `único slot utilizável: ${slot.modelId} (prioridade ${slot.priority})`
-      : `mais forte entre ${usaveis.length} slots: ${slot.modelId} (prioridade ${slot.priority})` +
+      ? `único slot utilizável: ${compared(slot)} (prioridade ${slot.priority})`
+      : `mais forte entre ${usaveis.length} slots: ${compared(slot)} (prioridade ${slot.priority})` +
         (eliminados.length ? ` — descartados: ${eliminados.join(" | ")}` : "") +
         (winners.length > 1
           ? ` — empate sem ordem conhecida entre [${winners.join(", ")}]; desempatou pela ordem do tenant`
@@ -479,8 +512,45 @@ export interface ReviewerPick {
   /** Provider + credenciais DO SLOT do revisor. Trocar só o `model_id` daria 400 em outro provider. */
   llm: AgentsLlmOverride;
   priority: number;
+  /** 2A.8 (só `LLM_ROLES_MODE=on`): papel do slot de onde saiu o revisor e se o papel já foi verificado. */
+  role?: LlmRole;
+  unverified?: boolean;
 }
 export type ReviewerResolution = ReviewerPick | { ok: false; alert: string };
+
+/** Candidato a revisor por papel (2A.8). Staff NUNCA entra. */
+export interface ReviewerRoleCandidate { role: "orchestrator" | "advisor"; model: string; unverified: boolean }
+
+/**
+ * 2A.8 — candidatos a revisor DENTRO de um slot, em ordem de preferência [Orchestrator, Advisor].
+ * Staff nunca revisa. Elegibilidade pelo probe por papel (`isRoleEligible`): com `verify_<papel>_status`
+ * gravado, só `ok` entra; sem verificação ainda ⇒ elegível com `unverified: true` (aviso), para não
+ * quebrar tenants existentes. Advisor vazio ou igual ao Orchestrator não é candidato extra.
+ */
+export function reviewerRoleCandidates(slot: {
+  modelId: string;
+  models?: RoleModels | null;
+  verify?: Partial<Record<LlmRole, string | null>> | null;
+}): ReviewerRoleCandidate[] {
+  const orch = (slot.models?.orchestrator ?? "").trim() || slot.modelId.trim();
+  const adv = (slot.models?.advisor ?? "").trim();
+  const out: ReviewerRoleCandidate[] = [];
+  const consider = (role: "orchestrator" | "advisor", model: string) => {
+    if (!model) return;
+    const status = slot.verify?.[role];
+    if (!status) { out.push({ role, model, unverified: true }); return; }
+    const row = { model_id: slot.modelId, [`model_${role}`]: model, [`verify_${role}_status`]: status };
+    if (isRoleEligible(row, role)) out.push({ role, model, unverified: false });
+  };
+  consider("orchestrator", orch);
+  if (adv && adv !== orch) consider("advisor", adv);
+  return out;
+}
+
+/** Famílias distintas cobertas pelos papéis elegíveis a revisor dos slots (`families` de `routes/llm.ts`). */
+export function reviewerFamilies(slots: Array<Parameters<typeof reviewerRoleCandidates>[0]>): string[] {
+  return [...new Set(slots.flatMap((s) => reviewerRoleCandidates(s).map((c) => modelFamilyOf(c.model))))];
+}
 
 /**
  * ⚖️ LEI 2026-09-10 — o revisor cross-family sai dos SLOTS do tenant, nunca de env.
@@ -497,6 +567,8 @@ export type ReviewerResolution = ReviewerPick | { ok: false; alert: string };
 export async function resolveReviewerLlm(args: {
   tenantId: string;
   executorModel: string;
+  /** 2A.8: papel EFETIVO do executor (informativo, vai ao `why`/log). */
+  executorRole?: LlmRole;
 }): Promise<ReviewerResolution> {
   const { picks, alert } = await rankReviewerSlots(args);
   return picks[0] ?? { ok: false, alert };
@@ -513,6 +585,7 @@ export async function resolveReviewerLlm(args: {
 export async function rankReviewerSlots(args: {
   tenantId: string;
   executorModel: string;
+  executorRole?: LlmRole;
 }): Promise<{ picks: ReviewerPick[]; alert: string }> {
   const slots = (await getTenantLlmConfigs(args.tenantId)).filter(
     (c) => c.provider && c.modelId && slotUsability(c.provider, c.credentials, c.byocExempt).usable,
@@ -522,16 +595,53 @@ export async function rankReviewerSlots(args: {
   }
   const picks: ReviewerPick[] = [];
   const recusas: string[] = [];
-  for (const slot of slots) {
+  // 2A.8: com `on`, cada slot oferece [Orchestrator, Advisor]; TODOS os Orchestrators (na ordem de
+  // prioridade do tenant) vêm antes de qualquer Advisor ⇒ o Advisor nunca é o revisor padrão e só
+  // entra quando nenhum Orchestrator passa. Com `off`/`shadow`: um candidato por slot (modelId), como antes.
+  type Entry = { slot: TenantLlmConfig; model: string; role?: LlmRole; unverified?: boolean };
+  const entries: Entry[] = [];
+  if (rolesRoutingOn()) {
+    const porSlot = slots.map((slot) => ({
+      slot,
+      cands: reviewerRoleCandidates({ modelId: slot.modelId, models: slot.roleModels, verify: slot.roleVerify }),
+    }));
+    for (const role of ["orchestrator", "advisor"] as const) {
+      for (const { slot, cands } of porSlot) {
+        const c = cands.find((x) => x.role === role);
+        if (c) entries.push({ slot, model: c.model, role, unverified: c.unverified });
+      }
+    }
+    for (const { slot, cands } of porSlot) {
+      if (cands.length === 0) recusas.push(`${slot.modelId}: nenhum papel elegível (probe por papel não está 'ok')`);
+    }
+  } else {
+    for (const slot of slots) entries.push({ slot, model: slot.modelId });
+  }
+  for (const e of entries) {
     // Um candidato por vez: cada slot tem o SEU provider, e `servableBy` é uma pergunta por slot.
     const pick = pickReviewerModel({
       executorModel: args.executorModel,
-      candidates: [slot.modelId],
-      provider: slot.provider,
+      candidates: [e.model],
+      provider: e.slot.provider,
+      ...(e.role ? { candidateRoles: [e.role] } : {}),
     });
     if (pick.ok) {
-      picks.push({ ok: true, model: pick.model, family: pick.family, why: pick.why,
-                   llm: toAgentsOverride(toResolved(slot)), priority: slot.priority });
+      let resolved = toResolved(e.slot);
+      let why = pick.why;
+      if (e.role) {
+        why += ` [papel ${e.role}${e.unverified ? ", NÃO verificado ainda — elegível com aviso" : ""}` +
+               `${args.executorRole ? `; executor no papel ${args.executorRole}` : ""}]`;
+        if (e.role === "advisor") {
+          // O envelope do revisor-Advisor leva o MODELO do Advisor e não carrega o contrato de papéis
+          // (o id é explícito; não há papel a resolver no auditor).
+          const { models: _m, roles_contract_version: _v, ...rest } = resolved;
+          resolved = { ...rest, modelId: e.model, fallbackModelId: undefined };
+        }
+        if (e.unverified) console.warn(`[reviewer] papel ${e.role} do slot priority=${e.slot.priority} sem verificação (verify_${e.role}_status vazio) — tratado como elegível`);
+      }
+      picks.push({ ok: true, model: pick.model, family: pick.family, why,
+                   llm: toAgentsOverride(resolved), priority: e.slot.priority,
+                   ...(e.role ? { role: e.role, unverified: !!e.unverified } : {}) });
     } else {
       recusas.push(...pick.recusados);
     }
@@ -562,20 +672,22 @@ async function tenantIdOfProject(projectId: string): Promise<string | null> {
 export async function resolveReviewerLlmForProject(args: {
   projectId: string;
   executorModel: string;
+  executorRole?: LlmRole;
 }): Promise<ReviewerResolution> {
   const tenantId = await tenantIdOfProject(args.projectId);
   if (!tenantId) return { ok: false, alert: "revisor cross-family: projeto sem tenant" };
-  return resolveReviewerLlm({ tenantId, executorModel: args.executorModel });
+  return resolveReviewerLlm({ tenantId, executorModel: args.executorModel, executorRole: args.executorRole });
 }
 
 /** Todos os revisores viáveis do projeto, na ordem de prioridade dos slots. */
 export async function rankReviewerSlotsForProject(args: {
   projectId: string;
   executorModel: string;
+  executorRole?: LlmRole;
 }): Promise<{ picks: ReviewerPick[]; alert: string }> {
   const tenantId = await tenantIdOfProject(args.projectId);
   if (!tenantId) return { picks: [], alert: "revisor cross-family: projeto sem tenant" };
-  return rankReviewerSlots({ tenantId, executorModel: args.executorModel });
+  return rankReviewerSlots({ tenantId, executorModel: args.executorModel, executorRole: args.executorRole });
 }
 
 /**
@@ -634,7 +746,9 @@ export async function resolveProjectLlmCandidates(
     );
     if (usaveis.length > 0) {
       if (strategy === "strongest") {
-        const { slot, why, slotModels } = pickStrongestSlot(configs);
+        const { slot, why, slotModels } = pickStrongestSlot(configs, {
+          compareAdvisors: rolesRoutingOn() && CYBORG_STARTS_ON_ADVISOR,
+        });
         const escolhido = slot ?? usaveis[0];
         // O vencedor vai à frente; o RESTO mantém a ordem do tenant. A contingência de um Cyborg
         // que escolheu por força continua sendo a fila dele — força não reordena quem paga.

@@ -20,6 +20,8 @@
  * uma auditoria a menos com motivo escrito do que uma auditoria que finge medir.
  */
 
+import type { LlmRole } from "../lib/llmRoles.js";
+
 /** 0 = não sei ranquear · 1 = pequeno · 2 = médio · 3 = topo de linha. */
 export type PowerTier = 0 | 1 | 2 | 3;
 
@@ -192,7 +194,7 @@ export function specializedModelFor(args: { provider?: string | null; model: str
 }
 
 export type ReviewerPick =
-  | { ok: true; model: string; family: string; why: string }
+  | { ok: true; model: string; family: string; why: string; role?: LlmRole }
   // `recusados` é a MESMA lista que o `alert` já resume, exposta em separado para quem chama em
   // laço (um slot por vez): concatenar N alertas inteiros repetiria N vezes o parágrafo da pesquisa.
   | { ok: false; alert: string; recusados: string[] };
@@ -214,6 +216,12 @@ export function pickReviewerModel(args: {
   executorModel: string;
   candidates: string[];
   provider?: string | null;
+  /**
+   * 2A.8 (só com `LLM_ROLES_MODE=on`): papel de cada candidato, em paralelo a `candidates`.
+   * `staff` NUNCA revisa — inclusive id sem marcador de porte (`command-r`, `mistral-small`), que
+   * as regras de família/porte deixariam passar. Ausente ⇒ comportamento anterior, sem papel.
+   */
+  candidateRoles?: Array<LlmRole | undefined>;
 }): ReviewerPick {
   const executor = (args.executorModel || "").trim();
   const provider = (args.provider || "").trim();
@@ -221,7 +229,12 @@ export function pickReviewerModel(args: {
   const execPow = modelPower(executor);
   const recusados: string[] = [];
 
-  for (const cand of args.candidates) {
+  for (const [idx, cand] of args.candidates.entries()) {
+    const role = args.candidateRoles?.[idx];
+    if (role === "staff") {
+      recusados.push(`${cand}: papel Staff nunca revisa (id sem marcador de porte não vira revisor)`);
+      continue;
+    }
     const fam = modelFamilyOf(cand);
     const pow = modelPower(cand);
     if (fam === "desconhecida") {
@@ -255,6 +268,7 @@ export function pickReviewerModel(args: {
       ok: true,
       model: cand,
       family: fam,
+      ...(role ? { role } : {}),
       why: `${cand} (${fam}, poder ${pow}) revisa ${executor || "(executor não declarado)"} (${execFam}, poder ${execPow})`,
     };
   }
