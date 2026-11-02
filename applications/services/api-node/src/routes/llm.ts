@@ -15,6 +15,7 @@ import { resolveScopedTenantId } from "../lib/tenantScope.js";
 import { slotUsability, hasOwnCredentials } from "../services/tenantLlmConfig.js";
 import { modelFamilyOf } from "../services/reviewerModel.js";
 import { probeSlot, recordProbe, listModels, type ProbeResult } from "../services/llmSlotProbe.js";
+import { verifyRoles, recordRoleVerdicts, roleVerdictsPayload, roleVerifyFromRow, type RoleModelsIn } from "../services/llmRoleProbe.js";
 import { rolesEnabled, deriveRolesForSave, validateRoleModels, rolesFromRow, type RoleModels } from "../lib/llmRoleSlots.js";
 
 function getUser(request: FastifyRequest): AuthUser {
@@ -142,7 +143,8 @@ function formatSlot(row: Record<string, unknown>, byocExempt: boolean) {
     verify_model:            row.verify_model ?? null,
     verify_latency_ms:       row.verify_latency_ms ?? null,
     // 2A.3: só com LLM_ROLES_MODE != off (com `off` o payload é byte-idêntico ao anterior).
-    ...(rolesEnabled() ? { models: rolesFromRow(row as Record<string, unknown>).models } : {}),
+    ...(rolesEnabled() ? { models: rolesFromRow(row as Record<string, unknown>).models,
+                           verify_roles: roleVerifyFromRow(row) } : {}),
   };
 }
 
@@ -150,6 +152,28 @@ function formatSlot(row: Record<string, unknown>, byocExempt: boolean) {
 function verifyPayload(v: ProbeResult) {
   return { ok: v.ok, status: v.ok ? "ok" : (v.kind || "other"),
            message: v.message, model: v.model, latency_ms: v.latencyMs };
+}
+
+/**
+ * 2A.9 — verifica e grava os papéis preenchidos do slot (só chamada com `LLM_ROLES_MODE != off`).
+ * Lê os modelos GRAVADOS (o staff pode não ter vindo no corpo) e reaproveita o veredicto de `model_id`.
+ */
+async function verifyAndRecordRoles(
+  tenantId: string, priority: number, provider: string, modelId: string,
+  credentials: Record<string, string>, legacyVerify: ProbeResult,
+  fallbackModels: RoleModelsIn, preserveOnUnavailable: boolean,
+): Promise<Record<string, unknown>> {
+  let models: RoleModelsIn = fallbackModels;
+  try {
+    const r = await pool.query(
+      "SELECT model_id, model_id_fallback, model_orchestrator, model_advisor, model_staff FROM tenant_llm_configs WHERE tenant_id = $1 AND priority = $2",
+      [tenantId, priority]);
+    if (r.rows[0]) models = rolesFromRow(r.rows[0] as Record<string, unknown>).models;
+  } catch { /* usa o que veio no corpo */ }
+  const known = new Map([[modelId, legacyVerify]]);
+  const verdicts = await verifyRoles(provider, models, credentials, { known });
+  await recordRoleVerdicts(tenantId, priority, models, verdicts, { preserveOnUnavailable });
+  return roleVerdictsPayload(models, verdicts);
 }
 
 /** `tenants.byoc_exempt` — escrito só por zentriz_admin; um tenant não se auto-isenta. */
@@ -246,11 +270,19 @@ async function upsertConfig(
   const verify = await probeSlot(provider, model_id, credentials, 30_000);
   await recordProbe(tenantId, priority, verify);
 
+  // 2A.9 — com a flag != off, verifica cada papel preenchido (o resultado de `model_id` é reaproveitado).
+  let roleVerify: Record<string, unknown> | null = null;
+  if (withRoles) {
+    roleVerify = await verifyAndRecordRoles(tenantId, priority, provider, model_id, credentials, verify,
+                                            roles as RoleModelsIn, false);
+  }
+
   const own = hasOwnCredentials(provider, credentials);
   return { ok: true, priority, priority_label: PRIORITY_LABELS[priority], provider, model_id,
            model_id_fallback, cyborg_model_id, cyborg_model_id_fallback,
            own_credentials: own, has_credentials: own,
            verify: verifyPayload(verify),
+           ...(roleVerify ? { verify_roles: roleVerify } : {}),
            ...(withRoles ? { models: { ...roles, staff: staffProvided ? staffValue : undefined }, warnings: roleWarnings } : {}) };
 }
 
@@ -272,7 +304,10 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
                 credentials, max_concurrent_projects,
                 daily_token_quota, deadpool_token_reserve, is_active, priority,
                 verified_at, verify_status, verify_error, verify_model, verify_latency_ms${
-                  rolesEnabled() ? ", model_orchestrator, model_advisor, model_staff" : ""}
+                  rolesEnabled() ? ", model_orchestrator, model_advisor, model_staff"
+                    + ", verify_orchestrator_status, verify_orchestrator_at, verify_orchestrator_error"
+                    + ", verify_advisor_status, verify_advisor_at, verify_advisor_error"
+                    + ", verify_staff_status, verify_staff_at, verify_staff_error" : ""}
          FROM tenant_llm_configs WHERE tenant_id = $1 ORDER BY priority ASC`,
         [scopedTenantId]
       );
@@ -474,9 +509,14 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
       // que não existe e reprovaria um slot bom.
       const verify = await probeSlot(row.provider, row.model_id, row.credentials ?? {}, 45_000);
       await recordProbe(scopedTenantId, priority, verify);
+      const roleVerify = rolesEnabled()
+        ? await verifyAndRecordRoles(scopedTenantId, priority, row.provider, row.model_id,
+                                     row.credentials ?? {}, verify, { orchestrator: row.model_id }, true)
+        : null;
       return reply.send({ ok: true, priority, priority_label: PRIORITY_LABELS[priority],
                           provider: row.provider, model_id: row.model_id,
-                          verify: verifyPayload(verify) });
+                          verify: verifyPayload(verify),
+                          ...(roleVerify ? { verify_roles: roleVerify } : {}) });
     }
   );
 

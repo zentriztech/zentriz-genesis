@@ -44,6 +44,8 @@ export interface ProbeResult {
   message: string;
   latencyMs: number;
   model: string;
+  /** 2A.9: presente (true) só quando o AbortController estourou; ausente nos demais casos. */
+  timedOut?: boolean;
 }
 
 /** Nomes que o Python procura no envelope (`runtime.py`); o DB guarda alguns com outro nome. */
@@ -109,7 +111,8 @@ export async function probeSlot(
     };
   } catch (err) {
     return { ok: false, kind: "unavailable", model: modelId, latencyMs: Date.now() - t0,
-             message: `não foi possível testar agora: ${String(err).slice(0, 200)}` };
+             message: `não foi possível testar agora: ${String(err).slice(0, 200)}`,
+             ...(ctrl.signal.aborted ? { timedOut: true } : {}) };
   } finally {
     clearTimeout(timer);
   }
