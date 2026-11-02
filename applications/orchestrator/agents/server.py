@@ -672,7 +672,8 @@ def _run_splitter(document: str, model_id: str, usage_project_id: str | None = N
             return call_bedrock_direct(system=system, user=user, model_id=mid,
                                        max_tokens=max_tokens, temperature=temp,
                                        usage_project_id=usage_project_id,
-                                       usage_agent="splitter", llm_cfg=llm_cfg)
+                                       usage_agent="splitter", llm_cfg=llm_cfg,
+                                       **_llm_guard.role_kwargs())
 
     result = split_document(document, llm_fn=_llm, model_id=model_id)
     if isinstance(result, dict):
@@ -771,7 +772,8 @@ def _run_spec_split(spec_md: str, model_id: str, usage_project_id: str | None = 
             return call_bedrock_direct(system=system, user=user, model_id=mid,
                                        max_tokens=max_tokens, temperature=temp,
                                        usage_project_id=usage_project_id,
-                                       usage_agent="spec_split", llm_cfg=llm_cfg)
+                                       usage_agent="spec_split", llm_cfg=llm_cfg,
+                                       **_llm_guard.role_kwargs())
 
     result = split_spec_into_files(spec_md, llm_fn=_llm, model_id=model_id,
                                    project_name=project_name, project_type=project_type)
@@ -1174,7 +1176,8 @@ def invoke_raw(body: dict):
         try:
             resp = call_bedrock_direct(system=system_prompt, user=user_message,
                                        model_id=_model, max_tokens=max_tokens,
-                                       temperature=_temp_for(_model), llm_cfg=_cfg)
+                                       temperature=_temp_for(_model), llm_cfg=_cfg,
+                                       **_llm_guard.role_kwargs())
             if resp and resp.strip():
                 return {"response": resp, "model_used": _effective(_model),
                         "model_requested": model_id, **_outcome()}
@@ -1188,7 +1191,8 @@ def invoke_raw(body: dict):
         if _fb:
             resp2 = call_bedrock_direct(system=system_prompt, user=user_message,
                                         model_id=_fb, max_tokens=max_tokens,
-                                        temperature=_temp_for(_fb), llm_cfg=_cfg)
+                                        temperature=_temp_for(_fb), llm_cfg=_cfg,
+                                        **_llm_guard.role_kwargs(escalated=True))
             return {"response": resp2, "model_used": _effective(_fb), "model_requested": model_id,
                     "fallback": True, **_outcome()}
         # Sem fallback e principal veio vazio → devolve o vazio (comportamento antigo, preservado).

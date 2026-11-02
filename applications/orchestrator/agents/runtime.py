@@ -2111,6 +2111,14 @@ _OPENAI_MODEL_LIMITS: dict[str, dict[str, int]] = {
 _OPENAI_DEFAULT_LIMITS = {"context": 128_000, "max_output": 16_384}
 
 
+def _stamp_role(out: dict, escalated: bool) -> None:
+    """Plano 1.3: papel derivado na resposta (`_llm_role`), lido pelo runner ao postar /agent-metrics.
+    Com LLM_ROLES_MODE=off não escreve nada (resposta byte-idêntica)."""
+    _kw = _llm_guard.role_kwargs(escalated=escalated)
+    if _kw:
+        out["_llm_role"] = _kw["llm_role"]
+
+
 def _guard_text(v: object) -> str:
     """Texto estável de system/user (str ou blocos de cache) para hash e estimativa do guard."""
     if isinstance(v, str):
@@ -2170,7 +2178,7 @@ def _run_agent_openai(
     _in = _out = 0
     _gctx = _llm_guard.check(model=model, system=_guard_text(system_content), user=_guard_text(user_content),
                              max_tokens=max_tokens, provider="openai", project_id=_guard_project_of(message),
-                             purpose=f"{role}:{mode}")
+                             purpose=f"{role}:{mode}", **_llm_guard.role_kwargs())
     for attempt in range(CLAUDE_RETRY_ATTEMPTS):
         try:
             resp = client.chat.completions.create(
@@ -2222,6 +2230,7 @@ def _run_agent_openai(
 
     out["validator_pass"] = True
     out["_model"] = model
+    _stamp_role(out, False)
     out["_input_tokens_total"], out["_output_tokens_total"] = int(_in or 0), int(_out or 0)
     out["_duration_ms"] = int((time.perf_counter() - t0) * 1000)
     log_agent_call(agent_name, mode, {}, out, out["_duration_ms"], request_id=request_id)
@@ -2567,6 +2576,7 @@ def run_agent(
     # Se QA aprovar → próxima task volta ao padrão (rework_attempt=0).
     # Se QA reprovar 3x → BLOCKED (revisão humana). Opus paga para evitar BLOCKED.
     _is_rework_role = (role or "").upper() in ("DEV", "QA")
+    _role_escalated = False  # plano 1.3: True só se o modelo de rework REALMENTE substituiu o principal
     if _is_rework_role and _rework_attempt >= 1:
         # ⚖️ LEI 2026-09-10: o modelo de rework é o `model_id_fallback` DO SLOT — ele chega no
         # envelope como `model_rework` (Bancada) ou no env do run como `CLAUDE_MODEL_REWORK`
@@ -2578,6 +2588,7 @@ def run_agent(
         )
         if _rework_model and _rework_model != model:
             model = _rework_model
+            _role_escalated = True
             logger.info("[REWORK-ESCALATE] %s rework %d → escalando para modelo %s", role, _rework_attempt, model)
         _rework_boost = int(os.environ.get("CLAUDE_MAX_TOKENS_DEV_REWORK", "48000"))
         env_max = max(env_max, _rework_boost)
@@ -2654,7 +2665,8 @@ def run_agent(
         # LLM GUARD: licença por CHAMADA (cada repair da LEI 5 é paga e passa de novo pelo guard).
         _gctx = _llm_guard.check(model=model, system=_guard_text(system_content), user=_guard_text(user_content),
                                  max_tokens=max_tokens, provider=provider, project_id=_guard_project_of(message),
-                                 purpose=f"{role}:{mode or 'default'}")
+                                 purpose=f"{role}:{mode or 'default'}",
+                                 **_llm_guard.role_kwargs(escalated=_role_escalated))
         _g_t0 = time.perf_counter()
         for attempt in range(CLAUDE_RETRY_ATTEMPTS):
             try:
@@ -2843,6 +2855,7 @@ def run_agent(
             out["_output_tokens"] = _output_tokens
             out["_duration_ms"] = int(duration_ms)
             out["_model"] = model
+            _stamp_role(out, _role_escalated)
             _mark_truncation(out, stop_reason, agent_name)
             _mark_usage_totals(out, _acc_input_tokens, _acc_output_tokens, _llm_calls,
                                _acc_cache_read, _acc_cache_write)
@@ -2885,6 +2898,7 @@ def run_agent(
         out["_output_tokens"] = _output_tokens
         out["_duration_ms"] = int((time.perf_counter() - t0_run) * 1000)
         out["_model"] = model
+        _stamp_role(out, _role_escalated)
         _mark_truncation(out, stop_reason, agent_name)
         _mark_usage_totals(out, _acc_input_tokens, _acc_output_tokens, _llm_calls,
                            _acc_cache_read, _acc_cache_write)
@@ -3391,7 +3405,9 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                         usage_agent: str = "direct",
                         llm_cfg: dict | None = None,
                         cache_prefix: bool = False,
-                        thinking: bool = False) -> str:
+                        thinking: bool = False,
+                        llm_role: str | None = None,
+                        escalated_from: str | None = None) -> str:
     """LLM GUARD (post-mortem 30/09/2026): licença ANTES, registro (tokens + USD) DEPOIS.
 
     Negado ⇒ `LlmGuardDenied` (nenhum byte sai para o provedor). O projeto vem do escopo
@@ -3400,6 +3416,7 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     _gctx = _llm_guard.check(
         model=model_id, system=system, user=user, max_tokens=max_tokens,
         provider=(llm_cfg or {}).get("provider"), project_id=usage_project_id, purpose=usage_agent,
+        **({"llm_role": llm_role, "escalated_from": escalated_from} if (llm_role or escalated_from) else {}),
     )
     _t0 = time.time()
     text = _call_bedrock_direct_impl(system, user, model_id, max_tokens=max_tokens,
