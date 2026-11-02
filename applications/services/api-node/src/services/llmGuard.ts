@@ -25,6 +25,7 @@
  */
 import { costUsd } from "../lib/modelPricing.js";
 import { llmRolesMode, normalizeLlmRole } from "../lib/llmRoles.js";
+import { wasteTelemetryMode, normalizeCallReason, normalizeIdemKey } from "../lib/wasteTelemetry.js";
 import { PRE_FACTORY_STATUSES } from "./projectStatus.js";
 import { isSesConfigured, sendEmail } from "./emailSender.js";
 import { buildEstimator, fetchHistoryBuckets } from "./specEnrichment.js";
@@ -86,6 +87,9 @@ export interface RecordInput extends PreflightInput {
   llmRole?: string | null;
   effectiveRole?: string | null;
   escalatedFrom?: string | null;
+  /** Plano 1.4: motivo da chamada e chave de idempotência. Só gravados com WASTE_TELEMETRY != off. */
+  callReason?: string | null;
+  callIdemKey?: string | null;
 }
 
 export interface BudgetOwner {
@@ -412,7 +416,23 @@ export async function recordCall(pool: Queryable, input: RecordInput): Promise<{
       Math.round(num(input.inputTokens)), Math.round(num(input.outputTokens)),
       Math.round(num(input.cacheReadTokens)), Math.round(num(input.cacheWriteTokens)),
       cost, input.promptHash ?? null, input.durationMs == null ? null : Math.round(num(input.durationMs))];
-    if (llmRolesMode() === "off") {
+    if (wasteTelemetryMode() !== "off") {
+      // Plano 1.4 (shadow/on): acrescenta call_reason e call_idem_key (e os 3 campos de papel se a 1.3 estiver ligada).
+      // Motivo desconhecido ⇒ NULL. Não há UNIQUE nem ON CONFLICT: nenhuma chamada paga é descartada do ledger.
+      const withRoles = llmRolesMode() !== "off";
+      const llmRole = normalizeLlmRole(input.llmRole);
+      const roleCols = withRoles ? ", llm_role, effective_role, escalated_from" : "";
+      const roleParams = withRoles ? [llmRole, normalizeLlmRole(input.effectiveRole) ?? llmRole, normalizeLlmRole(input.escalatedFrom)] : [];
+      const params = [...baseParams, ...roleParams, normalizeCallReason(input.callReason), normalizeIdemKey(input.callIdemKey)];
+      const ph = params.map((_, i) => `$${i + 1}`).join(",");
+      await pool.query(
+        `INSERT INTO llm_call_ledger (project_id, budget_project_id, tenant_id, phase, source, purpose, provider, model,
+         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, prompt_hash, duration_ms${roleCols},
+         call_reason, call_idem_key)
+       VALUES (${ph})`,
+        params,
+      );
+    } else if (llmRolesMode() === "off") {
       // LLM_ROLES_MODE=off: SQL e parâmetros byte-idênticos ao anterior (teste de snapshot).
       await pool.query(
         `INSERT INTO llm_call_ledger (project_id, budget_project_id, tenant_id, phase, source, purpose, provider, model,

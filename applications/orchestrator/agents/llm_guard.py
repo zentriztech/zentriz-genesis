@@ -124,6 +124,58 @@ def role_kwargs(*, escalated: bool = False, staff: bool = False) -> dict:
     return {"llm_role": "orchestrator"}
 
 
+# ── Telemetria de desperdício (plano de evolução v2, tarefa 1.4) ──────────────────────────────────
+# `WASTE_TELEMETRY` = off | shadow | on (padrão off). off ⇒ NADA muda: nenhum campo novo entra no
+# payload do preflight/record (byte-idêntico). shadow e on gravam o MOTIVO da chamada
+# (`call_reason`) e a chave de idempotência por chamada no ledger; nenhum comportamento muda.
+CALL_REASONS = ("primary", "retry", "repair", "rework", "escalation", "support")
+
+
+def waste_mode() -> str:
+    """Helper ÚNICO da flag. Ausente ou inválido ⇒ `off` (fail-safe)."""
+    raw = (os.environ.get("WASTE_TELEMETRY", "off") or "off").strip().lower()
+    return raw if raw in ("shadow", "on") else "off"
+
+
+def normalize_reason(value: object) -> str | None:
+    s = str(value or "").strip().lower()
+    return s if s in CALL_REASONS else None
+
+
+def derive_reason(*, repair_attempt: int = 0, rework_attempt: int = 0, rework_role: bool = False) -> str:
+    """Motivo derivado do contexto de `run_agent`: repair da LEI 5 > rework Dev/QA > primary."""
+    if int(repair_attempt or 0) >= 1:
+        return "repair"
+    if rework_role and int(rework_attempt or 0) >= 1:
+        return "rework"
+    return "primary"
+
+
+def idem_key(project_id: object, task_id: object, stage: object, attempt: object) -> str:
+    """Chave de idempotência por chamada de NEGÓCIO: `projeto|task|etapa|tentativa`.
+    Retry de rede (mesma tentativa) repete a chave e não conta como outra chamada na análise."""
+    return "|".join(str(x if x not in (None, "") else "-")[:80] for x in (project_id, task_id, stage, attempt))
+
+
+def waste_kwargs(reason: str, *, task: object = None, stage: str | None = None,
+                 attempt: object = None) -> dict:
+    """Kwargs de telemetria para `check`/`call_bedrock_direct`. Com a flag `off` devolve `{}`.
+    Sem `stage` não há chave de idempotência (melhor não deduplicar do que fundir chamadas distintas)."""
+    if waste_mode() == "off":
+        return {}
+    kw: dict = {"call_reason": reason}
+    if stage:
+        kw.update(call_task=task, call_stage=stage, call_attempt=attempt)
+    return kw
+
+
+def waste_call_kwargs(reason: str, **kw) -> dict:
+    """Para `call_bedrock_direct(**...)`: `{}` com a flag off (a chamada fica com os MESMOS argumentos de antes,
+    inclusive para dublês de teste), `{"waste": waste_kwargs(...)}` com a flag ligada."""
+    w = waste_kwargs(reason, **kw)
+    return {"waste": w} if w else {}
+
+
 def _disabled() -> bool:
     # Só para teste unitário isolado. Em prod NÃO existe: o compose não define a variável.
     return os.environ.get("LLM_GUARD_DISABLED_FOR_TESTS", "").strip() == "1"
@@ -158,7 +210,9 @@ def _merge(project_id: object, purpose: str | None, source: str | None) -> dict:
 def check(*, model: str, system: str = "", user: str = "", max_tokens: int = 8000,
           provider: str | None = None, project_id: object = None, purpose: str | None = None,
           source: str | None = None, llm_role: str | None = None,
-          escalated_from: str | None = None) -> dict:
+          escalated_from: str | None = None, call_reason: str | None = None,
+          call_task: object = None, call_stage: str | None = None,
+          call_attempt: object = None) -> dict:
     """Pede licença. Devolve o contexto para o `record` ou LANÇA `LlmGuardDenied`."""
     ctx = _merge(project_id, purpose, source)
     ctx["promptHash"] = prompt_hash(model, system, user)
@@ -173,6 +227,13 @@ def check(*, model: str, system: str = "", user: str = "", max_tokens: int = 800
             _from = normalize_role(escalated_from)
             if _from:
                 ctx["escalatedFrom"] = _from
+    # Plano 1.4: só com WASTE_TELEMETRY ligada. Sem motivo válido ⇒ nenhuma chave (ledger grava NULL).
+    if waste_mode() != "off":
+        _why = normalize_reason(call_reason)
+        if _why:
+            ctx["callReason"] = _why
+            if call_stage and ctx.get("projectId"):
+                ctx["callIdemKey"] = idem_key(ctx["projectId"], call_task, call_stage, call_attempt)
     if _disabled():
         return ctx
     # ~4 caracteres por token: estimativa conservadora o bastante para a checagem de saldo.
