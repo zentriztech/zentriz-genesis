@@ -31,6 +31,7 @@ import { costUsd, priceCaseSql } from "../lib/modelPricing.js";
 import { getProjectSpendUsd, getTenantMonthSpendUsd, resolveTenantMonthlyBudgetUsd } from "../services/tenantCostCap.js";
 import { emitValueEvent } from "../services/valueEvents.js";
 import { recordProjectOutcome } from "../services/skillFeedback.js";
+import { llmRolesMode, normalizeLlmRole } from "../lib/llmRoles.js";
 import {
   evolutionRequestHeader, loadTicket, materializeTicketIntoSpecTree, reopenTicketsOfChild,
   ticketCode, type TicketRow,
@@ -1752,7 +1753,7 @@ export async function projectRoutes(app: FastifyInstance) {
   // POST /api/projects/:id/agent-metrics — registra métricas de tokens/custo por chamada de agente
   app.post<{
     Params: { id: string };
-    Body: { agent: string; taskId?: string; round?: number; inputTokens: number; outputTokens: number; model?: string; durationMs?: number; status?: string; cacheReadTokens?: number; cacheWriteTokens?: number };
+    Body: { agent: string; taskId?: string; round?: number; inputTokens: number; outputTokens: number; model?: string; durationMs?: number; status?: string; cacheReadTokens?: number; cacheWriteTokens?: number; llmRole?: string };
   }>("/api/projects/:id/agent-metrics", async (request, reply) => {
     const user = getUser(request);
     const { id } = request.params;
@@ -1778,25 +1779,37 @@ export async function projectRoutes(app: FastifyInstance) {
       // economia de cache não teria como separar "não medi" de "medi e não economizei".
       const clampCache = (v: unknown): number | null =>
         v === undefined || v === null ? null : clampTokens(v);
-      await client.query(
-        `INSERT INTO project_agent_metrics
+      const metricParams: unknown[] = [
+        id,
+        String(body.agent ?? "unknown"),
+        body.taskId ? String(body.taskId) : null,
+        Number(body.round ?? 1),
+        clampTokens(body.inputTokens),
+        clampTokens(body.outputTokens),
+        body.model ? String(body.model) : null,
+        body.durationMs ? Math.max(0, Number(body.durationMs) || 0) : null,
+        body.status ? String(body.status) : null,
+        clampCache(body.cacheReadTokens),
+        clampCache(body.cacheWriteTokens),
+      ];
+      if (llmRolesMode() === "off") {
+        // LLM_ROLES_MODE=off: SQL e parâmetros byte-idênticos ao anterior (plano 1.3).
+        await client.query(
+          `INSERT INTO project_agent_metrics
            (project_id, agent, task_id, round, input_tokens, output_tokens, model, duration_ms, status,
             cache_read_tokens, cache_write_tokens)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-        [
-          id,
-          String(body.agent ?? "unknown"),
-          body.taskId ? String(body.taskId) : null,
-          Number(body.round ?? 1),
-          clampTokens(body.inputTokens),
-          clampTokens(body.outputTokens),
-          body.model ? String(body.model) : null,
-          body.durationMs ? Math.max(0, Number(body.durationMs) || 0) : null,
-          body.status ? String(body.status) : null,
-          clampCache(body.cacheReadTokens),
-          clampCache(body.cacheWriteTokens),
-        ]
-      );
+          metricParams,
+        );
+      } else {
+        await client.query(
+          `INSERT INTO project_agent_metrics
+           (project_id, agent, task_id, round, input_tokens, output_tokens, model, duration_ms, status,
+            cache_read_tokens, cache_write_tokens, llm_role)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+          [...metricParams, normalizeLlmRole(body.llmRole)],
+        );
+      }
       return reply.status(201).send({ ok: true });
     } finally {
       client.release();
