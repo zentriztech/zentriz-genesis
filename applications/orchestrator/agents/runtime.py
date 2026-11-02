@@ -2600,21 +2600,21 @@ def run_agent(
     _is_rework_role = (role or "").upper() in ("DEV", "QA")
     _role_escalated = False  # plano 1.3: True só se o modelo de rework REALMENTE substituiu o principal
     _role_required = _role_effective = None  # 2A.4: papel exigido × efetivo (ledger); só shadow/on
+    _hard_required = None   # 2A.7: papel exigido pelos fatos duros (tentativa 0); reparos reavaliam por tentativa
+    _adv_scope = _llm_roles.run_scope(inp.get("run_id"), message.get("run_id"), _guard_project_of(message), project_id)
+    _escalation_note = ""
     if _roles_on:
-        # Papel EXIGIDO só por fato duro (rework_attempt >= 1 em Dev/QA) + piso QA >= Dev pelo papel
-        # EFETIVO do Dev (`role_floor`). Não muda ao trocar de slot: a cascata re-resolve por candidato.
-        _role_required = _llm_roles.apply_floor(
-            _llm_roles.required_role(role, rework_attempt=_rework_attempt),
+        # Papel EXIGIDO só por fato duro (rework_attempt >= 1 em Dev/QA, env=prod declarado) + piso QA >= Dev
+        # pelo papel EFETIVO do Dev (`role_floor`). Não muda ao trocar de slot: a cascata re-resolve por candidato.
+        _hard_required = _llm_roles.apply_floor(
+            _llm_roles.required_role(role, rework_attempt=_rework_attempt,
+                                     env=inp.get("env") or message.get("env")),
             inp.get("role_floor") if (role or "").upper() == "QA" else None)
-        _res = _llm_roles.resolve_model(_role_required, _role_models)
+        # Falha alto cedo (provider × modelo do papel da 1ª tentativa), como antes da 2A.7.
+        _res = _llm_roles.resolve_model(_hard_required, _role_models)
         _llm_roles.validate_provider(provider, _res.effective_role, _res.model)
-        _role_effective, _role_escalated = _res.effective_role, _res.escalated
-        if _res.model != model:
-            logger.info("[ROLES] %s papel=%s efetivo=%s → modelo do slot %s", role, _role_required,
-                        _role_effective, _res.model)
-            model = _res.model
-        elif _res.note:
-            logger.info("[ROLES] %s papel=%s efetivo=%s (%s)", role, _role_required, _role_effective, _res.note)
+        # O MODELO de cada tentativa é decidido no laço (`plan_attempt`: idempotência + teto + reparos).
+        _role_required = _hard_required
     if _is_rework_role and _rework_attempt >= 1:
         # ⚖️ LEI 2026-09-10: o modelo de rework é o `model_id_fallback` DO SLOT — ele chega no
         # envelope como `model_rework` (Bancada) ou no env do run como `CLAUDE_MODEL_REWORK`
@@ -2636,7 +2636,8 @@ def run_agent(
 
     if (not _roles_on) and _llm_guard.roles_mode() == "shadow":
         # shadow: só REGISTRA o papel que seria exigido; o modelo acima segue a lógica legada intacta.
-        _role_required = _llm_roles.shadow_role(role, rework_attempt=_rework_attempt)
+        _role_required = _llm_roles.shadow_role(role, rework_attempt=_rework_attempt,
+                                                env=inp.get("env") or message.get("env"))
         _role_effective = "advisor" if _role_escalated else "orchestrator"
 
     last_thinking: str = ""
@@ -2676,7 +2677,40 @@ def run_agent(
     _acc_cache_read: int | None = None
     _acc_cache_write: int | None = None
 
+    _schema_escalate = False          # 2A.7: o ÚLTIMO reparo vai ao Advisor (schema reprovado após reparo do Orchestrator)
+    _inv_required = _inv_effective = None   # 2A.7: pico de papéis da invocação (carimbo e piso QA)
+    _inv_escalated = False
     for repair_attempt in range(MAX_REPAIRS + 1):
+        _att_required, _att_effective, _att_escalated = _role_required, _role_effective, _role_escalated
+        _att_key = None
+        if _roles_on:
+            # 2A.7: modelo desta tentativa. Reparos voltam ao Orchestrator (retries × repairs não
+            # multiplicam o Advisor); só o último reparo escala, por schema reprovado. Toda escalada
+            # real passa pela chave de idempotência e pelo teto de custo (`advisor_cap_reached`).
+            _proj = _llm_roles.estimate_cost_usd(
+                (len(_guard_text(system_content)) + len(_guard_text(user_content))) // 4, env_max)
+            _plan = _llm_roles.plan_attempt(
+                required=_hard_required, models=_role_models, repair_attempt=repair_attempt,
+                schema_escalate=_schema_escalate, scope=_adv_scope, task_id=task_id,
+                stage=f"{role}:{mode or 'default'}", rework_attempt=_rework_attempt, projected_usd=_proj)
+            _att_key = _plan.key
+            try:
+                _llm_roles.validate_provider(provider, _plan.effective_role, _plan.model)
+            except Exception:
+                if _att_key:
+                    _llm_roles.BUDGET.release(_att_key)
+                raise
+            _schema_escalate = False
+            if _plan.model != model:
+                logger.info("[ROLES] %s tentativa=%d papel=%s efetivo=%s → modelo do slot %s", role,
+                            repair_attempt, _plan.llm_role, _plan.effective_role, _plan.model)
+            model = _plan.model
+            _att_required, _att_effective, _att_escalated = _plan.llm_role, _plan.effective_role, _plan.escalated
+            if _plan.note in (_llm_roles.NOTE_CAP_REACHED, _llm_roles.NOTE_DEDUPED):
+                _escalation_note = _plan.note
+                logger.warning("[ROLES] %s: escalada ao Advisor NÃO feita (%s); segue no Orchestrator do slot. "
+                               "Escopo=%s teto=%.2f gasto=%.4f", role, _plan.note, _adv_scope,
+                               _llm_roles.advisor_cap_usd(), _llm_roles.BUDGET.spent(_adv_scope))
         # LEI 3: token budget antes de cada chamada (incluindo após repair)
         budget = calculate_token_budget(system_content, user_content, model)
         max_tokens = min(env_max, budget["safe_max_tokens"])
@@ -2711,18 +2745,25 @@ def run_agent(
         last_error = None
         response = None
         # LLM GUARD: licença por CHAMADA (cada repair da LEI 5 é paga e passa de novo pelo guard).
-        _gctx = _llm_guard.check(model=model, system=_guard_text(system_content), user=_guard_text(user_content),
-                                 max_tokens=max_tokens, provider=provider, project_id=_guard_project_of(message),
-                                 purpose=f"{role}:{mode or 'default'}",
-                                 **_llm_guard.role_kwargs(escalated=_role_escalated, required=_role_required,
-                                                          effective=_role_effective),
-                                 # Plano 1.4: motivo (primary|repair|rework) + chave projeto|task|etapa|tentativa.
-                                 **_llm_guard.waste_kwargs(
-                                     _llm_guard.derive_reason(repair_attempt=repair_attempt,
-                                                              rework_attempt=_rework_attempt,
-                                                              rework_role=_is_rework_role),
-                                     task=task_id, stage=f"{role}:{mode or 'default'}",
-                                     attempt=f"r{_rework_attempt}.p{repair_attempt}"))
+        try:
+            _gctx = _llm_guard.check(model=model, system=_guard_text(system_content), user=_guard_text(user_content),
+                                     max_tokens=max_tokens, provider=provider, project_id=_guard_project_of(message),
+                                     purpose=f"{role}:{mode or 'default'}",
+                                     **_llm_guard.role_kwargs(escalated=_att_escalated, required=_att_required,
+                                                              effective=_att_effective),
+                                     # Plano 1.4: motivo (primary|repair|rework) + chave projeto|task|etapa|tentativa.
+                                     **_llm_guard.waste_kwargs(
+                                         _llm_guard.derive_reason(repair_attempt=repair_attempt,
+                                                                  rework_attempt=_rework_attempt,
+                                                                  rework_role=_is_rework_role),
+                                         task=task_id, stage=f"{role}:{mode or 'default'}",
+                                         attempt=f"r{_rework_attempt}.p{repair_attempt}"))
+        except BaseException:
+            # Guard-deny (ou falha do preflight): a chamada NÃO saiu ⇒ devolve a reserva do Advisor.
+            # Nunca rebaixa papel/modelo nem tenta outro caminho: a exceção propaga.
+            if _att_key:
+                _llm_roles.BUDGET.release(_att_key)
+            raise
         _g_t0 = time.perf_counter()
         for attempt in range(CLAUDE_RETRY_ATTEMPTS):
             try:
@@ -2800,6 +2841,8 @@ def run_agent(
                     time.sleep(2 + attempt * 2)
                 else:
                     _circuit_note_failure(circuit_key)
+                    if _att_key:   # sem resposta ⇒ não houve cobrança: o retry da MESMA tentativa pode escalar
+                        _llm_roles.BUDGET.release(_att_key)
                     api_msg = _extract_api_message(e)
                     error_detail = _build_error_detail(e, api_msg)
                     raise RuntimeError(
@@ -2837,6 +2880,15 @@ def run_agent(
                           cache_read_tokens=int(_cache_now.get("cacheReadTokens", 0) or 0),
                           cache_write_tokens=int(_cache_now.get("cacheWriteTokens", 0) or 0),
                           duration_ms=int((time.perf_counter() - _g_t0) * 1000))
+        if _att_key and (_input_tokens or _output_tokens):
+            # 2A.7: liquida a reserva com o custo real (a chave permanece: a tentativa foi cobrada).
+            # Sem usage reportado a reserva (projetada, conservadora) fica como o gasto.
+            _llm_roles.BUDGET.settle(_att_key, _llm_roles.estimate_cost_usd(_input_tokens, _output_tokens))
+        if _roles_on:
+            _inv_required = _llm_roles.peak_role(_inv_required, _att_required)
+            _inv_effective = _llm_roles.peak_role(_inv_effective, _att_effective)
+            _inv_escalated = _inv_escalated or _att_escalated
+            _role_required, _role_effective, _role_escalated = _inv_required, _inv_effective, _inv_escalated
         if "cacheReadTokens" in _cache_now:
             _acc_cache_read = (_acc_cache_read or 0) + int(_cache_now["cacheReadTokens"])
         if "cacheWriteTokens" in _cache_now:
@@ -2912,6 +2964,8 @@ def run_agent(
             out["_duration_ms"] = int(duration_ms)
             out["_model"] = model
             _stamp_role(out, _role_escalated, _role_required, _role_effective)
+            if _escalation_note:
+                out["_escalation_note"] = _escalation_note
             _mark_truncation(out, stop_reason, agent_name)
             _mark_usage_totals(out, _acc_input_tokens, _acc_output_tokens, _llm_calls,
                                _acc_cache_read, _acc_cache_write)
@@ -2919,6 +2973,12 @@ def run_agent(
             return _normalize_response_envelope(out, request_id, raw_text)
 
         if repair_attempt < MAX_REPAIRS:
+            # 2A.7: fato duro "schema/envelope reprovado após o reparo do Orchestrator" ⇒ o ÚLTIMO
+            # reparo vai ao Advisor. Truncamento, resposta vazia e falha de qualidade NÃO escalam.
+            if _roles_on and _llm_roles.schema_escalation_eligible(
+                    parse_errors=parse_errors, gate_errors=gate_errors, raw_text=raw_text,
+                    stop_reason=stop_reason, repair_attempt=repair_attempt, max_repairs=MAX_REPAIRS):
+                _schema_escalate = True
             # LEI 5: retry SEMPRE com feedback explícito; nunca reenviar prompt idêntico
             repair_block = build_repair_feedback_block(out, all_errors)
             # TRUNCAMENTO (stop_reason=max_tokens): repetir o pedido sem mudar a economia de saída
@@ -2955,6 +3015,8 @@ def run_agent(
         out["_duration_ms"] = int((time.perf_counter() - t0_run) * 1000)
         out["_model"] = model
         _stamp_role(out, _role_escalated, _role_required, _role_effective)
+        if _escalation_note:
+            out["_escalation_note"] = _escalation_note
         _mark_truncation(out, stop_reason, agent_name)
         _mark_usage_totals(out, _acc_input_tokens, _acc_output_tokens, _llm_calls,
                            _acc_cache_read, _acc_cache_write)
@@ -3464,7 +3526,8 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                         thinking: bool = False,
                         llm_role: str | None = None,
                         escalated_from: str | None = None,
-                        waste: dict | None = None) -> str:
+                        waste: dict | None = None,
+                        effective_role: str | None = None) -> str:
     """LLM GUARD (post-mortem 30/09/2026): licença ANTES, registro (tokens + USD) DEPOIS.
 
     Negado ⇒ `LlmGuardDenied` (nenhum byte sai para o provedor). O projeto vem do escopo
@@ -3474,6 +3537,8 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
         model=model_id, system=system, user=user, max_tokens=max_tokens,
         provider=(llm_cfg or {}).get("provider"), project_id=usage_project_id, purpose=usage_agent,
         **({"llm_role": llm_role, "escalated_from": escalated_from} if (llm_role or escalated_from) else {}),
+        # 2A.6/2A.7: papel EFETIVO declarado (ex.: Staff vazio ⇒ llm_role=staff, effective_role=orchestrator).
+        **({"effective_role": effective_role} if effective_role else {}),
         **(waste or {}),  # plano 1.4: `_llm_guard.waste_kwargs(...)`; {} com WASTE_TELEMETRY=off
     )
     _t0 = time.time()
@@ -3787,7 +3852,9 @@ def _call_bedrock_direct_impl(system: str, user: str, model_id: str,
     # vez para CLAUDE_MODEL_FALLBACK. Cobre splitter/spec_validator/lesson_extractor, que
     # passam model_id derivado de CLAUDE_MODEL e não tinham fallback próprio (o /invoke/raw
     # do Cyborg já traz fallback_id explícito).
-    _fallback_model = os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
+    # 2A.6 (doc 19, semântica 5; LEI dos slots): sob LLM_ROLES_MODE=on NÃO existe modelo de substituição
+    # por env — modelo negado na conta é falha do SLOT e segue a cascata de slots / propaga.
+    _fallback_model = "" if _llm_roles.is_on() else os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
     # A4.1: se este modelo já levou 403 de entitlement há pouco NESTA identidade, começa direto no
     # fallback — o `except` abaixo continua sendo a rede (o cache pode vencer no meio da chamada).
     # `llm_cfg` pode trazer credencial do tenant (BYOC): o escopo separa as contas.

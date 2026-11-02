@@ -1692,6 +1692,8 @@ def infer_pm_module_from_engineer_proposal(engineer_proposal: str, spec_content:
         logger.info("[Pipeline] Módulo inferido pelo LLM (fallback): %s", module)
         _cb_report(ok=True)  # T14: sucesso reseta o CB
         return module
+    except _llm_roles.RoleResolutionError:
+        raise   # 2A.6: sem slot ⇒ falha alta (não cai na heurística em silêncio)
     except Exception as e:
         # T13: classifica exceção para telemetria e decide se propagar
         kind = _classify_llm_error(e)
@@ -1877,11 +1879,40 @@ def _guard_record_raw(gctx: dict, model: str, usage: object) -> None:
                       cache_write_tokens=_g("cache_creation_input_tokens"))
 
 
+_DIRECT_SYSTEM = "Responda exatamente no formato pedido pelo usuário, sem texto adicional."
+
+
+def _direct_role_kwargs(point: str) -> dict:
+    """Papel registrado no ledger por uma chamada direta LEGADA (`off`/`shadow`): `off` ⇒ nada muda;
+    `shadow` ⇒ registra o papel que SERIA usado sob `on` (F11/F12 = staff, F08 = orchestrator) e o papel
+    que de fato serve (o modelo legado = Orchestrator do slot). O modelo escolhido NÃO muda."""
+    if _llm_guard.roles_mode() == "shadow":
+        return _llm_guard.role_kwargs(required=_llm_roles.DIRECT_CALL_ROLES[point],
+                                      effective=_llm_roles.ORCHESTRATOR)
+    return _llm_guard.role_kwargs()
+
+
+def _direct_role_text(point: str, prompt: str, max_tokens: int, purpose: str,
+                      project_id: str | None = None) -> str:
+    """2A.6 (só com LLM_ROLES_MODE=on): chamada direta F08/F11/F12 pela resolução por PAPEL do slot.
+
+    Modelo e provider vêm do SLOT do run (envelope), nunca de env/literal; sem slot ⇒ `RoleResolutionError`
+    (falha alta). Usa o cliente genérico do `run_agent` (`call_bedrock_direct`: Bedrock/Foundry/Anthropic/
+    Google/Azure conforme o provider do slot), que já faz o preflight/record do Guard com o papel
+    declarado (Staff vazio ⇒ `llm_role=staff, effective_role=orchestrator`). Guard-deny propaga."""
+    from orchestrator.agents.runtime import call_bedrock_direct
+    plan = _llm_roles.plan_direct_call(point, _llm_envelope_do_run())
+    if plan.note:
+        logger.info("[ROLES] %s papel=%s efetivo=%s (%s)", point, plan.llm_role, plan.effective_role, plan.note)
+    return call_bedrock_direct(
+        system=_DIRECT_SYSTEM, user=prompt, model_id=plan.model, max_tokens=max_tokens,
+        llm_cfg=plan.llm_cfg, usage_project_id=project_id, usage_agent=purpose, llm_role=plan.llm_role,
+        effective_role=plan.effective_role, **_llm_guard.waste_call_kwargs("support"))
+
+
 def _ask_llm_for_backend_language(text: str) -> str:
-    """Chama LLM isolado para classificar linguagem. Raises em qualquer falha."""
+    """Chama LLM isolado para classificar linguagem. Raises em qualquer falha. (F11 · Staff sob `on`)"""
     import os as _os, json as _j
-    provider = _os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").lower()
-    model = _os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
     prompt = (
         "Analise o texto e responda APENAS com a linguagem/runtime principal do backend:\n"
         "python | nodejs | java | go | rust | php | ruby | other\n\n"
@@ -1890,24 +1921,30 @@ def _ask_llm_for_backend_language(text: str) -> str:
         "Responda SOMENTE a palavra, sem explicação.\n\n"
         f"Texto:\n{text[:8000]}"
     )
-    _gctx = _llm_guard.check(model=model, user=prompt, max_tokens=10, provider=provider,
-                             purpose="runner:backend_language", **_llm_guard.role_kwargs(),
-                             **_llm_guard.waste_kwargs("support"))
-    if provider == "bedrock":
-        client = _bedrock_client(_os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
-        body = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 10,
-                "messages": [{"role": "user", "content": prompt}]}
-        resp = client.invoke_model(modelId=model, body=_j.dumps(body))
-        _parsed = _j.loads(resp["body"].read())
-        _guard_record_raw(_gctx, model, _parsed.get("usage"))
-        answer = _parsed["content"][0]["text"].strip().lower()
+    if _llm_roles.is_on():
+        # 2A.6: papel Staff do slot (Staff vazio ⇒ Orchestrator, declarado); sem slot ⇒ falha alta.
+        answer = _direct_role_text("F11", prompt, 10, "runner:backend_language").strip().lower()
     else:
-        from anthropic import Anthropic
-        client = Anthropic(api_key=_os.environ.get("CLAUDE_API_KEY", ""))
-        resp = client.messages.create(model=model, max_tokens=10,
-                                      messages=[{"role": "user", "content": prompt}])
-        _guard_record_raw(_gctx, model, getattr(resp, "usage", None))
-        answer = resp.content[0].text.strip().lower()
+        provider = _os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").lower()
+        model = _os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+        _gctx = _llm_guard.check(model=model, user=prompt, max_tokens=10, provider=provider,
+                                 purpose="runner:backend_language", **_direct_role_kwargs("F11"),
+                                 **_llm_guard.waste_kwargs("support"))
+        if provider == "bedrock":
+            client = _bedrock_client(_os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
+            body = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 10,
+                    "messages": [{"role": "user", "content": prompt}]}
+            resp = client.invoke_model(modelId=model, body=_j.dumps(body))
+            _parsed = _j.loads(resp["body"].read())
+            _guard_record_raw(_gctx, model, _parsed.get("usage"))
+            answer = _parsed["content"][0]["text"].strip().lower()
+        else:
+            from anthropic import Anthropic
+            client = Anthropic(api_key=_os.environ.get("CLAUDE_API_KEY", ""))
+            resp = client.messages.create(model=model, max_tokens=10,
+                                          messages=[{"role": "user", "content": prompt}])
+            _guard_record_raw(_gctx, model, getattr(resp, "usage", None))
+            answer = resp.content[0].text.strip().lower()
     for v in ("python", "nodejs", "java", "go", "rust", "php", "ruby", "other"):
         if v in answer:
             return v
@@ -1959,6 +1996,8 @@ def _detect_backend_stack(
             logger.info("[StackDetect] ✓ source=%s → language=%s confidence=%s (input_len=%d)",
                         source, lang, confidence, len(text))
             return {"language": lang, "source": source, "confidence": confidence}
+        except _llm_roles.RoleResolutionError:
+            raise   # 2A.6: sem slot/papel inválido não é "fonte ruim": falha alta, sem tentar a próxima
         except Exception as e:
             logger.error("[StackDetect] source=%s LLM error: %s — tentando próxima fonte", source, e)
 
@@ -2003,6 +2042,8 @@ def _detect_backend_language(text: str) -> str:
     """DEPRECATED: usa _resolve_backend_stack com project_id para acesso ao disco."""
     try:
         return _ask_llm_for_backend_language(text)
+    except _llm_roles.RoleResolutionError:
+        raise   # 2A.6: sem slot ⇒ falha alta (não vira 'nodejs' em silêncio)
     except Exception as e:
         logger.warning("[Pipeline] _detect_backend_language fallback failed (%s) — 'nodejs'", e)
     return "nodejs"
@@ -2085,14 +2126,12 @@ def _classify_llm_error(exc: BaseException) -> str:
 
 
 def _ask_llm_for_module(text: str) -> str:
-    """Chama o LLM para classificar o tipo de produto descrito no texto.
+    """Chama o LLM para classificar o tipo de produto descrito no texto. (F12 · Staff sob `on`)
 
     T13: erros de config/auth levantam ClassifierUnavailable (fatal), outros
     propagam para o caller decidir fallback.
     """
     import os as _os
-    provider = _os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").lower()
-    model = _os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 
     prompt = f"""Analise o texto técnico abaixo e responda APENAS com uma das palavras:
 web | backend | mobile | fullstack
@@ -2108,31 +2147,37 @@ Responda SOMENTE a palavra correspondente, sem ponto final, sem explicação.
 Texto:
 {text[:3000]}"""
 
-    _gctx = _llm_guard.check(model=model, user=prompt, max_tokens=10, provider=provider,
-                             purpose="runner:module", **_llm_guard.role_kwargs(),
-                             **_llm_guard.waste_kwargs("support"))
-    if provider == "bedrock":
-        import json as _json
-        client = _bedrock_client(_os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
-        body = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 10,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        resp = client.invoke_model(modelId=model, body=_json.dumps(body))
-        result = _json.loads(resp["body"].read())
-        _guard_record_raw(_gctx, model, result.get("usage"))
-        answer = result["content"][0]["text"].strip().lower()
+    if _llm_roles.is_on():
+        # 2A.6: papel Staff do slot (Staff vazio ⇒ Orchestrator, declarado); sem slot ⇒ falha alta.
+        answer = _direct_role_text("F12", prompt, 10, "runner:module").strip().lower()
     else:
-        from anthropic import Anthropic
-        api_key = _os.environ.get("CLAUDE_API_KEY", "")
-        client = Anthropic(api_key=api_key)
-        resp = client.messages.create(
-            model=model, max_tokens=10,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        _guard_record_raw(_gctx, model, getattr(resp, "usage", None))
-        answer = resp.content[0].text.strip().lower()
+        provider = _os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").lower()
+        model = _os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+        _gctx = _llm_guard.check(model=model, user=prompt, max_tokens=10, provider=provider,
+                                 purpose="runner:module", **_direct_role_kwargs("F12"),
+                                 **_llm_guard.waste_kwargs("support"))
+        if provider == "bedrock":
+            import json as _json
+            client = _bedrock_client(_os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
+            body = {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            resp = client.invoke_model(modelId=model, body=_json.dumps(body))
+            result = _json.loads(resp["body"].read())
+            _guard_record_raw(_gctx, model, result.get("usage"))
+            answer = result["content"][0]["text"].strip().lower()
+        else:
+            from anthropic import Anthropic
+            api_key = _os.environ.get("CLAUDE_API_KEY", "")
+            client = Anthropic(api_key=api_key)
+            resp = client.messages.create(
+                model=model, max_tokens=10,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            _guard_record_raw(_gctx, model, getattr(resp, "usage", None))
+            answer = resp.content[0].text.strip().lower()
 
     # Validate answer
     valid = {"web", "backend", "mobile", "fullstack"}
@@ -2596,11 +2641,13 @@ def _call_autonomous_monitor(project_id: str, task: dict, request_id: str) -> di
     Retorna dict com outcome: FIXED | GENESIS_BUG | ESCALATE.
     Timeout: 120s. Máx 2 tentativas de fix.
     """
-    try:
-        import anthropic as _anthropic
-    except ImportError:
-        logger.warning("[FT-11] anthropic SDK não disponível — pulando Monitor Autônomo")
-        return {"outcome": "ESCALATE", "summary": "SDK anthropic não instalado"}
+    _roles_on = _llm_roles.is_on()
+    if not _roles_on:
+        try:
+            import anthropic as _anthropic
+        except ImportError:
+            logger.warning("[FT-11] anthropic SDK não disponível — pulando Monitor Autônomo")
+            return {"outcome": "ESCALATE", "summary": "SDK anthropic não instalado"}
 
     task_id = task.get("taskId") or task.get("task_id") or ""
     task_desc = task.get("requirements") or task.get("title") or task.get("description") or ""
@@ -2650,44 +2697,58 @@ def _call_autonomous_monitor(project_id: str, task: dict, request_id: str) -> di
         f"Responda APENAS com JSON — sem texto adicional."
     )
 
-    _provider = os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").lower()
-    _model    = os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-sonnet-4-6")
+    if _roles_on:
+        # 2A.6: F08 = Orchestrator do slot do run. Resolve ANTES do laço: sem slot ⇒ falha alta
+        # (o chamador escala a task ao humano), nunca um modelo/provider por omissão.
+        _plan = _llm_roles.plan_direct_call("F08", _llm_envelope_do_run())
+        _provider, _model = _plan.llm_cfg.get("provider", ""), _plan.model
+    else:
+        _provider = os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").lower()
+        _model    = os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-sonnet-4-6")
 
     for _attempt in range(2):
         try:
-            # LLM GUARD: negado ⇒ ESCALATE (humano decide), nunca retry pago.
-            try:
-                _gctx = _llm_guard.check(model=_model, user=_monitor_prompt, max_tokens=4096,
-                                         provider=_provider, project_id=project_id,
-                                         purpose="runner:autonomous_monitor",
-                                         **_llm_guard.role_kwargs(),
-                                         **_llm_guard.waste_kwargs("support"))
-            except _llm_guard.LlmGuardDenied as _gd:
-                return {"outcome": "ESCALATE", "summary": f"LLM negado pelo guard de custo: {_gd.message}"}
-            # Suporta Bedrock (padrão do Genesis) e Anthropic API direta
-            if _provider == "bedrock":
-                import json as _json
-                _bedrock = _bedrock_client(os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
-                _body = _json.dumps({
-                    "anthropic_version": "bedrock-2023-05-31",
-                    "max_tokens": 4096,
-                    "messages": [{"role": "user", "content": _monitor_prompt}],
-                })
-                _resp = _bedrock.invoke_model(modelId=_model, body=_body)
-                _parsed = _json.loads(_resp["body"].read())
-                _guard_record_raw(_gctx, _model, _parsed.get("usage"))
-                _text = _parsed.get("content", [{}])[0].get("text", "")
+            if _roles_on:
+                # Guard fail-closed dentro de `call_bedrock_direct`; negado ⇒ ESCALATE (humano decide).
+                try:
+                    _text = _direct_role_text("F08", _monitor_prompt, 4096, "runner:autonomous_monitor",
+                                              project_id=project_id)
+                except _llm_guard.LlmGuardDenied as _gd:
+                    return {"outcome": "ESCALATE", "summary": f"LLM negado pelo guard de custo: {_gd.message}"}
             else:
-                # Anthropic API direta
-                _client = _anthropic.Anthropic(api_key=os.environ.get("CLAUDE_API_KEY", ""))
-                _response = _client.messages.create(
-                    model=_model,
-                    max_tokens=4096,
-                    messages=[{"role": "user", "content": _monitor_prompt}],
-                    timeout=120,
-                )
-                _guard_record_raw(_gctx, _model, getattr(_response, "usage", None))
-                _text = _response.content[0].text if _response.content else ""
+                # LLM GUARD: negado ⇒ ESCALATE (humano decide), nunca retry pago.
+                try:
+                    _gctx = _llm_guard.check(model=_model, user=_monitor_prompt, max_tokens=4096,
+                                             provider=_provider, project_id=project_id,
+                                             purpose="runner:autonomous_monitor",
+                                             **_direct_role_kwargs("F08"),
+                                             **_llm_guard.waste_kwargs("support"))
+                except _llm_guard.LlmGuardDenied as _gd:
+                    return {"outcome": "ESCALATE", "summary": f"LLM negado pelo guard de custo: {_gd.message}"}
+                # Suporta Bedrock (padrão do Genesis) e Anthropic API direta
+                if _provider == "bedrock":
+                    import json as _json
+                    _bedrock = _bedrock_client(os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
+                    _body = _json.dumps({
+                        "anthropic_version": "bedrock-2023-05-31",
+                        "max_tokens": 4096,
+                        "messages": [{"role": "user", "content": _monitor_prompt}],
+                    })
+                    _resp = _bedrock.invoke_model(modelId=_model, body=_body)
+                    _parsed = _json.loads(_resp["body"].read())
+                    _guard_record_raw(_gctx, _model, _parsed.get("usage"))
+                    _text = _parsed.get("content", [{}])[0].get("text", "")
+                else:
+                    # Anthropic API direta
+                    _client = _anthropic.Anthropic(api_key=os.environ.get("CLAUDE_API_KEY", ""))
+                    _response = _client.messages.create(
+                        model=_model,
+                        max_tokens=4096,
+                        messages=[{"role": "user", "content": _monitor_prompt}],
+                        timeout=120,
+                    )
+                    _guard_record_raw(_gctx, _model, getattr(_response, "usage", None))
+                    _text = _response.content[0].text if _response.content else ""
 
             # Extrair JSON da resposta (comum a todos os providers)
             import json as _json

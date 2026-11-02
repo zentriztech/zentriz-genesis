@@ -1205,8 +1205,11 @@ def invoke_raw(body: dict):
             resp2 = call_bedrock_direct(system=system_prompt, user=user_message,
                                         model_id=_fb, max_tokens=max_tokens,
                                         temperature=_temp_for(_fb), llm_cfg=_cfg,
-                                        **_llm_guard.role_kwargs(escalated=True),
-                                        **_llm_guard.waste_call_kwargs("escalation"))
+                                        # 2A.7 (doc 19, semântica 4): failover por exceção/resposta vazia é
+                                        # DISPONIBILIDADE, não escalada: mesmo papel, sem `escalated_from`
+                                        # (antes gravava `advisor` + `escalated_from=orchestrator`).
+                                        **_llm_guard.role_kwargs(required="orchestrator", effective="orchestrator"),
+                                        **_llm_guard.waste_call_kwargs("retry"))
             return {"response": resp2, "model_used": _effective(_fb), "model_requested": model_id,
                     "fallback": True, **_outcome()}
         # Sem fallback e principal veio vazio → devolve o vazio (comportamento antigo, preservado).

@@ -12,3 +12,14 @@ def _llm_guard_off_by_default(monkeypatch):
     """O LLM GUARD é fail-closed (sem api ⇒ nega). Nos testes de unidade de outros módulos não há
     api: desliga por padrão. `test_llm_guard.py` religa e testa o guard contra um servidor falso."""
     monkeypatch.setenv("LLM_GUARD_DISABLED_FOR_TESTS", "1")
+
+
+@pytest.fixture(autouse=True)
+def _advisor_budget_limpo(monkeypatch):
+    """2A.7: idempotência/teto do Advisor são estado de PROCESSO; cada teste começa sem reservas e sem env de teto."""
+    from orchestrator.agents import llm_roles
+    for k in (llm_roles.ENV_ADVISOR_CAP, llm_roles.ENV_PRICE_IN, llm_roles.ENV_PRICE_OUT, llm_roles.ENV_BUDGET_TTL, llm_roles.ENV_DEDUPE_TTL):
+        monkeypatch.delenv(k, raising=False)
+    llm_roles.BUDGET.reset()
+    yield
+    llm_roles.BUDGET.reset()
