@@ -28,8 +28,12 @@ import { apiGet, apiPost, apiDelete, withQuery } from "@/lib/api";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
 import {
   LlmSlotEditor, LlmSlotCard, SLOT_LABEL, VERIFY_LABEL,
-  type LlmSlot, type VerifyResult,
+  type LlmSlot, type VerifyResult, type SaveRolesExtra,
 } from "@/components/llm/LlmSlotEditor";
+import {
+  parseRolesMode, rolesUiEnabled, summarizeRoleVerify, initialRoles,
+  type RoleVerifyMap, type RolesMode,
+} from "@/components/llm/rolesLogic";
 
 interface LlmConfigResponse {
   slots: LlmSlot[];
@@ -47,6 +51,8 @@ interface LlmConfigResponse {
   has_usable_slot?: boolean;
   /** `families.length >= 2` — o que destrava o revisor cross-family (+12 p.p., arXiv:2609.04270). */
   cross_family_available?: boolean;
+  /** 2A.10: `shadow`|`on` quando os papéis estão ativos; AUSENTE com `off` (UI idêntica à anterior). */
+  roles_mode?: string;
 }
 
 // ── Página principal ──────────────────────────────────────────────────────────
@@ -63,8 +69,11 @@ function LlmSettingsInner() {
   /** Famílias distintas cobertas pelos slots utilizáveis — vem calculado do servidor. */
   const [familias, setFamilias] = useState<string[]>([]);
   const [crossFamily, setCrossFamily] = useState(false);
+  const [rolesMode, setRolesMode] = useState<RolesMode>("off");
   const [loading, setLoading] = useState(true);
-  const [globalMsg, setGlobalMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [globalMsg, setGlobalMsg] = useState<{
+    type: "success" | "error" | "warning"; text: string; details?: string[];
+  } | null>(null);
 
   // Modal
   const [modalOpen, setModalOpen]   = useState(false);
@@ -89,6 +98,7 @@ function LlmSettingsInner() {
         setSysDefault(resp.system_default);
         setFamilias(resp.families ?? []);
         setCrossFamily(!!resp.cross_family_available);
+        setRolesMode(parseRolesMode(resp.roles_mode));
         const configured = resp.slots.filter((s) => s.configured && s.has_credentials);
         setSlots(configured);
         // Puxar limites do slot 0 se existir
@@ -109,21 +119,26 @@ function LlmSettingsInner() {
   useEffect(() => { void load(); }, [load]);
 
   /** Mensagem única para o veredicto — mesma no salvar e no botão "Testar". */
-  const mostrarVeredicto = (v: VerifyResult | undefined, slotLabel: string) => {
+  const mostrarVeredicto = (v: VerifyResult | undefined, slotLabel: string, extra?: SaveRolesExtra) => {
+    // 2A.10: `extra` só existe com a UI de papéis ativa. Sem ele o texto/estado são os de sempre.
+    const warnings = extra?.warnings ?? [];
+    const details = extra ? [...extra.roleSummary, ...warnings.map((w) => `Aviso: ${w}`)] : undefined;
     if (!v) {
-      setGlobalMsg({ type: "success", text: `${slotLabel} salvo. Não foi possível testar agora — use ▶ para testar.` });
+      setGlobalMsg({ type: "success", text: `${slotLabel} salvo. Não foi possível testar agora — use ▶ para testar.`, details });
       return;
     }
     if (v.ok) {
-      setGlobalMsg({ type: "success", text: `${slotLabel}: ${v.model} respondeu em ${v.latency_ms} ms.` });
+      setGlobalMsg({ type: warnings.length ? "warning" : "success",
+        text: `${slotLabel}: ${v.model} respondeu em ${v.latency_ms} ms.`, details });
     } else if (v.status === "unavailable") {
       // Indisponibilidade nossa não reprova o slot do tenant — e por isso também não é gravada.
-      setGlobalMsg({ type: "success", text: `${slotLabel} salvo. ${VERIFY_LABEL.unavailable} (${v.message}).` });
+      setGlobalMsg({ type: "success", text: `${slotLabel} salvo. ${VERIFY_LABEL.unavailable} (${v.message}).`, details });
     } else {
       // Reprovar NÃO desfaz o salvamento: o slot fica gravado e a cascata o ignora até funcionar.
       setGlobalMsg({
         type: "error",
         text: `${slotLabel} salvo, mas o teste falhou — ${VERIFY_LABEL[v.status] ?? VERIFY_LABEL.other}: ${v.message}`,
+        details,
       });
     }
   };
@@ -132,9 +147,13 @@ function LlmSettingsInner() {
     setTestingPriority(priority);
     setGlobalMsg(null);
     try {
-      const r = await apiPost<{ verify: VerifyResult }>(
+      const r = await apiPost<{ verify: VerifyResult; verify_roles?: RoleVerifyMap }>(
         withQuery(`/api/tenant/llm-config/${priority}/test`, { tenantId }), {});
-      mostrarVeredicto(r?.verify, slotLabel);
+      const slotTestado = slots.find((s) => s.priority === priority);
+      mostrarVeredicto(r?.verify, slotLabel,
+        rolesUiEnabled(rolesMode) && slotTestado
+          ? { warnings: [], roleSummary: summarizeRoleVerify(r?.verify_roles, initialRoles(slotTestado)) }
+          : undefined);
       await load();
     } catch (e) {
       setGlobalMsg({ type: "error", text: e instanceof Error ? e.message : "Falha ao testar o slot." });
@@ -226,11 +245,19 @@ function LlmSettingsInner() {
         </Button>
       </Stack>
 
-      {globalMsg && (
-        <Alert severity={globalMsg.type} sx={{ mb: 2 }} onClose={() => setGlobalMsg(null)}>
-          {globalMsg.text}
-        </Alert>
-      )}
+      {/* Região viva: o resultado do teste/salvamento é anunciado por leitores de tela (2A.10). */}
+      <div aria-live="polite" aria-atomic="true">
+        {globalMsg && (
+          <Alert severity={globalMsg.type} sx={{ mb: 2 }} onClose={() => setGlobalMsg(null)}>
+            {globalMsg.text}
+            {globalMsg.details && globalMsg.details.length > 0 && (
+              <Box component="ul" sx={{ m: 0, mt: 0.5, pl: 2.5 }}>
+                {globalMsg.details.map((d, i) => <li key={i}>{d}</li>)}
+              </Box>
+            )}
+          </Alert>
+        )}
+      </div>
 
       {/* Lista de LLMs configurados */}
       {configuredSlots.length === 0 ? (
@@ -269,6 +296,7 @@ function LlmSettingsInner() {
               onTest={() => void testSlot(slot.priority, SLOT_LABEL(index))}
               deleting={deletingPriority === slot.priority}
               testing={testingPriority === slot.priority}
+              rolesMode={rolesMode}
             />
           ))}
 
@@ -339,8 +367,9 @@ function LlmSettingsInner() {
         endpoint="/api/tenant/llm-config"
         tenantId={tenantId}
         showCyborg
+        rolesMode={rolesMode}
         onClose={() => setModalOpen(false)}
-        onSaved={(verify) => { mostrarVeredicto(verify, SLOT_LABEL(editPriority)); void load(); }}
+        onSaved={(verify, extra) => { mostrarVeredicto(verify, SLOT_LABEL(editPriority), extra); void load(); }}
         globalLimits={globalLimits}
         onLimitsChange={setGlobalLimits}
       />

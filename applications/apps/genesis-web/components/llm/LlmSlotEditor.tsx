@@ -19,7 +19,7 @@
  *    quota de projetos; esconder é mais honesto que exibir campo que o servidor ignora.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactElement } from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -53,7 +53,18 @@ import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import PsychologyIcon from "@mui/icons-material/Psychology";
 import SaveIcon from "@mui/icons-material/Save";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
+import BlockIcon from "@mui/icons-material/Block";
+import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
+import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
+import HourglassEmptyIcon from "@mui/icons-material/HourglassEmpty";
+import RemoveCircleOutlineIcon from "@mui/icons-material/RemoveCircleOutline";
+import FormHelperText from "@mui/material/FormHelperText";
 import { apiPost, apiPut, withQuery } from "@/lib/api";
+import {
+  initialRoles, legacyFallbackValue, normalizeWarnings, parseRoleErrors, rolesPayloadFields,
+  rolesUiEnabled, roleStatusView, summarizeRoleVerify,
+  type RoleKey, type RoleStatusView, type RoleVerifyIn, type RoleVerifyMap, type RolesMode,
+} from "./rolesLogic";
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
@@ -96,6 +107,17 @@ export interface LlmSlot {
   verify_error?: string | null;
   verify_model?: string | null;
   verify_latency_ms?: number | null;
+  /** 2A.10 — só presentes com `roles_mode != off` (a API não envia com `off`). */
+  models?: { orchestrator?: string | null; advisor?: string | null; staff?: string | null };
+  verify_roles?: RoleVerifyMap;
+}
+
+/** Informações extras do salvar quando a UI de papéis está ativa (2A.10). */
+export interface SaveRolesExtra {
+  /** Avisos de validação do backend (`warnings`). */
+  warnings: string[];
+  /** Uma linha por papel preenchido: "Orchestrator: Testado e funcionando". */
+  roleSummary: string[];
 }
 
 /** Veredicto devolvido pelo PUT (salvar) e pelo POST …/test. */
@@ -300,6 +322,78 @@ export const SLOT_COLOR = (idx: number) => {
   return COLORS[idx] ?? "#6366F1";
 };
 
+// ── 2A.10: estado do probe por papel (ícone + TEXTO; nunca só cor) ─────────────────────────────
+
+const ROLE_STATUS_ICON: Record<RoleStatusView["kind"], ReactElement> = {
+  ok: <CheckCircleIcon />, denied: <BlockIcon />, error: <ErrorOutlineIcon />,
+  timeout: <HourglassEmptyIcon />, untested: <HelpOutlineIcon />, empty: <RemoveCircleOutlineIcon />,
+};
+const ROLE_TONE_COLOR: Record<RoleStatusView["tone"], "success" | "error" | "warning" | "default"> = {
+  success: "success", error: "error", warning: "warning", neutral: "default",
+};
+
+export function RoleStatusChip({ view, id }: { view: RoleStatusView; id?: string }) {
+  return (
+    <Tooltip title={view.detail}>
+      <Chip id={id} size="small" variant="outlined" icon={ROLE_STATUS_ICON[view.kind]}
+        color={ROLE_TONE_COLOR[view.tone]} label={view.label}
+        // O detalhe também fica acessível sem hover (tooltip não é lido por todo leitor de tela).
+        aria-label={`${view.label}. ${view.detail}`}
+        sx={{ height: 22, fontSize: "0.7rem", fontWeight: 600 }} />
+    </Tooltip>
+  );
+}
+
+const ROLE_NAME: Record<RoleKey, string> = { orchestrator: "Orchestrator", advisor: "Advisor", staff: "Staff" };
+
+interface RoleSelectProps {
+  role: RoleKey;
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  opcoes: string[];
+  itemModelo: (m: string) => ReactElement;
+  help: string;
+  emptyLabel?: string;
+  error?: string;
+  /** Valor atualmente GRAVADO no servidor — o veredicto só vale para ele. */
+  saved: string;
+  verify?: RoleVerifyIn | null;
+}
+
+function RoleSelect({ role, label, value, onChange, opcoes, itemModelo, help, emptyLabel, error, saved, verify }: RoleSelectProps) {
+  const base = `llm-role-${role}`;
+  const changed = value !== saved;
+  const view = roleStatusView(role, !!value, verify);
+  return (
+    <Box>
+      <FormControl size="small" fullWidth error={!!error}>
+        <InputLabel id={`${base}-label`}>{label}</InputLabel>
+        <Select labelId={`${base}-label`} id={base} value={value} label={label}
+          renderValue={(v) => (v ? String(v) : (emptyLabel ?? ""))}
+          displayEmpty={!!emptyLabel}
+          SelectDisplayProps={{ "aria-describedby": `${base}-help ${base}-status${error ? ` ${base}-error` : ""}` }}
+          onChange={(e) => onChange(e.target.value as string)}>
+          {emptyLabel && (
+            <MenuItem value="" sx={{ fontSize: "0.8rem", color: "text.secondary" }}>{emptyLabel}</MenuItem>
+          )}
+          {opcoes.map(itemModelo)}
+        </Select>
+        {error && <FormHelperText id={`${base}-error`} role="alert">{ROLE_NAME[role]}: {error}</FormHelperText>}
+      </FormControl>
+      <Typography id={`${base}-help`} variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+        {help}
+      </Typography>
+      <Box id={`${base}-status`} sx={{ mt: 0.5 }}>
+        {changed && value
+          ? <Chip size="small" variant="outlined" icon={<HelpOutlineIcon />} label="Será testado ao salvar"
+              sx={{ height: 22, fontSize: "0.7rem", fontWeight: 600 }} />
+          : <RoleStatusChip view={view} />}
+      </Box>
+    </Box>
+  );
+}
+
 // ── Modal de cadastro / edição ────────────────────────────────────────────────
 
 export interface GlobalLimits { maxConc: number; quota: string; dpRes: number }
@@ -318,20 +412,26 @@ export interface LlmSlotEditorProps {
   onLimitsChange?: (v: GlobalLimits) => void;
   /** Campo livre de rótulo (a gestão usa para dizer a que serve o slot). */
   showLabel?: boolean;
+  /** 2A.10 — `roles_mode` do GET. `off`/ausente ⇒ editor idêntico ao anterior. */
+  rolesMode?: RolesMode;
   onClose: () => void;
   /** Recebe o veredicto do teste feito no ato do salvamento (quando o servidor conseguiu testar). */
-  onSaved: (verify?: VerifyResult) => void;
+  onSaved: (verify?: VerifyResult, extra?: SaveRolesExtra) => void;
 }
 
 export function LlmSlotEditor({
   open, slot, priority, endpoint, tenantId = null,
   showCyborg = false, globalLimits, onLimitsChange, showLabel = false,
-  onClose, onSaved,
+  rolesMode = "off", onClose, onSaved,
 }: LlmSlotEditorProps) {
+  const rolesUi = rolesUiEnabled(rolesMode);
   const initialProvider = (slot?.provider as Provider) ?? "bedrock";
   const [tab, setTab]           = useState(PROVIDERS.indexOf(initialProvider));
   const [modelId, setModelId]   = useState(slot?.model_id ?? "");
-  const [fallbackId, setFallbackId] = useState(slot?.model_id_fallback ?? "");
+  const [fallbackId, setFallbackId] = useState(
+    rolesUi ? initialRoles(slot).advisor : (slot?.model_id_fallback ?? ""));
+  const [staffId, setStaffId]   = useState(rolesUi ? initialRoles(slot).staff : "");
+  const [roleErrors, setRoleErrors] = useState<Partial<Record<RoleKey, string>>>({});
   const [cyborgId, setCyborgId] = useState(slot?.cyborg_model_id ?? "");
   const [cyborgFallbackId, setCyborgFallbackId] = useState(slot?.cyborg_model_id_fallback ?? "");
   const [label, setLabel]       = useState(slot?.label ?? "");
@@ -349,7 +449,9 @@ export function LlmSlotEditor({
       const p = (slot?.provider as Provider) ?? "bedrock";
       setTab(PROVIDERS.indexOf(p));
       setModelId(slot?.model_id ?? "");
-      setFallbackId(slot?.model_id_fallback ?? "");
+      setFallbackId(rolesUi ? initialRoles(slot).advisor : (slot?.model_id_fallback ?? ""));
+      setStaffId(rolesUi ? initialRoles(slot).staff : "");
+      setRoleErrors({});
       setCyborgId(slot?.cyborg_model_id ?? "");
       setCyborgFallbackId(slot?.cyborg_model_id_fallback ?? "");
       setLabel(slot?.label ?? "");
@@ -358,13 +460,15 @@ export function LlmSlotEditor({
       setCatalog(null);
       setShowUnusable(false);
     }
-  }, [open, slot]);
+  }, [open, slot, rolesUi]);
 
   // Reset model ao trocar provider. Fica VAZIO de propósito: quem escolhe o primeiro é o catálogo
   // verificado (abaixo) — chutar `meta.models[0]` aqui já ofereceu modelo sem entitlement.
   useEffect(() => {
     setModelId("");
     setFallbackId("");
+    setStaffId("");
+    setRoleErrors({});
     setCyborgId("");
     setCyborgFallbackId("");
     setCreds({});
@@ -417,7 +521,7 @@ export function LlmSlotEditor({
   // Um valor JÁ SALVO nunca some da lista: sumir faria o Select cair em "out-of-range" e o próximo
   // save gravaria outro modelo sem o operador pedir.
   const opcoes = [...base];
-  for (const v of [slot?.model_id, modelId, fallbackId, cyborgId, cyborgFallbackId]) {
+  for (const v of [slot?.model_id, modelId, fallbackId, staffId, cyborgId, cyborgFallbackId]) {
     if (v && !opcoes.includes(v)) opcoes.push(v);
   }
   const infoDe   = (id: string) => verificados.find((m) => m.id === id);
@@ -443,16 +547,21 @@ export function LlmSlotEditor({
 
   const handleSave = async () => {
     if (!padrao) { setErr("Escolha um modelo principal."); return; }
-    setSaving(true); setErr(null);
+    setSaving(true); setErr(null); setRoleErrors({});
     try {
       const selected         = padrao;
+      const roles            = { orchestrator: padrao, advisor: fallbackId, staff: staffId };
       const resolvedProvider = resolveProvider(selected, provider);
       // O PUT TESTA o slot antes de responder (chamada real, mínima) — daí ele poder demorar alguns
       // segundos. É o preço de descobrir a credencial errada aqui, e não no meio de um run.
-      const resp = await apiPut<{ verify?: VerifyResult }>(withQuery(`${endpoint}/${priority}`, { tenantId }), {
+      const resp = await apiPut<{
+        verify?: VerifyResult; warnings?: unknown; verify_roles?: RoleVerifyMap;
+      }>(withQuery(`${endpoint}/${priority}`, { tenantId }), {
         provider:                resolvedProvider,
         model_id:                selected,
-        model_id_fallback:       fallbackId || null,
+        model_id_fallback:       legacyFallbackValue(rolesMode, roles, fallbackId),
+        // 2A.10: com `off` isto é `{}` (payload idêntico). Com a UI de papéis: dupla escrita.
+        ...rolesPayloadFields(rolesMode, roles),
         ...(showLabel ? { label: label || null } : {}),
         ...(showCyborg ? {
           cyborg_model_id:          cyborgId || null,
@@ -465,10 +574,21 @@ export function LlmSlotEditor({
           deadpool_token_reserve:  globalLimits.dpRes,
         } : {}),
       });
-      onSaved(resp?.verify);
+      onSaved(resp?.verify, rolesUi ? {
+        warnings: normalizeWarnings(resp?.warnings),
+        roleSummary: summarizeRoleVerify(resp?.verify_roles, roles),
+      } : undefined);
       onClose();
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Erro ao salvar.");
+      const msg = e instanceof Error ? e.message : "Erro ao salvar.";
+      const parsed = rolesUi ? parseRoleErrors(msg) : null;
+      if (parsed && Object.keys(parsed.byRole).length) {
+        // 400 de papel inválido: a mensagem vai NO campo; o alerta geral só aponta para ele.
+        setRoleErrors(parsed.byRole);
+        setErr(parsed.general || "Corrija o(s) papel(is) indicado(s) abaixo.");
+      } else {
+        setErr(msg);
+      }
     } finally { setSaving(false); }
   };
 
@@ -575,7 +695,36 @@ export function LlmSlotEditor({
           </Alert>
         )}
 
+        {/* 2A.10 — três papéis (somente com roles_mode != off) */}
+        {rolesUi && (
+          <Box component="fieldset" sx={{ border: 0, p: 0, m: 0, mb: 2, minWidth: 0 }}>
+            <Typography component="legend" variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>
+              Papéis do modelo neste slot
+            </Typography>
+            <Stack spacing={2}>
+              <RoleSelect role="orchestrator" label="Orchestrator" value={padrao}
+                onChange={setModelId} opcoes={opcoes} itemModelo={itemModelo}
+                help="Ativo principal do slot: roda o trabalho do dia a dia. Use um modelo da família Sonnet (equilibrado entre custo e capacidade)."
+                error={roleErrors.orchestrator} saved={initialRoles(slot).orchestrator}
+                verify={slot?.verify_roles?.orchestrator} />
+              <RoleSelect role="advisor" label="Advisor" value={fallbackId}
+                onChange={setFallbackId} opcoes={opcoes} itemModelo={itemModelo}
+                emptyLabel="— Sem escalada —"
+                help="Decisões e operações pesadas. Use um modelo da família Opus (o mais capaz). Vazio = sem escalada: o Orchestrator nunca é substituído, e isso fica registrado."
+                error={roleErrors.advisor} saved={initialRoles(slot).advisor}
+                verify={slot?.verify_roles?.advisor} />
+              <RoleSelect role="staff" label="Staff" value={staffId}
+                onChange={setStaffId} opcoes={opcoes} itemModelo={itemModelo}
+                emptyLabel="— Usar o Orchestrator —"
+                help="Tarefas repetitivas e verificáveis. Use um modelo da família Haiku (barato e rápido). Vazio = usa o Orchestrator deste slot."
+                error={roleErrors.staff} saved={initialRoles(slot).staff}
+                verify={slot?.verify_roles?.staff} />
+            </Stack>
+          </Box>
+        )}
+
         {/* Modelo principal + Fallback */}
+        {!rolesUi && (<>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mb: 2 }}>
           <FormControl size="small" fullWidth>
             <InputLabel>Modelo principal</InputLabel>
@@ -601,14 +750,31 @@ export function LlmSlotEditor({
             No rework (QA_FAIL ≥ 1) ou quando Dev escalou, <strong>{fallbackId}</strong> é chamado automaticamente.
           </Alert>
         )}
+        </>)}
 
         {/* Cyborg — modelo dedicado para lapidação e entrega final (só no slot de tenant) */}
         {showCyborg && (
-          <Box sx={{ border: "1px solid", borderColor: "warning.main", borderRadius: 1, p: 1.5, mb: 2, bgcolor: "warning.main", color: "warning.contrastText" }}>
+          <Box
+            role={rolesUi ? "group" : undefined}
+            aria-label={rolesUi ? "Cyborg (legado, obsoleto)" : undefined}
+            sx={rolesUi
+              // 2A.10 / D3: bloco legado — visualmente neutro (texto principal sobre fundo do papel),
+              // para não competir com os três papéis e manter contraste alto.
+              ? { border: "1px dashed", borderColor: "divider", borderRadius: 1, p: 1.5, mb: 2,
+                  bgcolor: "background.paper", color: "text.primary" }
+              : { border: "1px solid", borderColor: "warning.main", borderRadius: 1, p: 1.5, mb: 2, bgcolor: "warning.main", color: "warning.contrastText" }}>
             <Typography variant="caption" sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700, display: "block", mb: 1 }}>
               🤖 Cyborg — Lapidação e Entrega (etapa final crítica)
+              {rolesUi && <Chip size="small" variant="outlined" label="Legado · obsoleto" sx={{ ml: 1, height: 20 }} />}
             </Typography>
-            <Typography variant="caption" sx={{ display: "block", mb: 1.5, opacity: 0.9 }}>
+            {rolesUi && (
+              <Alert severity="info" icon={false} sx={{ mb: 1.5, py: 0.25, fontSize: "0.75rem" }}>
+                <strong>Obsoleto:</strong> o papel <strong>Advisor</strong> substitui o Cyborg para
+                decisões e operações pesadas. Estes campos continuam sendo gravados por compatibilidade
+                e serão removidos em uma versão futura — prefira configurar o Advisor acima.
+              </Alert>
+            )}
+            <Typography variant="caption" sx={{ display: "block", mb: 1.5, opacity: rolesUi ? 1 : 0.9 }}>
               O Cyborg audita o produto entregue pelo squad, corrige gaps residuais e publica no S3.
               Use o modelo mais capaz disponível — é a etapa mais importante do pipeline.
             </Typography>
@@ -698,6 +864,11 @@ export function LlmSlotEditor({
           startIcon={saving ? <CircularProgress size={14} color="inherit" /> : <SaveIcon />}>
           {saving ? "Salvando e testando…" : "Salvar e testar"}
         </Button>
+        {/* Anúncio para leitor de tela (a mudança de rótulo do botão não é anunciada sozinha). */}
+        <Box component="span" role="status" aria-live="polite"
+          sx={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)", whiteSpace: "nowrap" }}>
+          {saving ? "Salvando e testando os modelos…" : ""}
+        </Box>
       </DialogActions>
     </Dialog>
   );
@@ -721,12 +892,16 @@ export interface LlmSlotCardProps {
    * alerta o tenant ("o consumo é faturado para a Zentriz") ali seria um erro de leitura.
    */
   zentrizIsPayer?: boolean;
+  /** 2A.10 — `roles_mode` do GET; `off`/ausente ⇒ card idêntico ao anterior. */
+  rolesMode?: RolesMode;
 }
 
 export function LlmSlotCard({
   slot, index, total, onMoveUp, onMoveDown, onEdit, onDelete, onTest,
-  deleting, testing, zentrizIsPayer = false,
+  deleting, testing, zentrizIsPayer = false, rolesMode = "off",
 }: LlmSlotCardProps) {
+  const rolesUi = rolesUiEnabled(rolesMode);
+  const roleModels = rolesUi ? initialRoles(slot) : null;
   const color = SLOT_COLOR(index);
   const meta  = PROVIDER_META[slot.provider!];
   const status = slot.verify_status ?? null;
@@ -756,13 +931,32 @@ export function LlmSlotCard({
               )}
               {slot.cyborg_model_id && (
                 <Typography variant="caption" sx={{ display: "block", fontFamily: "monospace", color: "warning.main", fontSize: "0.68rem" }}>
-                  🤖 Cyborg: {slot.cyborg_model_id}
+                  🤖 Cyborg{rolesUi ? " (legado)" : ""}: {slot.cyborg_model_id}
                   {slot.cyborg_model_id_fallback && (
                     <> <span style={{ opacity: 0.5 }}>→</span> {slot.cyborg_model_id_fallback}</>
                   )}
                 </Typography>
               )}
             </Stack>
+            {roleModels && (
+              <Box component="ul" aria-label="Papéis do modelo" sx={{ listStyle: "none", m: 0, mt: 0.5, p: 0 }}>
+                {(["orchestrator", "advisor", "staff"] as RoleKey[]).map((role) => {
+                  const id = roleModels[role];
+                  return (
+                    <Stack component="li" key={role} direction="row" spacing={0.75} alignItems="center"
+                      flexWrap="wrap" useFlexGap sx={{ mt: 0.25 }}>
+                      <Typography variant="caption" fontWeight={700} sx={{ minWidth: 84 }}>
+                        {ROLE_NAME[role]}
+                      </Typography>
+                      <Typography variant="caption" sx={{ fontFamily: "monospace" }} color={id ? "text.primary" : "text.secondary"}>
+                        {id || (role === "advisor" ? "sem escalada" : role === "staff" ? "usa o Orchestrator" : "—")}
+                      </Typography>
+                      <RoleStatusChip view={roleStatusView(role, !!id, slot.verify_roles?.[role])} />
+                    </Stack>
+                  );
+                })}
+              </Box>
+            )}
             {/* ⚖️ LEI 2026-09-10 — o rótulo diz de QUEM é a fatura, não só "tem credencial".
                 Um slot com provider e modelo certos rodando na chave do servidor continua
                 faturando na Zentriz: era exatamente esse caso que a tela chamava, em verde,
