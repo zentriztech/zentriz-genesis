@@ -254,6 +254,37 @@ def _envelope_from_api(cfg: dict) -> dict:
     return llm
 
 
+def _roles_mode() -> str:
+    """Espelho de `agents/llm_guard.roles_mode` (aqui não se importa o pacote dos agents). Fail-safe `off`."""
+    raw = (os.environ.get("LLM_ROLES_MODE", "off") or "off").strip().lower()
+    return raw if raw in ("shadow", "on") else "off"
+
+
+def _rework_attempt_plan(att: int, *, feature_mode: bool, model_id: str, fallback_model: str) -> tuple[str, dict]:
+    """Modelo e papéis (ledger) da tentativa `att` do rework do Cyborg. Decisão 2A.8.
+
+    MODELO — idêntico ao de sempre em qualquer `LLM_ROLES_MODE`: a 1ª tentativa roda no modelo
+    principal do slot (Orchestrator) e a escalada para o Advisor (`model_id_fallback`, espelho legado
+    do Advisor na transição) só ocorre na 2ª. NÃO se passa a usar o Advisor desde a 1ª tentativa — isso
+    é o cenário de aumento de custo que o plano proíbe. Única exceção PRÉ-EXISTENTE: o modo `feature`
+    (achado #50) já começa no modelo de reforço; segue assim, e o papel registrado diz a verdade.
+
+    PAPÉIS — só com `LLM_ROLES_MODE != off` (com `off` devolve `{}` ⇒ corpo byte-idêntico):
+    Orchestrator na tentativa sem escalada; Advisor com `escalated_from=orchestrator` quando o modelo do
+    Advisor de fato substituiu o do Orchestrator; Advisor vazio/igual ao principal ⇒ `llm_role=advisor`
+    mas `effective_role=orchestrator`, sem `escalated_from`.
+    """
+    use_advisor_model = (att > 0) or feature_mode
+    model = fallback_model if use_advisor_model else model_id
+    if _roles_mode() == "off":
+        return model, {}
+    if not use_advisor_model:
+        return model, {"llm_role": "orchestrator", "effective_role": "orchestrator"}
+    if fallback_model and fallback_model != model_id:
+        return model, {"llm_role": "advisor", "effective_role": "advisor", "escalated_from": "orchestrator"}
+    return model, {"llm_role": "advisor", "effective_role": "orchestrator"}
+
+
 def _slot_body_fields(model_id: str = "") -> dict:
     """Campos de LLM a espalhar no corpo de `/invoke/raw` — modelo E credenciais do slot."""
     env = _SLOT_LLM.get() or {}
@@ -1568,12 +1599,15 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
             "48000" if _feature_mode else "24000"))
         for _att in range(_max_llm_attempts):
             _use_model = _start_model if _att == 0 else _fallback_model
+            _, _role_fields = _rework_attempt_plan(
+                _att, feature_mode=_feature_mode, model_id=model_id, fallback_model=_fallback_model)
             body = {
                 "prompt_override": _fix_prompt, "user_message": _fix_user[:45000],
                 "max_tokens": _rework_max_tokens,
                 # Credenciais do slot + o modelo desta tentativa (o `_slot_body_fields` já traz o
                 # `model_id_fallback` do slot).
                 **_slot_body_fields(_use_model),
+                **_role_fields,
             }
             # Timeout largo: /invoke/raw pode encadear principal→fallback (sonnet→opus)
             # DENTRO de uma única request quando o principal volta vazio (achado #30). 300s
