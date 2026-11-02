@@ -13,6 +13,7 @@ import { startTenantStatusListener, stopTenantStatusListener } from "./services/
 import { startCloudDeployWorker, stopCloudDeployWorker } from "./services/cloudDeployWorker.js";
 import { startEvolutionMergeWorker, stopEvolutionMergeWorker } from "./services/evolutionMergeWorker.js";
 import { startSpecChatWorker, stopSpecChatWorker } from "./services/specChatWorker.js";
+import { startAnomalyWorker, stopAnomalyWorker } from "./services/llmAnomaly.js";
 
 const app = await buildApp();
 
@@ -134,11 +135,15 @@ try {
   // Migração 089: coletor dos jobs do chat de spec cujo poll morreu (usuário saiu da tela ou a
   // api reiniciou). Sem ele, uma revisão de ~19 min do CTO era descartada pelo TTL dos agents.
   startSpecChatWorker();
+  // Tarefa 1.6: alerta estatístico de anomalia de LLM (flag ANOMALY_ALERTS, default off = nem agenda timer).
+  // Roda AO LADO do LLM Guard; nenhum alerta altera o corte dele.
+  const { pool: anomalyPool } = await import("./db/client.js");
+  startAnomalyWorker(() => anomalyPool);
 } catch (err) {
   app.log.error(err);
   process.exit(1);
 }
 
 // Desligar workers graciosamente ao receber sinal de término
-process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); process.exit(0); });
-process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); process.exit(0); });
+process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); stopAnomalyWorker(); process.exit(0); });
+process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); stopAnomalyWorker(); process.exit(0); });
