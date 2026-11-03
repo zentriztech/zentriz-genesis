@@ -192,6 +192,28 @@ describe("GET /api/dashboard/kpis — lead time (T5)", () => {
   });
 });
 
+describe("GET /api/dashboard/kpis — C8' fonte única (COST_SOURCE_LEDGER)", () => {
+  it("on: costPerDeliveryUsd sai do ledger do Guard (cobertura total do mês)", async () => {
+    process.env.COST_SOURCE_LEDGER = "on";
+    try {
+      currentUser = { id: "u", email: "u@x", role: "tenant_admin", tenantId: TENANT_A };
+      const base = tenantHandler();
+      queryMock.mockImplementation(async (sql: string) => {
+        if (sql.includes("MIN(created_at)")) return { rows: [{ first_at: "2020-01-01T00:00:00Z" }] };
+        if (sql.includes("FROM llm_call_ledger")) return { rows: [{ usd: "20.0000" }] };
+        return base(sql);
+      });
+      const res = await app.inject({ method: "GET", url: "/api/dashboard/kpis?scope=tenant" });
+      const body = res.json();
+      expect(body.cost.monthUsd).toBe(20);
+      expect(body.cost.costPerDeliveryUsd).toBeCloseTo(20 / 4);
+    } finally {
+      delete process.env.COST_SOURCE_LEDGER;
+      await app.close();
+    }
+  });
+});
+
 describe("GET /api/dashboard/kpis — grep-guard SQL de escopo tenant", () => {
   it("toda query de escopo tenant em buildTenantKpis contém 'tenant_id = $1'", () => {
     const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "dashboard.ts"), "utf-8");
