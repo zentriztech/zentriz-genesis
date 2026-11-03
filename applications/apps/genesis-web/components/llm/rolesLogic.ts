@@ -17,7 +17,8 @@ export function parseRolesMode(v: unknown): RolesMode {
   return s === "shadow" || s === "on" ? s : "off";
 }
 
-export const rolesUiEnabled = (mode: RolesMode): boolean => mode !== "off";
+/** Decisão do Jean (2026-11-03): a UI dos 3 papéis só aparece com `on` (em `shadow` o portal fica como o atual). */
+export const rolesUiEnabled = (mode: RolesMode): boolean => mode === "on";
 
 export interface RoleModelsState { orchestrator: string; advisor: string; staff: string }
 

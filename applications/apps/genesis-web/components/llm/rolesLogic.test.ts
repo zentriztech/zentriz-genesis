@@ -15,9 +15,9 @@ describe("parseRolesMode", () => {
            ["off", "off"], ["shadow", "shadow"], ["ON", "on"], [" on ", "on"]])("%s -> %s", (i, o) => {
     expect(parseRolesMode(i)).toBe(o);
   });
-  it("só shadow/on ligam a UI", () => {
+  it("só `on` liga a UI (decisão do Jean, 2026-11-03)", () => {
     expect(rolesUiEnabled("off")).toBe(false);
-    expect(rolesUiEnabled("shadow")).toBe(true);
+    expect(rolesUiEnabled("shadow")).toBe(false);
     expect(rolesUiEnabled("on")).toBe(true);
   });
 });
@@ -28,8 +28,11 @@ describe("payload (dupla escrita)", () => {
     expect(legacyFallbackValue("off", R, "legacy-fb")).toBe("legacy-fb");
     expect(legacyFallbackValue("off", R, "")).toBeNull();
   });
-  it.each(["shadow", "on"] as const)("%s: envia os 3 papéis; vazio vira null explícito", (m) => {
-    expect(rolesPayloadFields(m, R)).toEqual({
+  it("shadow: UI antiga ⇒ nenhum campo novo (decisão do Jean, 2026-11-03)", () => {
+    expect(rolesPayloadFields("shadow", R)).toEqual({});
+  });
+  it("on: envia os 3 papéis; vazio vira null explícito", () => {
+    expect(rolesPayloadFields("on", R)).toEqual({
       model_orchestrator: R.orchestrator, model_advisor: R.advisor, model_staff: null,
     });
   });
