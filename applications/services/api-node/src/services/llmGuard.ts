@@ -26,6 +26,7 @@
 import { costUsd } from "../lib/modelPricing.js";
 import { llmRolesMode, normalizeLlmRole } from "../lib/llmRoles.js";
 import { wasteTelemetryMode, normalizeCallReason, normalizeIdemKey } from "../lib/wasteTelemetry.js";
+import { dailyTokenQuotaMode } from "../lib/costSource.js";
 import { PRE_FACTORY_STATUSES } from "./projectStatus.js";
 import { isSesConfigured, sendEmail } from "./emailSender.js";
 import { buildEstimator, fetchHistoryBuckets } from "./specEnrichment.js";
@@ -309,6 +310,55 @@ export function estimateCallUsd(model: string | null | undefined, estInputTokens
   return costUsd(model, Math.max(0, estInputTokens), out);
 }
 
+/**
+ * C8' — cota diária de tokens do TENANT (`tenant_llm_configs.daily_token_quota`, slot ativo de menor
+ * prioridade, o mesmo que a UI exibe). Tokens = input + output do `llm_call_ledger` no dia UTC corrente
+ * (cache fica de fora: não é consumo de janela do provider). NULL ou <= 0 = sem cota.
+ *
+ * Flag `DAILY_TOKEN_QUOTA`: off ⇒ retorna null sem consultar nada · shadow ⇒ só registra o evento
+ * `daily_token_quota_shadow` e devolve null (nunca nega, nunca lança) · on ⇒ nega pelo MESMO caminho do
+ * Guard, com o código de teto diário da plataforma (`GLOBAL_DAILY_CAP`, que o runner trata como espera
+ * com teto, C1') e SEM pausar o projeto nem ligar a chave geral: a cota se renova à 00:00 UTC.
+ * Em `on`, erro de infra propaga para o fail-closed do preflight (GUARD_ERROR).
+ */
+export async function checkDailyTokenQuota(
+  db: Queryable, tenantId: string | null, projectId: string | null, mode = dailyTokenQuotaMode(),
+): Promise<Extract<GuardDecision, { allow: false }> | null> {
+  if (mode === "off" || !tenantId) return null;
+  const run = async (): Promise<Extract<GuardDecision, { allow: false }> | null> => {
+    const q = (await db.query(
+      `SELECT daily_token_quota FROM tenant_llm_configs
+        WHERE tenant_id = $1 AND is_active = TRUE ORDER BY priority ASC LIMIT 1`,
+      [tenantId],
+    )).rows[0];
+    const quota = q?.daily_token_quota == null ? 0 : num(q.daily_token_quota);
+    if (quota <= 0) return null;
+    const used = num((await db.query(
+      `SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS tokens FROM llm_call_ledger
+        WHERE tenant_id = $1 AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`,
+      [tenantId],
+    )).rows[0]?.tokens);
+    if (used < quota) return null;
+    const kind = mode === "on" ? "daily_token_quota_denied" : "daily_token_quota_shadow";
+    const recent = (await db.query(
+      `SELECT 1 FROM llm_guard_events WHERE kind = $1 AND detail->>'tenantId' = $2
+          AND created_at > now() - interval '1 hour' LIMIT 1`,
+      [kind, tenantId],
+    )).rows[0];
+    if (!recent) await logEvent(db, kind, projectId, { tenantId, quotaTokens: quota, usedTokens: used });
+    if (mode !== "on") return null;
+    return {
+      allow: false, code: "GLOBAL_DAILY_CAP",
+      message: `Cota diária de ${Math.round(quota).toLocaleString("pt-BR")} tokens do tenant atingida (${Math.round(used).toLocaleString("pt-BR")} usados hoje, UTC) — LLM bloqueado até a renovação à 00:00 UTC.`,
+    };
+  };
+  if (mode === "on") return run();
+  try { return await run(); } catch (e) {
+    console.warn(`[llmGuard] cota diária (shadow) falhou sem efeito: ${msg(e)}`);
+    return null;
+  }
+}
+
 export async function preflight(db: Queryable, input: PreflightInput): Promise<GuardDecision> {
   try {
     const s = await getGuardSettings(db);
@@ -377,6 +427,8 @@ export async function preflight(db: Queryable, input: PreflightInput): Promise<G
       await pauseForBudget(db, owner, reason);
       return { allow: false, code: "BUDGET_INSUFFICIENT", budgetProjectId: owner.ownerId, message: `Projeto pausado: ${reason}.` };
     }
+    const quotaDenied = await checkDailyTokenQuota(db, owner.tenantId, pid);
+    if (quotaDenied) return { ...quotaDenied, budgetProjectId: owner.ownerId };
     return { allow: true, remainingUsd: remaining, budgetProjectId: owner.ownerId };
   } catch (e) {
     // FAIL-CLOSED: a lição do incidente é que gasto sem controle é pior do que trabalho parado.
