@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 
 from orchestrator.agents import llm_guard as _llm_guard
 from orchestrator.agents import llm_roles as _llm_roles
+from orchestrator import guard_denial as _guard_denial  # C1': negativa do Guard ≠ falha do pipeline
 
 # T01: sanitiza AWS_PROFILE="" (string vazia) — boto3 procura profile literal ""
 # e falha com ProfileNotFound. `unset` no compose vira "" via ${VAR:-}, então
@@ -4017,6 +4018,88 @@ def _update_task_status(project_id: str, task_id: str, current_status: str, new_
     return _update_task(project_id, task_id, status=new_status)
 
 
+# ── C1': negativa do LLM Guard NÃO é falha do pipeline (plano 27, 27c F01/F18) ─────────────────────
+# A negativa (orçamento, kill switch, tetos) chega em dois formatos (`LlmGuardDenied` e `RuntimeError`
+# com `http_code=402`); `_guard_denial.is_guard_denial` reconhece os dois. Tratamento: a task volta ao
+# status anterior SEM contar tentativa, o checkpoint é salvo e o run sai do laço de forma retomável
+# (`stopped`, nunca `failed`/`BLOCKED`). Negativa de ORÇAMENTO não se repete; as de plataforma
+# (kill switch/tetos/guard fora) esperam com backoff+jitter e teto de verificações, depois encerram.
+# `GUARD_DENIAL_GRACEFUL=off` restaura o comportamento antigo. O Guard segue soberano: nada aqui libera.
+_RUN_ENDED_STATUSES = ("stopped", "accepted", "completed", "failed")
+
+
+def _guard_wait(seconds: float) -> None:
+    """Espera `seconds` em fatias curtas, saindo cedo no SIGTERM (nunca um sleep longo cego)."""
+    remaining = float(seconds)
+    while remaining > 0 and not _shutdown_requested:
+        step = min(remaining, 5.0)
+        time.sleep(step)
+        remaining -= step
+
+
+def _save_checkpoint_best_effort(pipeline_ctx) -> None:
+    if pipeline_ctx is None:
+        return
+    try:
+        pipeline_ctx.save_checkpoint(STATE_DIR)
+    except Exception as _e_ck:
+        logger.debug("[C1'] save_checkpoint após negativa do Guard falhou (não crítico): %s", _e_ck)
+
+
+def _stop_run_after_guard_denial(project_id: str | None, code: str, request_id: str) -> None:
+    """Deixa o projeto retomável (`stopped`). Se o Guard já o pausou (`stopped_by='budget'`), NÃO duplica."""
+    current = _get_project_status(project_id) if project_id else None
+    if current in _RUN_ENDED_STATUSES:
+        logger.info("[C1'] projeto já está '%s' (pausa do Guard preservada); nada a gravar.", current)
+    else:
+        _patch_project({"status": "stopped", "blocked_reason": f"guard_denied: {code}"})
+    _post_step(
+        f"⏸️ Run pausado de forma retomável: o LLM Guard de custo negou a chamada ({code}). "
+        f"As tarefas foram devolvidas ao status anterior (nenhuma tentativa foi contada) e o checkpoint foi salvo. "
+        f"Resolva a causa (orçamento/chave geral) e reinicie o run pelo portal.",
+        request_id,
+    )
+
+
+def _on_guard_denial(exc: BaseException, *, project_id: str | None, request_id: str, pipeline_ctx,
+                     state: dict, where: str, task_id: str | None = None) -> float | None:
+    """Trata UMA negativa dentro do laço. Devolve os segundos a esperar antes de reverificar,
+    ou None quando o run deve sair do laço (negativa de orçamento, ou teto de verificações esgotado)."""
+    code = _guard_denial.guard_denial_code(exc) or "DENIED"
+    state["checks"] = int(state.get("checks", 0)) + 1
+    n, limit = state["checks"], _guard_denial.max_checks()
+    logger.warning("[C1'] LLM Guard negou (%s) em %s%s — verificação %d/%d.",
+                   code, where, f" task={task_id}" if task_id else "", n, limit)
+    _save_checkpoint_best_effort(pipeline_ctx)
+    if n == 1:
+        _post_step(
+            f"⏸️ O LLM Guard de custo negou a chamada do {where}"
+            f"{f' (task {task_id})' if task_id else ''}: {code}. A task foi devolvida ao status anterior, "
+            f"sem contar tentativa de rework/repair; o run não será marcado como falho.",
+            request_id,
+        )
+    if _guard_denial.is_budget_denial(exc) or n >= limit:
+        _stop_run_after_guard_denial(project_id, code, request_id)
+        return None
+    return _guard_denial.backoff_seconds(n)
+
+
+def _pause_run_after_guard_denial(exc: BaseException, project_id: str | None, request_id: str,
+                                  pipeline_ctx, run_log) -> int:
+    """Negativa do Guard nas fases ANTES do laço (Engineer/CTO/PM): checkpoint + `stopped`, nunca `failed`.
+    Sem espera: a fase não é reentrante dentro do mesmo processo; o run é retomado pelo portal."""
+    code = _guard_denial.guard_denial_code(exc) or "DENIED"
+    logger.warning("[C1'] LLM Guard negou (%s) antes do laço Dev/QA — run pausado, não falho.", code)
+    _save_checkpoint_best_effort(pipeline_ctx)
+    _stop_run_after_guard_denial(project_id, code, request_id)
+    if run_log:
+        try:
+            run_log.stop_run(reason="stopped")
+        except Exception:
+            pass
+    return 0
+
+
 def _run_monitor_loop(
     project_id: str,
     spec_ref: str,
@@ -4120,6 +4203,9 @@ def _run_monitor_loop(
     # Throttle: consulta GET /cost no máximo a cada COST_GATE_INTERVAL segundos.
     _last_cost_gate_check = 0.0
     COST_GATE_INTERVAL = float(os.environ.get("COST_GATE_INTERVAL_SEC", "60") or 60)
+    # C1': estado da negativa do Guard (verificações consecutivas; `pending` = negativa vista pelo QA,
+    # que roda numa função aninhada e não pode dar break/continue no laço).
+    _gd_state: dict = {"checks": 0, "pending": None}
 
     while True:
         if _shutdown_requested:
@@ -4292,6 +4378,7 @@ def _run_monitor_loop(
                         pipeline_ctx=pipeline_ctx,   # GAP-54b: o QA mede contra o CONTRATO, não contra o resumo
                         task_dict=task,
                     )
+                    _gd_state["checks"] = 0  # C1': chamada paga passou pelo Guard ⇒ zera a sequência de negativas
                     _audit_log("qa", request_id, qa_response, task_id=tid, round_num=_qa_rework + 1)
                     # GAP-54b: Dev e QA desta task acabaram de receber o dossiê — atualiza o artefato de
                     # cobertura (uma linha por papel; a última emissão é a que vale).
@@ -4409,6 +4496,11 @@ def _run_monitor_loop(
                                 request_id,
                             )
                 except Exception as e:
+                    if _guard_denial.graceful_enabled() and _guard_denial.is_guard_denial(e):
+                        # C1': negativa do Guard ≠ falha do QA. A task segue em WAITING_REVIEW (o QA não
+                        # muda o status antes da chamada) e nenhum contador de rework/fail é tocado.
+                        _gd_state["pending"] = (e, tid)
+                        return
                     logger.exception("[Monitor Loop] QA falhou para task %s", tid)
                     _post_error(str(e), request_id, e)
 
@@ -4424,6 +4516,15 @@ def _run_monitor_loop(
                 _qt = qa_tasks_batch[0]
                 _qt_id = str(_qt.get("taskId") or _qt.get("task_id") or "").strip()
                 _run_qa_task(_qt, task_artifacts_for_qa.get(_qt_id))
+            if _gd_state.get("pending") is not None:
+                _gd_exc, _gd_tid = _gd_state["pending"]
+                _gd_state["pending"] = None
+                _gd_wait = _on_guard_denial(_gd_exc, project_id=project_id, request_id=request_id,
+                                            pipeline_ctx=pipeline_ctx, state=_gd_state, where="QA", task_id=_gd_tid)
+                if _gd_wait is None:
+                    break
+                _guard_wait(_gd_wait)
+                continue
             time.sleep(2)
             continue
 
@@ -4558,6 +4659,7 @@ def _run_monitor_loop(
                         dev_variant=_dev_variant,
                         rework_attempt=_task_rework_count,
                     )
+                    _gd_state["checks"] = 0  # C1': chamada paga passou pelo Guard ⇒ zera a sequência de negativas
                     _audit_log("dev", request_id, dev_response, task_id=task_id, round_num=_task_rework_count + 1)
                     if _llm_roles.is_on() and _llm_guard.normalize_role(dev_response.get("_effective_role")):
                         dev_effective_role[_norm_tid] = _llm_roles.apply_floor(
@@ -4734,6 +4836,18 @@ def _run_monitor_loop(
                                 request_id,
                             )
                 except Exception as e:
+                    if _guard_denial.graceful_enabled() and _guard_denial.is_guard_denial(e):
+                        # C1': negativa do Guard ≠ falha do Dev. Devolve a task ao status ANTERIOR (direto, sem
+                        # LEI 9: é reversão, não transição de trabalho), sem contar rework/repair, sem BLOCKED
+                        # terminal e sem gastar a única tentativa do Monitor Autônomo (FT-11).
+                        _update_task(project_id, task_id, status=dev_task.get("status") or "ASSIGNED")
+                        _gd_wait = _on_guard_denial(e, project_id=project_id, request_id=request_id,
+                                                    pipeline_ctx=pipeline_ctx, state=_gd_state, where="Dev",
+                                                    task_id=str(task_id))
+                        if _gd_wait is None:
+                            break
+                        _guard_wait(_gd_wait)
+                        continue
                     logger.exception("[Monitor Loop] Dev falhou")
                     _post_error(str(e), request_id, e)
                     _update_task_status(project_id, task_id, "IN_PROGRESS", "BLOCKED")
@@ -7396,6 +7510,9 @@ def main() -> int:
         return 0
 
     except Exception as e:
+        if _guard_denial.graceful_enabled() and _guard_denial.is_guard_denial(e):
+            # C1': negativa do Guard antes do laço Dev/QA (Engineer/CTO/PM) ⇒ pausa retomável, não `failed`.
+            return _pause_run_after_guard_denial(e, project_id, request_id, pipeline_ctx, _run_log)
         logger.exception("[Pipeline] Falha no pipeline")
         error_info = _extract_error_info(e)
         human_msg = error_info.get("human_message", f"Erro no pipeline: {e}")
