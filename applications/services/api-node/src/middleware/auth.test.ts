@@ -210,3 +210,27 @@ describe("authMiddleware — token de run escopado (MUST-MATCH) e leitura de anc
     expect(r.sent.code).toBeUndefined();
   });
 });
+
+describe("AV / M-12 — JWT sem `sub` não muta", () => {
+  const withMethod = (token: string, method: string) => { const r = fakeReqReply(token); (r.req as { method: string }).method = method; return r; };
+  const noSub = () => signToken({ email: "a@x.com", role: "tenant_admin", tenantId: "t1" } as never);
+  it.each(["POST", "PUT", "PATCH", "DELETE"])("%s com token sem sub → 401 e nenhum request.user", async (m) => {
+    const r = withMethod(noSub(), m);
+    await authMiddleware(r.req as never, r.reply);
+    expect(r.sent.code).toBe(401);
+    expect((r.req as { user?: unknown }).user).toBeUndefined();
+  });
+  it("GET com token sem sub segue (leitura não grava autor)", async () => {
+    const r = withMethod(noSub(), "GET");
+    await authMiddleware(r.req as never, r.reply);
+    expect(r.sent.code).toBeUndefined();
+  });
+  it("token de serviço (svc) sem sub não é quebrado; token com sub muta normalmente", async () => {
+    let r = withMethod(signToken({ email: "r@x", role: "user", tenantId: "t1", svc: "runner" } as never), "POST");
+    await authMiddleware(r.req as never, r.reply);
+    expect(r.sent.code).toBeUndefined();
+    r = withMethod(signToken({ sub: "u1", email: "a@x.com", role: "tenant_admin", tenantId: "t1" }), "POST");
+    await authMiddleware(r.req as never, r.reply);
+    expect(r.sent.code).toBeUndefined();
+  });
+});

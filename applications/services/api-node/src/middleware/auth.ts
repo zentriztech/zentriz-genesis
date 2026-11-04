@@ -65,6 +65,13 @@ export async function authMiddleware(request: FastifyRequest, reply: FastifyRepl
   if (!payload) {
     return reply.status(401).send({ code: "UNAUTHORIZED", message: "Token inválido" });
   }
+  // AV/M-12: JWT SEM `sub` (autenticado, mas sem identidade de usuário) não pode mutar nada — rotas que gravam `user.id` (autor, auditoria,
+  // `created_by`) davam 500 ou deixavam a trilha com autor nulo. Recusa aqui, uma vez, para toda rota mutante. Leitura (GET/HEAD/OPTIONS) segue,
+  // e token de serviço/máquina (`svc`) fica fora: ele tem identidade própria (runner, watchdog) e é amarrado por projeto mais abaixo.
+  const method = String((request as { method?: string }).method ?? "").toUpperCase();
+  if ((typeof payload.sub !== "string" || !payload.sub.trim()) && !payload.svc && ["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+    return reply.status(401).send({ code: "UNAUTHORIZED", message: "Token sem identidade de usuário (sub): faça login de novo." });
+  }
   const user: AuthUser = {
     id: payload.sub,
     email: payload.email,
