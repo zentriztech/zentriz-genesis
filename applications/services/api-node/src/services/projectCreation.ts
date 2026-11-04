@@ -18,6 +18,13 @@ import { DEPLOY_FORMATS, type DeployFormat } from "./provision/deployTargets.js"
 import { normalizeProductId, resolveInboxProductId, assertProductOwnership } from "./inbox.js";
 import { recomputeProductLifecycle } from "./productLifecycle.js";
 import { computeSpecTreeHash, sha256Hex } from "../lib/specTreeHash.js";
+import { isVersionConflict } from "./evolutionUniqueness.js";
+
+/** Duas criações de versão da mesma linhagem correram e a segunda perdeu no índice (rotas mapeiam para 409). */
+export class VersionConflictError extends Error {
+  readonly code = "VERSION_CONFLICT";
+  constructor(message: string) { super(message); this.name = "VersionConflictError"; }
+}
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 
@@ -211,12 +218,22 @@ export async function createProjectFromSpec(
     } : {}),
   });
 
-  const projectResult = await client.query(
-    `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number, extra, product_id, spec_fingerprint)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10) RETURNING id`,
-    [tenantId, createdBy, title, files[0].filename, isDraft ? "draft" : "spec_submitted",
-     rootParentId, versionNumber, extraJson, resolvedProductId, specFingerprint],
-  );
+  let projectResult;
+  try {
+    projectResult = await client.query(
+      `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number, extra, product_id, spec_fingerprint)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10) RETURNING id`,
+      [tenantId, createdBy, title, files[0].filename, isDraft ? "draft" : "spec_submitted",
+       rootParentId, versionNumber, extraJson, resolvedProductId, specFingerprint],
+    );
+  } catch (e) {
+    // Fase 1' (1.2): a numeração por CONTAGEM da árvore (acima) corre; o índice parcial
+    // uq_projects_parent_version_live transforma a duplicata silenciosa em conflito explícito (409 na rota).
+    if (isVersionConflict(e)) {
+      throw new VersionConflictError(`Já existe a versão ${versionNumber} desta linhagem (criada ao mesmo tempo). Repita a operação.`);
+    }
+    throw e;
+  }
   const projectId = projectResult.rows[0].id as string;
 
   // gravar arquivos em disco + registrar. RFC-0004 T1.3: nome REAL (deduped basename) em

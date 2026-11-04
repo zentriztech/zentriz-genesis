@@ -85,6 +85,10 @@ try {
     // `collectSpecSplitsTick` (no specChatWorker) recupera o resultado.
     const { reapOrphanSplits } = await import("./services/specSplit.js");
     await reapOrphanSplits(pool).catch((e) => console.error("[boot] reapOrphanSplits:", e));
+    // Fase 1' (1.2): índices parciais de unicidade do /evolve. Passo de boot em TS (não migration .sql):
+    // pré-checa duplicatas e, se houver, NÃO cria o índice, loga e a api sobe mesmo assim.
+    const { ensureEvolutionUniqueness } = await import("./services/evolutionUniqueness.js");
+    await ensureEvolutionUniqueness(pool).catch((e) => console.error("[boot] ensureEvolutionUniqueness:", e));
     // Evoluir H3: jobs do planner de RFC em voo no restart → 'interrupted' (estado terminal com causa).
     const { reapOrphanPlanJobs } = await import("./services/evolutionPlanner.js");
     await reapOrphanPlanJobs(pool).catch((e) => console.error("[boot] reapOrphanPlanJobs:", e));

@@ -6,7 +6,7 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import type { ValidationFinding } from "../services/specValidation.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
-import { createProjectFromSpec } from "../services/projectCreation.js";
+import { createProjectFromSpec, VersionConflictError } from "../services/projectCreation.js";
 import { InboxError } from "../services/inbox.js";
 import { extractUiuxSpec, type UiuxProvider } from "../services/uiuxExtract.js";
 import { ensureFreshUiuxCreds } from "../services/uiuxAuth.js";
@@ -933,6 +933,10 @@ export async function specRoutes(app: FastifyInstance) {
       if (e instanceof InboxError) {
         return reply.status(e.code === "PRODUCT_NOT_FOUND" ? 404 : 409)
           .send({ code: e.code, message: e.message });
+      }
+      // Fase 1' (1.2): duas versões da mesma linhagem criadas ao mesmo tempo — a perdedora recebe 409.
+      if (e instanceof VersionConflictError) {
+        return reply.status(409).send({ code: e.code, message: e.message });
       }
       throw e;
     } finally {
