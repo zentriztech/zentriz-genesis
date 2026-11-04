@@ -41,6 +41,12 @@ export async function connectDeclarationRoutes(app: FastifyInstance) {
       )).rows[0] as { id: string; tenant_id: string | null; created_by: string | null; status: string; extra: Record<string, unknown> | null } | undefined;
       if (!proj || !canAccessProjectRow(user, proj)) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
       if (!SPEC_EDITABLE_STATUSES.has(proj.status)) return reply.status(409).send({ code: "SPEC_LOCKED", message: `Spec bloqueada: projeto em '${proj.status}'.` });
+      if (proj.status === "card_draft") {
+        // Fase 3 (3.3): connect.yaml é arquivo da árvore herdada — o rascunho de um card não o gera.
+        const { cardDraftUnsupportedBlock } = await import("../services/cardSpecGuard.js");
+        const block = await cardDraftUnsupportedBlock(pool as never, proj.id, "A declaração Connect", proj.status);
+        if (block) return reply.status(block.status).send(block.body);
+      }
       const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
       if (!agentsUrl) return reply.status(503).send({ code: "AGENTS_UNAVAILABLE", message: "Serviço de agentes não configurado." });
       const base = agentsUrl.replace(/\/$/, "");

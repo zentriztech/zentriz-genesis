@@ -41,6 +41,7 @@ import {
 import { extractSpecMarkdown, httpPost, httpGet } from "./specs.js";
 import { parseSpecPath } from "./specFiles.js";
 import type { ValidationFinding } from "../services/specValidation.js";
+import { buildCardBaseContextBlock, cardBudgetBlock, cardSpecWriteBlock, loadCardDraftInfo } from "../services/cardSpecGuard.js";
 import { productScopeEnabled, buildProductMap, selectSiblingBodies } from "../services/productContext.js";
 import { applySpecEditResponse, looksLikeEdits } from "../services/specFileEdits.js";
 import { buildReanchorFacts, isReanchorable } from "../services/specEditReanchor.js";
@@ -185,10 +186,15 @@ interface ChatContext {
    * fatos que só o builder conhece: qual é o arquivo alvo e quais corpos de irmão couberam no prompt.
    */
   specTree: SpecTreeEntry[];
+  /**
+   * Fase 3 (3.3): quando o projeto é o RASCUNHO de um card (`card_draft`), a spec da versão CORRENTE em modo SOMENTE LEITURA + a
+   * regra de escopo (o card escreve só a pasta dele). "" para qualquer outro projeto — os prompts ficam byte a byte como eram.
+   */
+  cardBaseBlock?: string;
 }
 const EMPTY_CTX: ChatContext = {
   siblingsBlock: "", findingsBlock: "", findings: [], derivedStatus: "never_validated",
-  productMapBlock: "", contextWarnings: [], emitV2: false, specTree: [],
+  productMapBlock: "", contextWarnings: [], emitV2: false, specTree: [], cardBaseBlock: "",
 };
 
 function fmtFinding(f: ValidationFinding): string {
@@ -308,9 +314,12 @@ async function loadChatContext(
       console.warn(`[SpecChat] ⚠️ árvore da spec não medida: ${e instanceof Error ? e.message : String(e)}`);
     }
 
+    // Fase 3 (3.3): rascunho de card ⇒ a spec da versão corrente entra como contexto SOMENTE LEITURA.
+    const cardBaseBlock = await buildCardBaseContextBlock(pool as never, projectId);
+
     return {
       siblingsBlock, findingsBlock, findings, derivedStatus: latest?.status ?? "never_validated",
-      productMapBlock, contextWarnings, emitV2, specTree,
+      productMapBlock, contextWarnings, emitV2, specTree, cardBaseBlock,
     };
   } catch (e) {
     console.warn(`[SpecChat] loadChatContext falhou (best-effort): ${e instanceof Error ? e.message : String(e)}`);
@@ -402,6 +411,9 @@ No summary (pode ser mais longo NESTE turno): liste GAPs resolvidos (e como), pr
 perguntas de dimensionamento e features propostas.`
     : "";
 
+  // Fase 3 (3.3): spec da versão corrente (somente leitura) do rascunho de card — fora do `emitV2` de propósito (vai sempre no `task`).
+  const cardSection = ctx.cardBaseBlock ? `\n\n${ctx.cardBaseBlock}` : "";
+
   const persona = resolveGaps
     ? "Você é um CTO sênior E estrategista de produto, com profundidade de ESPECIALISTA nos temas da spec"
     : "Você é um CTO sênior refinando uma especificação de produto EM CONJUNTO com o usuário";
@@ -450,7 +462,7 @@ produto inteiro. O RELATÓRIO DE VALIDAÇÃO lista GAPs já detectados na spec.
 ÚLTIMA MENSAGEM DO USUÁRIO: "${lastUser.replace(/"/g, '\\"')}"
 
 HISTÓRICO DO CHAT:
-${transcript}${contextSections}
+${transcript}${contextSections}${cardSection}
 `.trim();
 
   return {
@@ -694,6 +706,8 @@ export function buildRawFileRequest(
     contextBlock
       ? `--- CONTEXTO SÓ-LEITURA (onde este arquivo vive; NÃO o copie para o arquivo) ---\n${contextBlock}\n--- FIM DO CONTEXTO ---\n`
       : "",
+    // Fase 3 (3.3): spec da versão corrente do card (somente leitura). "" fora do rascunho de card.
+    ctx.cardBaseBlock ? `${ctx.cardBaseBlock}\n` : "",
     // 🔴 GAP-163: o MESMO fato nos dois caminhos (lição do GAP-156). No chat humano ele importa por um
     // motivo próprio: o pedido costuma ser "ajuste a seção X", e uma remissão que já não casa é
     // exatamente o tipo de coisa que o editor reescreve por cima sem saber que estava quebrada.
@@ -1103,6 +1117,8 @@ export function buildGapFileRequest(
     contextBlock
       ? `--- CONTEXTO SÓ-LEITURA (onde este arquivo vive; NÃO o copie para o arquivo) ---\n${contextBlock}\n--- FIM DO CONTEXTO ---\n`
       : "",
+    // Fase 3 (3.3): spec da versão corrente do card (somente leitura). "" fora do rascunho de card.
+    ctx.cardBaseBlock ? `${ctx.cardBaseBlock}\n` : "",
     // A5.5: vem ANTES do conteúdo a editar de propósito — quando o editor chegar ao arquivo alvo já
     // sabe o que o irmão define, e a última coisa que lê antes de gerar é o pedido, não o irmão.
     siblingBlock
@@ -2006,7 +2022,8 @@ export async function dispatchGapFileJob(opts: {
   }
   // Mapa do produto como contexto só-leitura (Fase 1). Best-effort e só com a flag ligada — sem ele
   // o CTO-editor não sabe onde este arquivo vive e duplica o que já está no irmão.
-  const ctx = productScopeEnabled()
+  // Fase 3 (3.3): no rascunho de um card o contexto SEMPRE carrega (é nele que vem a spec da versão corrente, somente leitura).
+  const ctx = productScopeEnabled() || (await loadCardDraftInfo(pool as never, opts.projectId))
     ? await loadChatContext(opts.projectId, opts.fileContent, opts.userMessage, { siblingBodies: false })
     : EMPTY_CTX;
   // A5.5: o mapa do produto diz ONDE o arquivo vive; o irmão citado diz O QUE ele já normatiza — é o
@@ -2455,16 +2472,26 @@ export async function specChatRoutes(app: FastifyInstance) {
       // tenant do projeto: usado só para relatório/retenção na linha do job — NUNCA para autorizar
       // (a autorização é `canAccessProjectRow` + binding de dono).
       let projectTenantId: string | null = null;
+      let isCardDraft = false;
       if (projectId) {
         const client = await pool.connect();
         try {
           const proj = (await client.query(
-            "SELECT tenant_id, created_by FROM projects WHERE id = $1", [projectId],
+            "SELECT tenant_id, created_by, status FROM projects WHERE id = $1", [projectId],
           )).rows[0];
           if (!proj || !canAccessProjectRow(user, proj)) {
             return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
           }
           projectTenantId = (proj as { tenant_id?: string | null }).tenant_id ?? null;
+          // Fase 3 (3.3): Chat IA / Resolver GAPs sobre o RASCUNHO de um card — trava CARD_SPEC_LOCKED (card fora de draft/refining),
+          // escopo do arquivo (só a pasta do card) e orçamento COMPARTILHADO (negativa do Guard ⇒ 402 claro, o card não é tocado).
+          // Projeto comum: nada disto roda.
+          if ((proj as { status?: string }).status === "card_draft") {
+            isCardDraft = true;
+            const block = (await cardSpecWriteBlock(client as never, projectId, { knownStatus: "card_draft", ...(filePath ? { relPath: filePath } : {}) }))
+              ?? (await cardBudgetBlock(client as never, projectId, "card_draft"));
+            if (block) return reply.status(block.status).send(block.body);
+          }
         } finally {
           client.release();
         }
@@ -2479,7 +2506,7 @@ export async function specChatRoutes(app: FastifyInstance) {
       // para o CTO agir com precisão. Best-effort (falha → contexto vazio, sem derrubar a rota).
       // Fase 1 (P4): o modo POR-ARQUIVO deixa de rodar cego — recebe o MAPA do produto e os GAPs
       // (sem corpo de irmãos). Com a flag off ambos os caminhos ficam como estavam.
-      const loadCtx = projectId && (!filePath || productScopeEnabled());
+      const loadCtx = projectId && (!filePath || productScopeEnabled() || isCardDraft);
       const ctx = loadCtx
         ? await loadChatContext(projectId!, specMarkdown, lastUser ?? "", { siblingBodies: !filePath })
         : EMPTY_CTX;

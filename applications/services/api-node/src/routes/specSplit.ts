@@ -18,6 +18,7 @@ import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { SPEC_EDITABLE_STATUSES } from "../services/projectStatus.js";
+import { cardDraftUnsupportedBlock } from "../services/cardSpecGuard.js";
 import {
   startSplitProposal, getSplitProposal, getLatestSplitProposal, applySplitProposal,
   discardSplitProposal, specSplitEnabled, isTerminalSplitStatus, type SpecSplitProposal,
@@ -92,6 +93,11 @@ export async function specSplitRoutes(app: FastifyInstance) {
           message: `Spec bloqueada para edição: projeto em '${proj.status}'.`,
         });
       }
+      if (proj.status === "card_draft") {
+        // Fase 3 (3.3): o rascunho de um card não se divide (criaria README/arquivos fora da pasta do card).
+        const block = await cardDraftUnsupportedBlock(pool as never, projectId, "Dividir a spec", proj.status);
+        if (block) return reply.status(block.status).send(block.body);
+      }
       const res = await startSplitProposal(pool, {
         projectId, tenantId: proj.tenantId, ownerUserId: user.id,
         modelId: request.body?.modelId?.trim() || null,
@@ -151,6 +157,11 @@ export async function specSplitRoutes(app: FastifyInstance) {
           code: "SPEC_LOCKED",
           message: `Spec bloqueada para edição: projeto em '${proj.status}'.`,
         });
+      }
+      if (proj.status === "card_draft") {
+        // Fase 3 (3.3): o rascunho de um card não se divide (criaria README/arquivos fora da pasta do card).
+        const block = await cardDraftUnsupportedBlock(pool as never, p.projectId, "Dividir a spec", proj.status);
+        if (block) return reply.status(block.status).send(block.body);
       }
       const res = await applySplitProposal(pool, p.id, user.id ?? null);
       if (!res.ok) return reply.status(res.status).send({ code: res.code, message: res.message });

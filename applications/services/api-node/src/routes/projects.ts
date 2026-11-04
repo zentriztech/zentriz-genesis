@@ -3342,11 +3342,20 @@ export async function projectRoutes(app: FastifyInstance) {
           });
         }
         const specRow = (await client.query(
-          "SELECT file_path, filename FROM project_spec_files WHERE project_id = $1 ORDER BY is_primary DESC, created_at DESC LIMIT 1",
+          "SELECT file_path, filename, rel_dir FROM project_spec_files WHERE project_id = $1 ORDER BY is_primary DESC, created_at DESC LIMIT 1",
           [id]
         )).rows[0];
         if (!specRow?.file_path) {
           return reply.status(404).send({ code: "NOT_FOUND", message: "Spec não encontrada para este projeto" });
+        }
+        // Fase 3 (3.3): rascunho de CARD — trava CARD_SPEC_LOCKED e escopo de escrita (só a pasta do card). Projeto comum: nada.
+        if (String(row.status) === "card_draft") {
+          const { cardSpecWriteBlock } = await import("../services/cardSpecGuard.js");
+          const block = await cardSpecWriteBlock(client as never, id, { knownStatus: String(row.status), relDir: specRow.rel_dir ?? "", filename: specRow.filename });
+          if (block) return reply.status(block.status).send(block.body);
+          if (startNow) {
+            return reply.status(409).send({ code: "CARD_OPERATION_UNSUPPORTED", message: "O rascunho de um card não vai à fábrica por aqui: promova pelo card (POST /api/cards/:id/promote)." });
+          }
         }
         // H2 (adversarial Onda 2): ESTE era o único caminho de escrita da spec SEM pré-condição —
         // "Salvar rascunho" sobrescrevia o disco às cegas. Com o laço autônomo ligado isso apaga em
@@ -3391,6 +3400,10 @@ export async function projectRoutes(app: FastifyInstance) {
           "UPDATE projects SET spec_dirty_at = now() WHERE id = $1",
           [id],
         );
+        if (String(row.status) === "card_draft") {
+          const { noteCardSpecWrite } = await import("../services/cardSpecGuard.js");
+          await noteCardSpecWrite(pool as never, id, { actorId: user.id, knownStatus: String(row.status) });
+        }
         if (title?.trim()) {
           await client.query("UPDATE projects SET title = $1, updated_at = NOW() WHERE id = $2", [title.trim(), id]);
         }

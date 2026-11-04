@@ -15,6 +15,7 @@ import { canAccessProjectRow, isProjectOwner } from "../lib/projectAccess.js";
 import { SPEC_EDITABLE_STATUSES } from "../services/projectStatus.js";
 import { httpPost } from "./specs.js";
 import { createPlanJob, getPlanJob, runEvolutionPlan } from "../services/evolutionPlanner.js";
+import { cardBudgetBlock, cardSpecWriteBlock, noteCardSpecWrite } from "../services/cardSpecGuard.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -39,6 +40,11 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
       if (!proj || !canAccessProjectRow(user, proj)) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
       if (proj.extra?.evolution !== true) return reply.status(409).send({ code: "NOT_EVOLUTION", message: "Este projeto não é uma evolução — use Evoluir no projeto aceito." });
       if (!SPEC_EDITABLE_STATUSES.has(proj.status)) return reply.status(409).send({ code: "SPEC_LOCKED", message: `Spec bloqueada: projeto em '${proj.status}'.` });
+      if (proj.status === "card_draft") {
+        // Fase 3 (3.3): planner de RFC sobre o rascunho do card — trava, escopo (RFC/ADR do card) e orçamento compartilhado (Guard).
+        const block = (await cardSpecWriteBlock(pool as never, proj.id, { knownStatus: proj.status })) ?? (await cardBudgetBlock(pool as never, proj.id, proj.status));
+        if (block) return reply.status(block.status).send(block.body);
+      }
       const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
       if (!agentsUrl) return reply.status(503).send({ code: "AGENTS_UNAVAILABLE", message: "Serviço de agentes não configurado." });
 
@@ -140,6 +146,10 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
       if (!proj || !canAccessProjectRow(user, proj)) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
       if (proj.extra?.evolution !== true) return reply.status(409).send({ code: "NOT_EVOLUTION", message: "RFC de evolução só em projeto de evolução (senão fica solto, sem gate)." });
       if (!SPEC_EDITABLE_STATUSES.has(proj.status)) return reply.status(409).send({ code: "SPEC_LOCKED", message: `Spec bloqueada: projeto em '${proj.status}'.` });
+      if (proj.status === "card_draft") {
+        const block = await cardSpecWriteBlock(pool as never, proj.id, { knownStatus: proj.status, relPath: "docs/rfc/x.md" });
+        if (block) return reply.status(block.status).send(block.body);
+      }
       const { slugify, upsertSpecFile, nextRfcNumber } = await import("../services/evolutionPlanner.js");
       const { loadRfcTemplate, RFC_DIR } = await import("../services/evolutionGate.js");
       const template = loadRfcTemplate();
@@ -155,6 +165,7 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
         const action = await upsertSpecFile(pool, proj.id, relPath, content, false);
         if (action === "skipped") return reply.status(409).send({ code: "EXISTS", message: "Já existe um RFC com esse nome." });
         await pool.query("UPDATE projects SET spec_dirty_at = now() WHERE id = $1", [proj.id]).catch(() => {});
+        if (proj.status === "card_draft") await noteCardSpecWrite(pool as never, proj.id, { actorId: user.id, knownStatus: proj.status });
         return reply.status(201).send({ ok: true, path: relPath, number: num });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);

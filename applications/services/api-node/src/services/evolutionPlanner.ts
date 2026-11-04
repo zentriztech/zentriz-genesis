@@ -23,6 +23,7 @@ import { projectRootCandidates } from "./connectManifestsDisk.js";
 import { parseSpecPath } from "../routes/specFiles.js";
 import { sha256Hex, SPEC_TREE_MAX_FILES, SPEC_TREE_MAX_FILE_BYTES } from "../lib/specTreeHash.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
+import { cardScopeInstruction, loadCardDraftInfo, noteCardSpecWrite } from "./cardSpecGuard.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROMPT_FILE = path.resolve(__dirname, "..", "assets", "EVOLVE_PLAN_PROMPT.md");
@@ -68,6 +69,11 @@ export interface EvolutionPlanContext {
   nextAdrSeq: number;
   /** `projects.extra` do filho — o planner precisa dele para a MESMA conta do gate (RFCs herdados). */
   extra: Record<string, unknown>;
+  /**
+   * Fase 3 (3.3): o alvo é o RASCUNHO de um card (`card_draft`). A spec vigente vem da versão CORRENTE (somente leitura), o pedido é o
+   * texto do card, e o planner grava SÓ `docs/rfc/**` e `docs/adr/**` do rascunho (nada de CHANGELOG nem connect.yaml). Ausente ⇒ fluxo de sempre.
+   */
+  card?: { ticketId: string; code: string; scopeInstruction: string } | null;
 }
 
 async function readCapped(p: string, cap: number): Promise<string> {
@@ -115,13 +121,19 @@ export async function buildRepoMap(appsDir: string, cap = REPO_MAP_CAP, maxFiles
 
 export async function buildEvolutionPlanContext(db: Db, childId: string, requestOverride?: string | null): Promise<EvolutionPlanContext> {
   const row = (await db.query(
-    "SELECT id, title, product_id, parent_project_id, extra FROM projects WHERE id = $1", [childId],
-  )).rows[0] as { id: string; title: string; product_id: string | null; parent_project_id: string | null; extra: Record<string, unknown> | null } | undefined;
+    "SELECT id, title, product_id, parent_project_id, status, extra FROM projects WHERE id = $1", [childId],
+  )).rows[0] as { id: string; title: string; product_id: string | null; parent_project_id: string | null; status: string; extra: Record<string, unknown> | null } | undefined;
   if (!row) throw new Error("PROJECT_NOT_FOUND");
   const extra = row.extra ?? {};
   if (extra.evolution !== true) throw new Error("NOT_EVOLUTION");
   const parentId = (extra.evolution_parent_id as string | undefined) ?? row.parent_project_id ?? null;
+  // Fase 3 (3.3): rascunho de card — o pedido é o texto do card (ticket ligado ao rascunho).
+  const cardInfo = row.status === "card_draft" ? await loadCardDraftInfo(db as never, childId, row.status) : null;
+  const cardTicket = cardInfo?.ticketId
+    ? (await db.query("SELECT title, body FROM tickets WHERE id = $1", [cardInfo.ticketId])).rows[0] as { title?: string; body?: string } | undefined
+    : undefined;
   const request = (requestOverride ?? "").trim()
+    || (cardTicket ? `${cardTicket.title ?? ""}\n\n${cardTicket.body ?? ""}`.trim() : "")
     || String(extra.evolution_request_original ?? extra.evolution_request ?? "").trim();
 
   const files = (await db.query(
@@ -130,13 +142,23 @@ export async function buildEvolutionPlanContext(db: Db, childId: string, request
   )).rows as Array<{ filename: string; file_path: string; rel_dir: string | null; is_primary: boolean }>;
   const norm = (d: string | null) => (d ?? "").replace(/^\/+|\/+$/g, "");
   const primary = files.find((f) => f.is_primary) ?? files[0];
-  let specMarkdown = primary ? await readCapped(primary.file_path, SPEC_CAP) : "";
+  let specMarkdown = primary && !cardInfo ? await readCapped(primary.file_path, SPEC_CAP) : "";
+  // Rascunho de card: a spec vigente é a da versão CORRENTE (somente leitura, o mesmo helper de `GET /api/cards/:id/base-spec`).
+  let baseConnectYaml: string | null = null;
+  if (cardInfo) {
+    const { loadBaseSpecForDraft } = await import("./cardService.js");
+    const base = await loadBaseSpecForDraft(db as never, childId).catch(() => null);
+    const bp = base ? (base.files.find((f) => f.isPrimary) ?? base.files[0]) : undefined;
+    specMarkdown = bp?.content ? (bp.content.length > SPEC_CAP ? bp.content.slice(0, SPEC_CAP) + `\n… [truncado em ${SPEC_CAP} chars]` : bp.content) : "";
+    const bc = base?.files.find((f) => f.filename === "connect.yaml" && !f.relDir);
+    baseConnectYaml = bc?.content ? bc.content.slice(0, 16_000) : null;
+  }
   // O primário do filho é a spec do pai com o header "# EVOLUTION REQUEST" — removemos o header
   // (o pedido vai em campo próprio) para o arquiteto ver a spec VIGENTE limpa.
   // Formato real gravado pelo /evolve (E1): `# EVOLUTION REQUEST — vN\n\n> pedido\n\n---\n\n<spec>`.
   specMarkdown = specMarkdown.replace(/^# EVOLUTION REQUEST[^\n]*\n(?:[ \t]*\n|>[^\n]*\n)*(?:---[ \t]*\n)?\s*/m, "").trim();
   const connectRow = files.find((f) => f.filename === "connect.yaml" && norm(f.rel_dir) === "");
-  const connectYaml = connectRow ? (await readCapped(connectRow.file_path, 16_000) || null) : null;
+  const connectYaml = cardInfo ? baseConnectYaml : (connectRow ? (await readCapped(connectRow.file_path, 16_000) || null) : null);
   const changelogRow = files.find((f) => f.filename.toLowerCase() === "changelog.md" && norm(f.rel_dir) === "");
   const existingChangelog = changelogRow ? (await readCapped(changelogRow.file_path, 16_000) || null) : null;
   const existingRfcs = files.filter((f) => norm(f.rel_dir).toLowerCase() === RFC_DIR).map((f) => f.filename);
@@ -183,7 +205,10 @@ export async function buildEvolutionPlanContext(db: Db, childId: string, request
     if (n >= nextAdrSeq) nextAdrSeq = n + 1;
   }
 
-  return { childId, parentId, productId: row.product_id, title: row.title, request, specMarkdown, charter, repoMap, connectYaml, existingRfcs, existingAdrs, existingChangelog, nextRfcSeq, nextAdrSeq, extra };
+  return {
+    childId, parentId, productId: row.product_id, title: row.title, request, specMarkdown, charter, repoMap, connectYaml, existingRfcs, existingAdrs, existingChangelog, nextRfcSeq, nextAdrSeq, extra,
+    ...(cardInfo?.ticketId && cardInfo.code ? { card: { ticketId: cardInfo.ticketId, code: cardInfo.code, scopeInstruction: cardScopeInstruction(cardInfo.code) } } : {}),
+  };
 }
 
 // ── Pedido ao arquiteto (/invoke/raw) ────────────────────────────────────────
@@ -201,6 +226,10 @@ export function buildEvolutionPlanRequest(ctx: EvolutionPlanContext): Record<str
     ctx.specMarkdown || "(spec indisponível)",
     "--- FIM DA SPEC ---",
   ];
+  if (ctx.card) {
+    parts.push("", "--- ESCOPO DO CARD ---", ctx.card.scopeInstruction,
+      "Devolva SÓ `rfcs` (e `adrs`, se houver decisão): `changelog` e `connect_yaml` NÃO são gravados no rascunho do card.", "--- FIM DO ESCOPO ---");
+  }
   if (ctx.charter) parts.push("", "--- CHARTER DO CTO (arquitetura vigente; respeite) ---", ctx.charter, "--- FIM DO CHARTER ---");
   if (ctx.repoMap) parts.push("", "--- MAPA DO REPOSITÓRIO (apps/ — use estes caminhos REAIS no `files_allowed`) ---", ctx.repoMap, "--- FIM DO MAPA ---");
   else parts.push("", "MAPA DO REPOSITÓRIO: indisponível — declare `files_allowed` por pastas de módulo coerentes com a spec/charter.");
@@ -459,13 +488,19 @@ export async function applyEvolutionPlan(db: Db, ctx: EvolutionPlanContext, plan
     written.push({ path: relPath, action: await upsertSpecFile(db, ctx.childId, relPath, `# ADR-${num} — ${d.title}\n\n${body}\n`, false) });
   }
   const hasChangelogItems = CHANGELOG_KEYS.some((k) => plan.changelog[k].length > 0);
-  if (hasChangelogItems) {
+  if (ctx.card) {
+    // Rascunho de card: só RFC/ADR. CHANGELOG.md e connect.yaml são arquivos da árvore herdada (somente leitura) — gravá-los aqui os
+    // copiaria por cima do original na promoção (passo `card_spec`).
+    if (hasChangelogItems || plan.connectYaml) {
+      warnings.push("Itens de CHANGELOG e connect.yaml propostos pelo arquiteto NÃO foram gravados: o card escreve só o RFC/ADR. Registre-os no RFC (seção Impacto/Compatibilidade); o fechamento do CHANGELOG ocorre no aceite da versão.");
+    }
+  } else if (hasChangelogItems) {
     const merged = mergeChangelog(ctx.existingChangelog, plan.changelog, ctx.title.replace(/ — Evolução v\d+$/i, ""));
     written.push({ path: "CHANGELOG.md", action: await upsertSpecFile(db, ctx.childId, "CHANGELOG.md", merged, true) });
   } else {
     warnings.push("O arquiteto não propôs itens de CHANGELOG — adicione ao menos um item em `## [Unreleased]` antes do aceite.");
   }
-  if (plan.connectYaml) {
+  if (plan.connectYaml && !ctx.card) {
     if (plan.connectYaml === ctx.connectYaml) {
       warnings.push("connect.yaml devolvido igual ao vigente — mantido.");
     } else {
@@ -660,6 +695,7 @@ export async function runEvolutionPlan(db: Db, job: PlanJob, requestOverride: st
       throw pe;
     }
     const result = await applyEvolutionPlan(db, ctx, plan);
+    if (ctx.card) await noteCardSpecWrite(db as never, job.projectId, { actorId: job.ownerUserId, knownStatus: "card_draft" });
     await setJob(db, job.id, { status: "done", result, modelUsed: data.model_used ?? null, finished: true });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

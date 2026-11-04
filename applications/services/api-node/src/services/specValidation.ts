@@ -19,6 +19,7 @@
  * ON: run 'passed' p/ hash atual E (sem warnings OU run acked) → passa; run acked por
  * zentriz_admin (force) passa mesmo com blocker (auditado). Caso contrário, 409.
  */
+import { buildCardBaseContextBlock } from "./cardSpecGuard.js";
 import { readFile } from "fs/promises";
 import type { Pool } from "pg";
 import { computeSpecTreeHash, sha256Hex, SPEC_TREE_MAX_FILES, SPEC_TREE_MAX_FILE_BYTES, SPEC_TREE_MAX_TOTAL_BYTES } from "../lib/specTreeHash.js";
@@ -189,7 +190,7 @@ export async function computeCurrentSpecHash(
 
 // ── Estágio A — determinístico, sempre, custo zero ───────────────────────────
 
-export function runStageA(files: Array<SpecFileRow & { content: string }>, opts: { evolution?: boolean } = {}): ValidationFinding[] {
+export function runStageA(files: Array<SpecFileRow & { content: string }>, opts: { evolution?: boolean; cardDraft?: boolean } = {}): ValidationFinding[] {
   const findings: ValidationFinding[] = [];
   // Evoluir E3: em EVOLUÇÃO os RFCs são exigência dura (mesmo critério do gate de promoção →
   // blocker); em produto novo com RFCs "de design" só avisam (a regra existe para evolução).
@@ -218,7 +219,11 @@ export function runStageA(files: Array<SpecFileRow & { content: string }>, opts:
   // Manifesto (README) — AUSÊNCIA é warning, nunca blocker (leniência p/ legado — 100% das
   // specs pré-RFC não têm manifesto e continuam promovíveis com ack).
   const readme = files.find((f) => (f.rel_dir ?? "") === "" && f.filename.toLowerCase() === "readme.md");
-  if (!readme) {
+  // Fase 3 (3.3): o rascunho de um CARD não é uma spec de produto — não tem (nem deve ter) README/manifesto: ele escreve só a pasta do
+  // card e o RFC. O manifesto e o connect.yaml são da versão corrente (somente leitura); acusá-los criaria GAP que o card não pode fechar.
+  if (!readme && opts.cardDraft) {
+    // nada: ausência esperada
+  } else if (!readme) {
     findings.push({ file: "", line: null, severity: "warning", title: "Spec sem manifesto (README.md)",
       rationale: "Specs hierárquicas levam um README com frontmatter (archetype/stack/depends_on). Legado é aceito com acknowledgment.", source: "stage_a" });
   } else {
@@ -291,7 +296,9 @@ export function runStageA(files: Array<SpecFileRow & { content: string }>, opts:
   // MUDA — 0 de 58 specs em prod tinham o arquivo e nenhuma ação do produto o criava.
   // Warning, nunca blocker: mesma leniência do manifesto (todo o legado está sem ele).
   const connectRow = files.find((f) => (f.rel_dir ?? "") === "" && f.filename.toLowerCase() === "connect.yaml");
-  if (!connectRow) {
+  if (!connectRow && opts.cardDraft) {
+    // idem: connect.yaml é da versão corrente
+  } else if (!connectRow) {
     findings.push({ file: "", line: null, severity: "warning", title: "Spec sem declaração Connect (connect.yaml)",
       rationale: "É a INTENÇÃO de interoperabilidade (interfaces, eventos, dependências, ambientes, health) que a fábrica usa para emitir os manifests de forma determinística. Sem ela os manifests saem por heurística e MARCADOS como sintéticos. Gere pela ação 'Declaração Connect' da Bancada (ou deixe o laço autônomo gerar).", source: "stage_a" });
   } else {
@@ -671,6 +678,8 @@ function logTriage(runId: string, result: Record<string, unknown>): void {
 async function runStageB(
   pool: Pool, runId: string, projectId: string, specText: string, knownFindings: unknown[] = [],
   batch: BatchRow | null = null,
+  /** Fase 3 (3.3): rascunho de card — spec da versão corrente (somente leitura) colada ANTES do texto julgado. "" = comportamento de sempre. */
+  cardBaseContext = "",
 ): Promise<StageBOutcome> {
   const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
   if (!agentsUrl) return { findings: [], error: "agents indisponível (API_AGENTS_URL ausente)" };
@@ -681,7 +690,9 @@ async function runStageB(
   const start = await httpJson(`${base}/invoke/spec_validator/async`, "POST", {
     // GAP-10: o corte cego `slice(0, 200_000)` vivia aqui e produzia blockers FANTASMAS de "arquivo
     // ausente". Quem monta (e declara) o recorte agora é `buildValidationInput`, no chamador.
-    spec_text: specText,
+    spec_text: cardBaseContext
+      ? `${cardBaseContext}\n\n--- SPEC DO CARD (julgue SOMENTE o conteúdo abaixo; a spec da versão corrente acima é contexto e NÃO deve gerar achados) ---\n${specText}`
+      : specText,
     originProjectId: projectId, // débito de usage no orçamento do tenant (F6)
     // GAP-39: lista de continuidade. Vazia → o refutador é exatamente o de antes (nada no prompt).
     ...(knownFindings.length ? { known_findings: knownFindings } : {}),
@@ -1130,11 +1141,14 @@ async function gravaAuditoriaColapso(pool: Pool, runId: string, audit: unknown):
 async function processValidationRun(pool: Pool, runId: string, projectId: string, startHash: string): Promise<void> {
   const current = await computeCurrentSpecHash(pool, projectId);
   const files = current?.files ?? [];
-  const extraRow = (await pool.query("SELECT extra FROM projects WHERE id = $1", [projectId])).rows[0] as { extra?: Record<string, unknown> | null } | undefined;
+  const extraRow = (await pool.query("SELECT extra, status FROM projects WHERE id = $1", [projectId])).rows[0] as { extra?: Record<string, unknown> | null; status?: string } | undefined;
   const isEvolution = extraRow?.extra?.evolution === true;
+  // Fase 3 (3.3): rascunho de card — Estágio A sem as exigências de produto (README/connect) e Estágio B com a spec corrente como contexto.
+  const isCardDraft = extraRow?.status === "card_draft";
+  const cardBaseContext = isCardDraft ? await buildCardBaseContextBlock(pool as never, projectId, { knownStatus: "card_draft" }) : "";
   // `let` por causa do C2: o colapso de duplicata substitui a lista inteira (nunca muta em lugar,
   // para que a lista CRUA continue sendo o valor de fallback quando o agente não responde).
-  let findings: ValidationFinding[] = runStageA(files, { evolution: isEvolution });
+  let findings: ValidationFinding[] = runStageA(files, isCardDraft ? { evolution: isEvolution, cardDraft: true } : { evolution: isEvolution });
 
   // Estágio B só quando o A não achou blocker estrutural (economiza LLM em spec quebrada)
   const hasStageABlocker = findings.some((f) => f.severity === "blocker");
@@ -1253,6 +1267,7 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
         // exatamente o que o GAP-66/138 custou para eliminar. Falha vira desfecho DECLARADO do lote.
         const b = await runStageB(pool, runId, projectId, lote.text, known,
           batchId ? { id: batchId, idx: i, claimRun: conc === 1 || i === 0 } : null,
+          cardBaseContext,
         ).catch((e): StageBOutcome => ({ findings: [], error: `exceção no lote ${i + 1}/${lotes.length}: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300) }));
         if (!b.error) {
           // Só marca cobertura quando o juiz REALMENTE devolveu. Erro/timeout deixa a marca para o

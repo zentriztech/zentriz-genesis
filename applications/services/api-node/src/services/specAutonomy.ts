@@ -774,11 +774,34 @@ async function projectStatusOf(db: Db, projectId: string): Promise<string | null
   return row?.status ? String(row.status) : null;
 }
 
-async function specEditable(db: Db, projectId: string): Promise<{ ok: true } | { ok: false; status: string }> {
+type SpecEditable =
+  | { ok: true; cardDraft?: boolean }
+  | { ok: false; status: string; card?: { status: number; body: Record<string, unknown> } };
+
+async function specEditable(db: Db, projectId: string): Promise<SpecEditable> {
   const { SPEC_EDITABLE_STATUSES } = await import("./projectStatus.js");
   const st = await projectStatusOf(db, projectId);
   if (!st || !SPEC_EDITABLE_STATUSES.has(st)) return { ok: false, status: st ?? "desconhecido" };
+  if (st === "card_draft") {
+    // Fase 3 (3.3): rascunho de CARD — a trava CARD_SPEC_LOCKED vale a CADA rodada (o card pode ir a `ready` no meio do laço).
+    const { cardSpecWriteBlock } = await import("./cardSpecGuard.js");
+    const block = await cardSpecWriteBlock(db as never, projectId, { knownStatus: st });
+    if (block) return { ok: false, status: `card_draft, card '${String(block.body.state ?? "travado")}'`, card: block };
+    return { ok: true, cardDraft: true };
+  }
   return { ok: true };
+}
+
+/**
+ * Rascunho de CARD: o arquivo `filePath` (caminho em disco) está dentro do escopo de escrita do card (`tickets/TK-NNNN/**`, RFC, ADR)?
+ * `null` = pode escrever; texto = motivo da recusa. Só chamado quando `specEditable` disse `cardDraft`.
+ */
+async function cardDraftWriteDenied(db: Db, projectId: string, filePath: string): Promise<string | null> {
+  const row = (await db.query("SELECT rel_dir, filename FROM project_spec_files WHERE project_id = $1 AND file_path = $2", [projectId, filePath])).rows[0] as
+    { rel_dir?: string | null; filename?: string } | undefined;
+  const { cardSpecWriteBlock } = await import("./cardSpecGuard.js");
+  const block = await cardSpecWriteBlock(db as never, projectId, { knownStatus: "card_draft", relDir: row?.rel_dir ?? "", filename: row?.filename ?? path.basename(filePath) });
+  return block ? String(block.body.message ?? block.body.code) : null;
 }
 
 // ── persistência do log de ações ─────────────────────────────────────────────
@@ -945,6 +968,7 @@ export async function startAutonomyRun(db: Db, opts: {
 
   const editable = await specEditable(db, opts.projectId);
   if (!editable.ok) {
+    if (editable.card) return { ok: false, status: editable.card.status, code: String(editable.card.body.code), message: String(editable.card.body.message) };
     return { ok: false, status: 409, code: "SPEC_LOCKED", message: `Spec bloqueada para edição: projeto em '${editable.status}'. Pare o projeto ou use Evoluir.` };
   }
   const spec = await readPrimarySpec(db, opts.projectId);
@@ -2962,6 +2986,10 @@ async function applyManifestRound(db: Db, run: AutonomyRun, revised: string, tru
       `A spec deixou de ser editável antes de criar o manifesto (projeto em '${editable.status}') — nada foi escrito.`);
     return true;
   }
+  if (editable.cardDraft) {
+    // Fase 3 (3.3): o rascunho de um card não tem manifesto (README.md é da árvore herdada, somente leitura).
+    return skipFileAndContinue(db, run, MANIFEST_PATH, "o rascunho de um card não cria README.md (arquivo da versão corrente, somente leitura)", { failure: false, fromStatus: "applying" });
+  }
   if (truncated) {
     return skipFileAndContinue(db, run, MANIFEST_PATH,
       "o manifesto voltou truncado (teto de saída) — não escrevo índice pela metade", { failure: true, fromStatus: "applying" });
@@ -3079,6 +3107,8 @@ async function startDiagramsRound(
 
   const row = (await db.query("SELECT title, extra FROM projects WHERE id = $1", [run.projectId])).rows[0] as
     { title?: string; extra?: unknown } | undefined;
+  // Fase 3 (3.3): o rascunho de um card (`extra.card = true`) não desenha a arquitetura (documento fora da pasta do card).
+  if ((row?.extra as { card?: unknown } | null | undefined)?.card === true) return false;
   const nextRound = run.round + 1;
   const jobId = randomUUID();
   const llm = agentsLlmFields(await resolveWorkbenchLlm({ projectId: run.projectId, tenantId: run.tenantId }));
@@ -3174,6 +3204,7 @@ async function applyDiagramsRound(db: Db, run: AutonomyRun, revised: string, tru
   if (truncated) return recusa("o documento voltou truncado (teto de saída) e desenho pela metade não desenha");
   const editable = await specEditable(db, run.projectId);
   if (!editable.ok) return recusa(`a spec deixou de ser editável (projeto em '${editable.status}')`);
+  if (editable.cardDraft) return recusa("o rascunho de um card não cria o documento de diagramas (fora do escopo do card)");
   // Criação concorrente: alguém criou o arquivo durante a rodada ⇒ não sobrescrevo.
   const already = await readSpecFileAt(db, run.projectId, DIAGRAMS_PATH).catch(() => null);
   if (already) return recusa("o arquivo passou a existir durante a rodada — não sobrescrevi");
@@ -3232,6 +3263,10 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   if (!editable.ok) {
     await finishRun(db, run, "stalled", `A spec deixou de ser editável antes de aplicar (projeto em '${editable.status}') — nada foi escrito.`);
     return true;
+  }
+  if (editable.cardDraft) {
+    const denied = await cardDraftWriteDenied(db, run.projectId, file.filePath);
+    if (denied) return skipFileAndContinue(db, run, target, `fora do escopo do card: ${denied}`, { failure: false, fromStatus: "applying" });
   }
 
   const revisedSha = sha256Hex(Buffer.from(revised, "utf-8"));
@@ -3559,6 +3594,13 @@ async function applyAndValidate(db: Db, run: AutonomyRun): Promise<boolean> {
   if (!editable.ok) {
     await finishRun(db, run, "stalled", `A spec deixou de ser editável antes de aplicar (projeto em '${editable.status}') — nada foi escrito.`);
     return true;
+  }
+  if (editable.cardDraft) {
+    const denied = await cardDraftWriteDenied(db, run.projectId, spec.filePath);
+    if (denied) {
+      await finishRun(db, run, "stalled", `O arquivo da rodada está fora do escopo do card (${denied}) — nada foi escrito.`);
+      return true;
+    }
   }
 
   const revisedSha = sha256Hex(Buffer.from(revised, "utf-8"));

@@ -38,6 +38,8 @@ export type PromotionBlockReason =
   | "NOT_ON_WORKBENCH" | "NOT_NORMALIZED" | "CONNECT_MISSING" | "NOT_VALIDATED"
   // 1.7 (EVOLUTION_PROMOTE_BANCADA=on, só filho de evolução): RFC ausente/inválido e orçamento do dono.
   | "EVOLUTION_RFC" | "BUDGET_BLOCKED"
+  // Fase 3 (3.3): o projeto é o RASCUNHO de um card (`card_draft`) — não é spec de produto; a promoção é do CARD (`POST /api/cards/:id/promote`).
+  | "CARD_DRAFT"
   | null;
 
 /**
@@ -71,6 +73,8 @@ export interface Promotability {
    * Ausente em todo veredito histórico (flag off) — o payload não muda.
    */
   evolution?: boolean;
+  /** Fase 3 (3.3): só no veredito de `card_draft` — o card dono do rascunho e o estado dele. Ausente em todo veredito histórico. */
+  card?: { cardId: string | null; state: string | null; promoteVia: string | null };
 }
 
 /** Único estado de produto que a Fábrica aceita promover (`routes/products.ts`). */
@@ -206,6 +210,7 @@ export function decideSpecPromotability(
   normalized: boolean | null,
   readiness?: FactoryReadiness | null,
 ): Promotability {
+  if (status === "card_draft") return decideCardDraftPromotability({ cardId: null, state: null });
   return decidePromotability("spec", { status, promotableStatus: PROJECT_PROMOTABLE_STATUS, normalized, readiness });
 }
 
@@ -249,11 +254,41 @@ export async function evaluateProjectPromotability(
   db: Queryable,
   project: { id: string; status: string | null; hasStamp: boolean },
 ): Promise<Promotability> {
+  if (project.status === "card_draft") return evaluateCardDraftPromotability(db, project.id);
   const normalized = await safeProjectNormalized(db, project);
   const readiness = project.status === PROJECT_PROMOTABLE_STATUS && normalized === true
     ? await safeReadiness(() => assessProjectReadiness(db, project.id))
     : null;
   return decideSpecPromotability(project.status ?? null, normalized, readiness);
+}
+
+// ── Fase 3 (3.3) — rascunho de CARD ──────────────────────────────────────────────────────────────
+
+/**
+ * Veredito do RASCUNHO de um card (`projects.status = 'card_draft'`). Ele NÃO é spec de produto: nunca "já saiu da Bancada", nunca precisa
+ * de "Normalizar" nem de connect.yaml, e quem promove é o CARD (máquina de estados + hash do carimbo + base vs HEAD). `canPromote` é sempre
+ * `false` aqui (a promoção do rascunho como projeto é recusada) e a mensagem diz o caminho certo conforme o estado do card.
+ */
+export function decideCardDraftPromotability(card: { cardId: string | null; state: string | null }): Promotability {
+  const via = card.cardId ? `POST /api/cards/${card.cardId}/promote` : null;
+  const message = card.state === "ready"
+    ? "Este é o rascunho de um card, não uma spec de produto: o card está pronto — promova pelo próprio card."
+    : card.state === "draft" || card.state === "refining"
+      ? "Este é o rascunho de um card, não uma spec de produto: refine o RFC e valide o card antes de promovê-lo."
+      : card.state
+        ? `Este é o rascunho de um card (estado '${card.state}'): ele é histórico e não é promovido como spec de produto.`
+        : "Este é o rascunho de um card, não uma spec de produto: a promoção é feita pelo card.";
+  return { canPromote: false, reason: "CARD_DRAFT", message, status: "card_draft", normalized: null, card: { cardId: card.cardId, state: card.state, promoteVia: card.state === "ready" ? via : null } };
+}
+
+/** Consulta o card dono do rascunho e devolve o veredito. Falha de leitura ⇒ veredito sem o card (nunca lança). */
+export async function evaluateCardDraftPromotability(db: Queryable, projectId: string): Promise<Promotability> {
+  try {
+    const r = (await db.query("SELECT id, card_state FROM tickets WHERE draft_project_id = $1 LIMIT 1", [projectId])).rows[0] as { id?: string; card_state?: string } | undefined;
+    return decideCardDraftPromotability({ cardId: r?.id ? String(r.id) : null, state: r?.card_state ? String(r.card_state) : null });
+  } catch {
+    return decideCardDraftPromotability({ cardId: null, state: null });
+  }
 }
 
 /**

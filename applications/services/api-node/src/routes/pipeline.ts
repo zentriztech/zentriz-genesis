@@ -147,6 +147,12 @@ export async function pipelineRoutes(app: FastifyInstance) {
           { extra: Record<string, unknown> | null; tenant_id: string | null } | undefined;
         evoPath = await isEvolutionPromotable(client, { id: projectId, status, extra: ex?.extra ?? null, tenantId: ex?.tenant_id ?? null }, user.tenantId ?? null);
       }
+      if (status === "card_draft") {
+        // Fase 3 (3.3): o rascunho de um card não é spec de produto — quem promove é o CARD (hash do carimbo + base vs HEAD).
+        const { evaluateCardDraftPromotability } = await import("../services/promotability.js");
+        const v = await evaluateCardDraftPromotability(client as never, projectId);
+        return reply.status(409).send({ code: "USE_CARD_PROMOTE", message: v.message, cardId: v.card?.cardId ?? null, cardState: v.card?.state ?? null });
+      }
       if (status !== "draft" && !evoPath) {
         return reply.status(409).send({
           code: "NOT_ON_WORKBENCH",
