@@ -10,6 +10,7 @@ import { NEXT_ACTION, ORIGIN_LABEL, STATE_LABEL, type CardSummary } from "@/lib/
 import { blockedReasonLabel } from "@/lib/cards/cardErrors";
 import { KindChip } from "./KindChip";
 import { safeHttpsUrl } from "@/lib/cards/safeUrl";
+import { errorTextColor } from "./CardsA11yTheme";
 import { VisuallyHidden } from "./VisuallyHidden";
 
 /** Cartão do quadro. Um único link (o título) leva ao card; ligações com spec/filho/PR são links próprios. */
@@ -29,9 +30,9 @@ export function CardTile({ card }: { card: CardSummary }) {
         {card.title || "(sem título)"}
       </Link>
       {blocked && (
-        <Stack direction="row" spacing={0.5} alignItems="flex-start" role="status" sx={{ mt: 0.75, color: "error.main" }}>
+        <Stack direction="row" spacing={0.5} alignItems="flex-start" role="status" sx={{ mt: 0.75, color: errorTextColor }}>
           <BlockIcon sx={{ fontSize: "1rem", mt: "2px" }} aria-hidden />
-          <Typography variant="caption" fontWeight={700} color="error">
+          <Typography variant="caption" fontWeight={700} sx={{ color: errorTextColor }}>
             Bloqueado{card.blockedReason ? `: ${blockedReasonLabel(card.blockedReason)}` : ""}
           </Typography>
         </Stack>

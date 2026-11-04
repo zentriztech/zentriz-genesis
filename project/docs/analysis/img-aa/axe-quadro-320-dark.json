@@ -1,0 +1,17 @@
+{
+  "tela": "quadro-320",
+  "tema": "dark",
+  "escopo": "main",
+  "axe": {
+    "name": "axe-core",
+    "version": "4.14.0"
+  },
+  "regrasAprovadas": 26,
+  "violacoes": [],
+  "incompletas": [
+    {
+      "id": "color-contrast",
+      "nodes": 10
+    }
+  ]
+}

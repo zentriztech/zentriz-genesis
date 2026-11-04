@@ -21,6 +21,7 @@ import { cardWritableMasks, isRequestFile, newFilePathProblem, specApi, suggestR
 import type { PlanJob } from "@/lib/cards/schemas";
 import { STATE_LABEL, type BaseSpec, type CardDetail } from "@/lib/cards/types";
 import type { CardRunner } from "./useCardRunner";
+import { accentColor } from "./CardsA11yTheme";
 import SpecCodeEditor from "@/components/SpecCodeEditor";
 import SpecValidationPanel from "@/components/SpecValidationPanel";
 
@@ -50,9 +51,9 @@ function BasePanel({ card, onStale, stale }: { card: CardDetail; onStale: (v: bo
   const file = base?.files[sel];
   return (
     <Box component="section" aria-labelledby="base-spec-title"
-      sx={{ border: "2px dashed", borderColor: "grey.500", borderRadius: 1, p: 1.5, bgcolor: "action.hover", minWidth: 0 }}>
+      sx={{ border: "2px dashed", borderColor: "grey.500", borderRadius: 1, p: 1.5, minWidth: 0 }}>
       <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
-        <Typography id="base-spec-title" variant="subtitle2" component="h3">Spec atual do produto</Typography>
+        <Typography id="base-spec-title" variant="subtitle2" component="h2">Spec atual do produto</Typography>
         <ScopeBadge kind="initial" />
         {base && <Typography variant="caption" color="text.secondary">v{base.headVersion} · {base.title}</Typography>}
       </Stack>
@@ -67,7 +68,7 @@ function BasePanel({ card, onStale, stale }: { card: CardDetail; onStale: (v: bo
           </TextField>
           {file?.truncated && <Alert severity="info" sx={{ mb: 1 }}>Arquivo exibido parcialmente (teto de leitura).</Alert>}
           <Box component="pre" tabIndex={0} aria-label={`Conteúdo somente leitura de ${file?.path ?? ""}`}
-            sx={{ m: 0, p: 1, maxHeight: 360, overflow: "auto", bgcolor: "background.paper", border: "1px solid", borderColor: "divider", borderRadius: 1, whiteSpace: "pre-wrap", fontSize: "0.78rem" }}>
+            sx={{ "&:focus-visible": { outline: "2px solid", outlineColor: accentColor, outlineOffset: 2 }, m: 0, p: 1, maxHeight: 360, overflow: "auto", bgcolor: "background.paper", border: "1px solid", borderColor: "divider", borderRadius: 1, whiteSpace: "pre-wrap", fontSize: "0.78rem" }}>
             {file?.truncated || file?.content == null ? "(conteúdo acima do teto de leitura: abra a spec da versão pelo projeto)" : file.content}
           </Box>
         </>
@@ -241,7 +242,7 @@ export function CardSpecTab({ card, locked, canReopen, runner, onChanged, onStal
         <BasePanel card={card} onStale={onStale} stale={baseStale} />
         <Box component="section" aria-labelledby="card-spec-title" sx={{ border: "2px solid", borderColor: "primary.main", borderRadius: 1, p: 1.5, minWidth: 0 }}>
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
-            <Typography id="card-spec-title" variant="subtitle2" component="h3">Especificação do card</Typography>
+            <Typography id="card-spec-title" variant="subtitle2" component="h2">Especificação do card</Typography>
             <ScopeBadge kind="card" />
             <Typography variant="caption" color="text.secondary">{card.code}{readOnly ? " · somente leitura" : " · editável"}</Typography>
           </Stack>
@@ -280,9 +281,10 @@ export function CardSpecTab({ card, locked, canReopen, runner, onChanged, onStal
           )}
           {path && (
             <Box sx={{ border: "1px solid", borderColor: "divider" }}>
-              <SpecCodeEditor value={content} onChange={fileReadOnly ? undefined : setContent} readOnly={fileReadOnly} height="320px" ext={path.split(".").pop() ?? "md"} />
+              <SpecCodeEditor value={content} onChange={fileReadOnly ? undefined : setContent} readOnly={fileReadOnly} height="320px" ext={path.split(".").pop() ?? "md"} ariaLabel={`${fileReadOnly ? "Conteúdo somente leitura de" : "Editor de"} ${path}`} />
             </Box>
           )}
+          {path && !fileReadOnly && <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 0.5 }}>No editor, a tecla Tab insere recuo; para continuar pelo teclado, pressione Esc e depois Tab.</Typography>}
           {!readOnly && (
             <Stack direction="row" spacing={1} sx={{ mt: 1 }} flexWrap="wrap" useFlexGap alignItems="flex-start">
               <Button size="small" variant="contained" disabled={busy || !path || fileReadOnly || content === orig} onClick={() => void save()}>{busy ? "Salvando…" : "Salvar"}</Button>

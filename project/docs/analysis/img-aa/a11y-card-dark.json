@@ -1,0 +1,126 @@
+{
+  "tela": "card",
+  "largura": 1280,
+  "tema": "dark",
+  "escopo": "main",
+  "alvos": {
+    "total": 12,
+    "menoresQue24px": []
+  },
+  "foco": {
+    "passos": 20,
+    "noEscopo": 9,
+    "visiveisNoEscopo": 9,
+    "semFoco": [],
+    "sequencia": [
+      {
+        "name": "← Quadro de cards",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Revalidar contra a versão corrente",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Reabrir para edição",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Rejeitar",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Revalidar",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Pedido",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Recurso novo",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "INPUT",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Quero baixar a lista de entregas em CSV.",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "(corpo)",
+        "visible": true,
+        "inScope": false
+      },
+      {
+        "name": "Recolher menu",
+        "visible": false,
+        "inScope": false
+      },
+      {
+        "name": "Tema claro",
+        "visible": false,
+        "inScope": false
+      },
+      {
+        "name": "Notificações",
+        "visible": false,
+        "inScope": false
+      },
+      {
+        "name": "teste@example.com",
+        "visible": false,
+        "inScope": false
+      },
+      {
+        "name": "Dashboard",
+        "visible": false,
+        "inScope": false
+      },
+      {
+        "name": "Enviar spec",
+        "visible": false,
+        "inScope": false
+      },
+      {
+        "name": "Bancada",
+        "visible": false,
+        "inScope": false
+      },
+      {
+        "name": "Meus produtos",
+        "visible": false,
+        "inScope": false
+      },
+      {
+        "name": "Meus apps",
+        "visible": false,
+        "inScope": false
+      },
+      {
+        "name": "Notificações",
+        "visible": false,
+        "inScope": false
+      }
+    ]
+  },
+  "contraste": {
+    "amostras": 48,
+    "minimo": 5.09,
+    "abaixoDoMinimo": []
+  },
+  "reflow": {
+    "excessoHorizontalPx": 0
+  }
+}

@@ -12,7 +12,7 @@
  *
  * CodeMirror é pesado → carregado sob demanda (dynamic import), com um spinner enquanto monta.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Box from "@mui/material/Box";
 import CircularProgress from "@mui/material/CircularProgress";
 import { getLanguageExtension } from "./CodeExplorer";
@@ -30,7 +30,7 @@ type CodeMirrorProps = {
 };
 
 export default function SpecCodeEditor({
-  value, onChange, ext = "md", readOnly = false, height = "100%",
+  value, onChange, ext = "md", readOnly = false, height = "100%", ariaLabel = "Editor da especificação",
 }: {
   value: string;
   onChange?: (v: string) => void;
@@ -38,11 +38,14 @@ export default function SpecCodeEditor({
   ext?: string;
   readOnly?: boolean;
   height?: string;
+  /** Nome acessível do campo de texto (WCAG 4.1.2): o `.cm-content` é um textbox e precisa de nome. */
+  ariaLabel?: string;
 }) {
   const [CodeMirrorComp, setCodeMirrorComp] = useState<React.ComponentType<CodeMirrorProps> | null>(null);
   const [vscodeDark, setVscodeDark] = useState<unknown>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [lang, setLang] = useState<any[]>([]);
+  const [labelExt, setLabelExt] = useState<((label: string) => unknown) | null>(null);
 
   // Carrega o componente + tema uma única vez.
   useEffect(() => {
@@ -50,8 +53,10 @@ export default function SpecCodeEditor({
     Promise.all([
       import("@uiw/react-codemirror").then((m) => m.default),
       import("@uiw/codemirror-theme-vscode").then((m) => m.vscodeDark),
-    ]).then(([cm, theme]) => {
+      import("@codemirror/view").then((m) => m.EditorView),
+    ]).then(([cm, theme, EditorView]) => {
       if (!alive) return;
+      setLabelExt(() => (label: string) => EditorView.contentAttributes.of({ "aria-label": label }));
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       setCodeMirrorComp(() => cm as any);
       setVscodeDark(() => theme);
@@ -68,6 +73,8 @@ export default function SpecCodeEditor({
     return () => { alive = false; };
   }, [ext]);
 
+  const extensions = useMemo(() => [...lang, ...(labelExt ? [labelExt(ariaLabel)] : [])], [lang, labelExt, ariaLabel]);
+
   if (!CodeMirrorComp || vscodeDark === null) {
     return (
       <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", height, bgcolor: "#0D0F14" }}>
@@ -80,9 +87,9 @@ export default function SpecCodeEditor({
     <Box sx={{
       height, overflow: "auto", bgcolor: "#0D0F14",
       "& .cm-editor": { height: "100%", fontSize: "0.78rem" },
-      "& .cm-editor.cm-focused": { outline: "none" },
+      "& .cm-editor.cm-focused": { outline: "2px solid #A5B4FC !important", outlineOffset: "-2px" },   // foco visível (WCAG 2.4.7); #A5B4FC ≥ 3:1 sobre #0D0F14
       "& .cm-scroller": { fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',monospace", lineHeight: 1.7 },
-      "& .cm-gutters": { bgcolor: "#0D1117", borderRight: "1px solid #21262D", color: "#484F58" },
+      "& .cm-gutters": { bgcolor: "#0D1117", borderRight: "1px solid #21262D", color: "#8B949E" },   // ≥ 4,5:1 sobre #0D1117 (era #484F58, ~2,3:1)
       "& .cm-activeLineGutter": { bgcolor: "#161B22" },
       "& .cm-activeLine": { bgcolor: "#6366F110" },
       "& .cm-content": { caretColor: "#6366F1" },
@@ -90,7 +97,7 @@ export default function SpecCodeEditor({
       <CodeMirrorComp
         value={value}
         onChange={onChange ? (v) => onChange(v) : undefined}
-        extensions={lang}
+        extensions={extensions}
         theme={vscodeDark}
         readOnly={readOnly}
         editable={!readOnly}

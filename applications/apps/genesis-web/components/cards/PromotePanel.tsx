@@ -79,7 +79,7 @@ export function PromotePanel({ card, journey, runner, journeyLoading = false }: 
   }
   return (
     <Box component="section" aria-labelledby="promote-title" sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, p: 1.5 }}>
-      <Typography id="promote-title" variant="subtitle2" component="h3" sx={{ mb: 1 }}>Promover à fábrica</Typography>
+      <Typography id="promote-title" variant="subtitle2" component="h2" sx={{ mb: 1 }}>Promover à fábrica</Typography>
       <Box component="ul" sx={{ m: 0, p: 0, mb: 1.5, display: "grid", gap: 0.5 }} aria-label="Pré-requisitos da promoção">
         <Item state={checks.spec}>especificação do card validada e pronta.</Item>
         <Item state={checks.budget}>saldo livre do orçamento da versão corrente, conforme o servidor.</Item>

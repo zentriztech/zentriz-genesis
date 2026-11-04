@@ -1,0 +1,126 @@
+{
+  "tela": "dialogo-criacao-320",
+  "largura": 320,
+  "tema": "light",
+  "escopo": ".MuiDialog-paper",
+  "alvos": {
+    "total": 8,
+    "menoresQue24px": []
+  },
+  "foco": {
+    "passos": 20,
+    "noEscopo": 20,
+    "visiveisNoEscopo": 20,
+    "semFoco": [],
+    "sequencia": [
+      {
+        "name": "INPUT",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "INPUT",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "TEXTAREA",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Escolher arquivos",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Cancelar",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Criar card",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "INPUT",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "INPUT",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "TEXTAREA",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Escolher arquivos",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Cancelar",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Criar card",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "INPUT",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "INPUT",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "TEXTAREA",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Escolher arquivos",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Cancelar",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Criar card",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "INPUT",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "INPUT",
+        "visible": true,
+        "inScope": true
+      }
+    ]
+  },
+  "contraste": {
+    "amostras": 27,
+    "minimo": 4.76,
+    "abaixoDoMinimo": []
+  },
+  "reflow": {
+    "excessoHorizontalPx": 0
+  }
+}

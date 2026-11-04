@@ -1,0 +1,126 @@
+{
+  "tela": "quadro-320",
+  "largura": 320,
+  "tema": "light",
+  "escopo": "main",
+  "alvos": {
+    "total": 10,
+    "menoresQue24px": []
+  },
+  "foco": {
+    "passos": 20,
+    "noEscopo": 20,
+    "visiveisNoEscopo": 20,
+    "semFoco": [],
+    "sequencia": [
+      {
+        "name": "Novo card",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Todos os tiposEvoluçãoCorreçãoRecurso no",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "✓ Rascunho",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "✓ Refinando",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "✓ Pronto",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "✓ Promovido",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "✓ Na fábrica",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "✓ Entregue",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "✓ Bloqueado",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "✓ Rejeitado",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Card draft",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "rascunho TK-0001",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Card refining",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "rascunho TK-0002",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Card ready",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "rascunho TK-0003",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Card promoted",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "rascunho TK-0004",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "App Demo — Evolução v2",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Card in_factory",
+        "visible": true,
+        "inScope": true
+      }
+    ]
+  },
+  "contraste": {
+    "amostras": 148,
+    "minimo": 4.55,
+    "abaixoDoMinimo": []
+  },
+  "reflow": {
+    "excessoHorizontalPx": 0
+  }
+}

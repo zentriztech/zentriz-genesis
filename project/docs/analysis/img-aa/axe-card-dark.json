@@ -1,0 +1,17 @@
+{
+  "tela": "card",
+  "tema": "dark",
+  "escopo": "main",
+  "axe": {
+    "name": "axe-core",
+    "version": "4.14.0"
+  },
+  "regrasAprovadas": 31,
+  "violacoes": [],
+  "incompletas": [
+    {
+      "id": "color-contrast",
+      "nodes": 8
+    }
+  ]
+}
