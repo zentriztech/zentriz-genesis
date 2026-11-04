@@ -2694,7 +2694,8 @@ def run_agent(
             _plan = _llm_roles.plan_attempt(
                 required=_hard_required, models=_role_models, repair_attempt=repair_attempt,
                 schema_escalate=_schema_escalate, scope=_adv_scope, task_id=task_id,
-                stage=f"{role}:{mode or 'default'}", rework_attempt=_rework_attempt, projected_usd=_proj)
+                stage=f"{role}:{mode or 'default'}", rework_attempt=_rework_attempt, projected_usd=_proj,
+                project_id=_guard_project_of(message))
             _att_key = _plan.key
             try:
                 _llm_roles.validate_provider(provider, _plan.effective_role, _plan.model)
@@ -2708,7 +2709,7 @@ def run_agent(
                             repair_attempt, _plan.llm_role, _plan.effective_role, _plan.model)
             model = _plan.model
             _att_required, _att_effective, _att_escalated = _plan.llm_role, _plan.effective_role, _plan.escalated
-            if _plan.note in (_llm_roles.NOTE_CAP_REACHED, _llm_roles.NOTE_DEDUPED):
+            if _plan.note in _llm_roles.ESCALATION_DENIED_NOTES:   # C4': inclui advisor_denied_no_base / advisor_guard_unreachable
                 _escalation_note = _plan.note
                 logger.warning("[ROLES] %s: escalada ao Advisor NÃO feita (%s); segue no Orchestrator do slot. "
                                "Escopo=%s teto=%.2f gasto=%.4f", role, _plan.note, _adv_scope,

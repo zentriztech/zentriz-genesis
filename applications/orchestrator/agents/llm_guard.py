@@ -271,6 +271,40 @@ def check(*, model: str, system: str = "", user: str = "", max_tokens: int = 800
     return ctx
 
 
+ADVISOR_DENY_CODES = ("advisor_denied_no_base", "advisor_cap_reached", "advisor_guard_unreachable")
+
+
+def advisor_gate(project_id: object, projected_usd: float = 0.0, inflight_usd: float = 0.0) -> dict:
+    """C4': pede ao Guard licença para UMA escalada ao Advisor (`/api/internal/llm-guard/advisor-gate`).
+
+    Devolve `{"allow": bool, "mode": "legacy"|"policy", "code"?: str, ...}`.
+      * `mode == "legacy"`: o Guard não tem política `advisor_pct` para o projeto ⇒ o chamador usa o teto em memória/env
+        (`ADVISOR_MAX_USD_PER_RUN`, fallback explícito e documentado em `llm_roles`).
+      * `allow == False`: o Guard negou SÓ o Advisor (`advisor_denied_no_base` | `advisor_cap_reached`). O chamador segue no
+        Orchestrator do slot — nunca falha/BLOCKED da task.
+    Guard inalcançável ⇒ nega só o Advisor (`advisor_guard_unreachable`; fail-closed, nunca fail-open). Sem projeto ou com
+    `LLM_GUARD_DISABLED_FOR_TESTS=1` ⇒ `legacy` (não há onde perguntar).
+    """
+    pid = as_project_id(project_id)
+    if not pid or _disabled():
+        return {"allow": True, "mode": "legacy"}
+    body = {"projectId": pid, "projectedUsd": max(0.0, float(projected_usd or 0.0)),
+            "inflightUsd": max(0.0, float(inflight_usd or 0.0))}
+    try:
+        res = _post("/api/internal/llm-guard/advisor-gate", body, timeout=15)
+    except Exception as exc:
+        logger.warning("[llm-guard] advisor-gate inalcançável (projeto=%s): %s — Advisor negado (fail-closed)", pid, exc)
+        return {"allow": False, "mode": "policy", "code": "advisor_guard_unreachable",
+                "message": f"guard indisponível ({exc})"}
+    if not isinstance(res, dict) or "allow" not in res:
+        return {"allow": False, "mode": "policy", "code": "advisor_guard_unreachable", "message": "resposta inválida do guard"}
+    if not res.get("allow"):
+        code = str(res.get("code") or "")
+        res["code"] = code if code in ADVISOR_DENY_CODES else "advisor_denied_no_base"
+        logger.warning("[llm-guard] Advisor NEGADO %s projeto=%s: %s", res["code"], pid, res.get("message"))
+    return res
+
+
 def record(ctx: dict, *, model: str | None = None, provider: str | None = None,
            input_tokens: int = 0, output_tokens: int = 0, cache_read_tokens: int = 0,
            cache_write_tokens: int = 0, duration_ms: int = 0) -> None:

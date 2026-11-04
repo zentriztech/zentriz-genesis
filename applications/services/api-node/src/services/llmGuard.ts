@@ -30,7 +30,8 @@ import { dailyTokenQuotaMode } from "../lib/costSource.js";
 import { PRE_FACTORY_STATUSES } from "./projectStatus.js";
 import { isSesConfigured, sendEmail } from "./emailSender.js";
 import { buildEstimator, fetchHistoryBuckets } from "./specEnrichment.js";
-import { advisorPolicyView, breakerOverrides, type AdvisorPolicyView } from "./costPolicies.js";
+import { advisorPolicyView, breakerOverrides, getEffectivePolicy, type AdvisorPolicyView } from "./costPolicies.js";
+import { effectiveAdvisorFloorUsd } from "../lib/advisorFloor.js";
 
 export interface Queryable {
   query: (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }>;
@@ -432,13 +433,88 @@ export async function preflight(db: Queryable, input: PreflightInput): Promise<G
     }
     const quotaDenied = await checkDailyTokenQuota(db, owner.tenantId, pid);
     if (quotaDenied) return { ...quotaDenied, budgetProjectId: owner.ownerId };
-    // C3': exposição (não aplicação — isso é a C4') do teto do Advisor lido de cost_policies; ausente sem política.
+    // C3': exposição do teto do Advisor lido de cost_policies; ausente sem política. A APLICAÇÃO é `advisorGate` (C4').
     const advisorPolicy = await advisorPolicyView(db, owner.tenantId, owner.budgetUsd);
     return { allow: true, remainingUsd: remaining, budgetProjectId: owner.ownerId, ...(advisorPolicy ? { advisorPolicy } : {}) };
   } catch (e) {
     // FAIL-CLOSED: a lição do incidente é que gasto sem controle é pior do que trabalho parado.
     console.error(`[llmGuard] preflight falhou — NEGANDO (fail-closed): ${msg(e)}`);
     return { allow: false, code: "GUARD_ERROR", message: "Guarda de custo indisponível — chamada negada por segurança." };
+  }
+}
+
+// ── Advisor (C4') ────────────────────────────────────────────────────────────
+
+export type AdvisorGateDecision =
+  | { allow: true; mode: "legacy" | "policy"; capUsd?: number; spentUsd?: number; baseUsd?: number; pct?: number; policyVersion?: number; policyAuthor?: string; policyUpdatedAt?: string }
+  | { allow: false; mode: "policy"; code: "advisor_denied_no_base" | "advisor_cap_reached"; message: string; capUsd?: number; spentUsd?: number; baseUsd?: number };
+
+/** Gasto do Advisor do projeto-dono: SOMA DO LEDGER (sobrevive a reinício de qualquer processo). */
+export async function advisorSpentUsd(db: Queryable, ownerId: string): Promise<number> {
+  const r = await db.query(
+    "SELECT COALESCE(SUM(cost_usd), 0) AS s FROM llm_call_ledger WHERE budget_project_id = $1 AND llm_role = 'advisor'",
+    [ownerId],
+  );
+  return num(r.rows[0]?.s);
+}
+
+/**
+ * C4' — o Guard decide se UMA escalada ao Advisor pode sair (desenho 27 §3.2 passo 2). Soberano e fail-closed PARA O ADVISOR:
+ *   teto = `advisor_pct` % × `budget_usd` do projeto-dono (limitado por `abs_cap_usd`); gasto = ledger `llm_role='advisor'`
+ *   do projeto-dono + `inflightUsd` (reservas em voo do chamador) + `projectedUsd` desta chamada.
+ *   · sem orçamento / pct inválido / teto abaixo do piso calculado ⇒ nega só o Advisor + evento `advisor_denied_no_base`;
+ *   · estourou o teto ⇒ nega só o Advisor + evento `advisor_cap_reached`;
+ *   · SEM política `advisor_pct` (e com orçamento) ⇒ `mode:"legacy"` (o chamador usa o teto em memória/env, fallback explícito e documentado).
+ * Negar aqui NUNCA falha a task: o chamador segue no Orchestrator do slot. `BUDGET_MISSING` para o resto das chamadas
+ * continua no `preflight` (inalterado). Erro de leitura ⇒ nega o Advisor (fail-closed), nunca libera.
+ */
+export async function advisorGate(
+  db: Queryable, input: { projectId: string; projectedUsd?: number; inflightUsd?: number },
+): Promise<AdvisorGateDecision> {
+  let knownProject = false;
+  const deny = async (code: "advisor_denied_no_base" | "advisor_cap_reached", message: string, detail: Record<string, unknown>) => {
+    // `project_id` do evento tem FK: projeto inexistente vai só no detalhe.
+    await logEvent(db, code, knownProject ? input.projectId : null, { ...detail, requestedProjectId: input.projectId, message });
+    return { allow: false as const, mode: "policy" as const, code, message,
+      ...(typeof detail.capUsd === "number" ? { capUsd: detail.capUsd } : {}),
+      ...(typeof detail.spentUsd === "number" ? { spentUsd: detail.spentUsd } : {}),
+      ...(typeof detail.baseUsd === "number" ? { baseUsd: detail.baseUsd } : {}) };
+  };
+  try {
+    const owner = await resolveBudgetOwner(db, input.projectId);
+    knownProject = !!owner;
+    if (!owner) return await deny("advisor_denied_no_base", "Projeto não encontrado: sem base para o teto do Advisor.", { reason: "project_not_found" });
+    const p = await getEffectivePolicy(db, "advisor_pct", owner.tenantId);
+    const detailBase = { ownerId: owner.ownerId, policyVersion: p?.version ?? null, policyAuthor: p?.author ?? null, policyUpdatedAt: p?.updatedAt ?? null, pct: p?.pct ?? null };
+    if (owner.budgetUsd == null || !(owner.budgetUsd > 0)) {
+      return await deny("advisor_denied_no_base", "Projeto sem orçamento total: sem base para o teto do Advisor (a chamada segue no Orchestrator).",
+        { ...detailBase, reason: "budget_missing", baseUsd: owner.budgetUsd });
+    }
+    // Sem política (mas com orçamento) o Guard não impõe teto de Advisor — comportamento anterior à C4': o chamador usa o
+    // fallback em env (`ADVISOR_MAX_USD_PER_RUN`, em memória). Explícito: `mode:"legacy"`.
+    if (!p) return { allow: true, mode: "legacy" };
+    const view = await advisorPolicyView(db, owner.tenantId, owner.budgetUsd);
+    if (!view || !(view.pct >= 1 && view.pct <= 100)) {
+      return await deny("advisor_denied_no_base", "Política do Advisor inválida (percentual fora de 1–100).", { ...detailBase, reason: "invalid_pct", baseUsd: owner.budgetUsd });
+    }
+    const floor = effectiveAdvisorFloorUsd(view.floorUsd);
+    if (view.capUsd + 1e-9 < floor) {
+      return await deny("advisor_denied_no_base", `Teto do Advisor (US$ ${view.capUsd}) abaixo do piso calculado (US$ ${floor}): base insuficiente.`,
+        { ...detailBase, reason: "cap_below_floor", baseUsd: owner.budgetUsd, capUsd: view.capUsd, floorUsd: floor });
+    }
+    const spent = await advisorSpentUsd(db, owner.ownerId);
+    const projected = Math.max(0, num(input.projectedUsd));
+    const inflight = Math.max(0, num(input.inflightUsd));
+    if (spent + inflight + projected > view.capUsd + 1e-9) {
+      return await deny("advisor_cap_reached",
+        `Teto do Advisor atingido: US$ ${spent.toFixed(4)} gastos + US$ ${(inflight + projected).toFixed(4)} previstos > US$ ${view.capUsd} (${view.pct} % de US$ ${owner.budgetUsd}).`,
+        { ...detailBase, reason: "cap_reached", baseUsd: owner.budgetUsd, capUsd: view.capUsd, spentUsd: spent, inflightUsd: inflight, projectedUsd: projected });
+    }
+    return { allow: true, mode: "policy", capUsd: view.capUsd, spentUsd: spent, baseUsd: owner.budgetUsd, pct: view.pct,
+      policyVersion: p.version, policyAuthor: p.author, policyUpdatedAt: p.updatedAt };
+  } catch (e) {
+    console.error(`[llmGuard] advisorGate falhou — NEGANDO o Advisor (fail-closed): ${msg(e)}`);
+    return { allow: false, mode: "policy", code: "advisor_denied_no_base", message: "Guarda do Advisor indisponível — Advisor negado por segurança." };
   }
 }
 

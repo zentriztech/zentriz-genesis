@@ -29,6 +29,7 @@ ROLE_KEYS = {"llmRole", "effectiveRole", "escalatedFrom"}
 class _State:
     def __init__(self):
         self.allow, self.calls = True, []
+        self.advisor_verdict = {"allow": True, "mode": "legacy"}   # C4': resposta do Guard a /advisor-gate
 
 
 @pytest.fixture
@@ -39,8 +40,11 @@ def api(monkeypatch):
         def do_POST(self):  # noqa: N802
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
             st.calls.append((self.path, body))
-            out = ({"allow": st.allow, "code": "BUDGET_MISSING", "message": "teste"}
-                   if self.path.endswith("/preflight") else {"ok": True})
+            if self.path.endswith("/advisor-gate"):   # C4': sem política `advisor_pct` ⇒ Guard devolve "legacy" (teto em env)
+                out = st.advisor_verdict
+            else:
+                out = ({"allow": st.allow, "code": "BUDGET_MISSING", "message": "teste"}
+                       if self.path.endswith("/preflight") else {"ok": True})
             data = json.dumps(out).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(data)))

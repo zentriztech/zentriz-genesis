@@ -301,8 +301,12 @@ def plan_direct_call(point: str, llm_cfg: dict | None) -> DirectPlan:
 # schema/envelope reprovado DEPOIS do reparo do Orchestrator. Nunca por exceção de rede, resposta
 # vazia, truncamento, entitlement negado ou Guard-deny (isso é cascata de slots / propagação).
 # Esta seção guarda o estado em memória de processo: idempotência da escalada e teto de custo.
+# C4': a autoridade do teto do Advisor é o GUARD (`advisor_pct` % do orçamento total do projeto-dono, gasto = ledger do banco;
+# ver `llm_guard.advisor_gate`). `ADVISOR_MAX_USD_PER_RUN` + o gasto em memória abaixo ficam como FALLBACK LEGADO, usado só
+# quando o projeto NÃO tem política `advisor_pct` (mode "legacy") ou não há projeto: é o comportamento anterior à C4', mantido
+# por compatibilidade, e NÃO é a fonte de dólar das políticas novas. Com política, a env pode ser removida e o teto continua valendo.
 ENV_ADVISOR_CAP = "ADVISOR_MAX_USD_PER_RUN"
-DEFAULT_ADVISOR_CAP_USD = 5.0     # conservador; 0 = sem Advisor (nunca escala)
+DEFAULT_ADVISOR_CAP_USD = 5.0     # conservador; 0 = sem Advisor (nunca escala). SÓ no fallback legado (sem política)
 ENV_PRICE_IN, ENV_PRICE_OUT = "ADVISOR_PRICE_USD_PER_MTOK_IN", "ADVISOR_PRICE_USD_PER_MTOK_OUT"
 DEFAULT_PRICE_IN, DEFAULT_PRICE_OUT = 5.0, 25.0   # teto Opus da tabela do repo (doc 10); sobrescrevível
 ENV_BUDGET_TTL = "ADVISOR_BUDGET_TTL_SEC"
@@ -312,6 +316,10 @@ DEFAULT_DEDUPE_TTL_SEC = 3600     # janela do retry de rede da MESMA tentativa (
 
 NOTE_CAP_REACHED = "advisor_cap_reached"
 NOTE_DEDUPED = "escalation_deduped"
+NOTE_DENIED_NO_BASE = "advisor_denied_no_base"          # C4': Guard sem base (orçamento/política) ⇒ só o Advisor é negado
+NOTE_GUARD_UNREACHABLE = "advisor_guard_unreachable"    # C4': Guard fora ⇒ só o Advisor é negado (fail-closed)
+# Notas que significam "escalada NÃO feita; segue no Orchestrator do slot" (nunca falha da task).
+ESCALATION_DENIED_NOTES = (NOTE_CAP_REACHED, NOTE_DEDUPED, NOTE_DENIED_NO_BASE, NOTE_GUARD_UNREACHABLE)
 STAGE_PRIMARY, STAGE_SCHEMA = "primary", "schema"
 
 
@@ -363,6 +371,7 @@ class AdvisorBudget:
         self._lock = threading.Lock()
         self._keys: dict[str, tuple[str, float, float]] = {}   # key -> (scope, reservado_usd, ts)
         self._spent: dict[str, tuple[float, float]] = {}       # scope -> (usd, ts)
+        self._inflight: dict[str, tuple[str, float]] = {}      # C4': key -> (scope, usd) reservado e ainda NÃO liquidado
 
     def _ttl(self) -> float:
         return _env_float(ENV_BUDGET_TTL, float(DEFAULT_BUDGET_TTL_SEC))
@@ -372,6 +381,7 @@ class AdvisorBudget:
         kttl = _env_float(ENV_DEDUPE_TTL, float(DEFAULT_DEDUPE_TTL_SEC))
         for k in [k for k, (_, _, ts) in self._keys.items() if now - ts > kttl]:
             self._keys.pop(k, None)
+            self._inflight.pop(k, None)
         for sc in [sc for sc, (_, ts) in self._spent.items() if now - ts > ttl]:
             self._spent.pop(sc, None)
 
@@ -379,23 +389,49 @@ class AdvisorBudget:
         with self._lock:
             self._keys.clear()
             self._spent.clear()
+            self._inflight.clear()
 
     def spent(self, scope: str) -> float:
         with self._lock:
             return self._spent.get(scope, (0.0, 0.0))[0]
 
-    def reserve(self, scope: str, key: str, projected_usd: float) -> Reservation:
+    def inflight(self, scope: str) -> float:
+        with self._lock:
+            return sum(u for sc, u in self._inflight.values() if sc == scope)
+
+    def reserve(self, scope: str, key: str, projected_usd: float, project_id: object = None,
+                gate=None) -> Reservation:
+        """Concede a escalada. C4': com `project_id`, o GUARD decide o teto (ledger do projeto-dono; ver `advisor_gate`).
+        `gate` é injetável em teste; padrão `llm_guard.advisor_gate`. Guard com `mode == "legacy"` (sem política) ou sem
+        projeto ⇒ teto legado em memória/env (comportamento anterior)."""
         now = time.time()
+        policy_mode = False
+        if project_id not in (None, ""):
+            with self._lock:
+                if key in self._keys:
+                    return Reservation(False, NOTE_DEDUPED)
+                inflight = sum(u for sc, u in self._inflight.values() if sc == scope)
+            verdict = (gate or _llm_guard.advisor_gate)(project_id, max(0.0, projected_usd), inflight)
+            if not verdict.get("allow"):
+                code = str(verdict.get("code") or NOTE_DENIED_NO_BASE)
+                return Reservation(False, code if code in ESCALATION_DENIED_NOTES else NOTE_DENIED_NO_BASE)
+            policy_mode = verdict.get("mode") == "policy"
         cap = advisor_cap_usd()
         with self._lock:
             self._purge(now)
             if key in self._keys:
                 return Reservation(False, NOTE_DEDUPED)
+            if policy_mode:
+                # O Guard já validou o teto com o gasto do LEDGER; aqui só registra a reserva em voo (idempotência + corrida).
+                self._keys[key] = (scope, max(0.0, projected_usd), now)
+                self._inflight[key] = (scope, max(0.0, projected_usd))
+                return Reservation(True)
             spent = self._spent.get(scope, (0.0, now))[0]
             if cap <= 0 or spent + max(0.0, projected_usd) > cap:
                 return Reservation(False, NOTE_CAP_REACHED)
             self._keys[key] = (scope, max(0.0, projected_usd), now)
             self._spent[scope] = (spent + max(0.0, projected_usd), now)
+            self._inflight[key] = (scope, max(0.0, projected_usd))
             return Reservation(True)
 
     def settle(self, key: str, actual_usd: float) -> None:
@@ -405,6 +441,7 @@ class AdvisorBudget:
             if not ent:
                 return
             scope, reserved, _ = ent
+            self._inflight.pop(key, None)      # C4': liquidada ⇒ o gasto passa a vir do ledger do Guard
             spent = self._spent.get(scope, (0.0, now))[0]
             self._spent[scope] = (max(0.0, spent - reserved + max(0.0, actual_usd)), now)
             self._keys[key] = (scope, max(0.0, actual_usd), now)
@@ -413,6 +450,7 @@ class AdvisorBudget:
         now = time.time()
         with self._lock:
             ent = self._keys.pop(key, None)
+            self._inflight.pop(key, None)
             if not ent:
                 return
             scope, reserved, _ = ent
@@ -458,7 +496,8 @@ class AttemptPlan:
 
 def plan_attempt(*, required: str, models: RoleModels, repair_attempt: int, schema_escalate: bool,
                  scope: str, task_id: object, stage: object, rework_attempt: int,
-                 projected_usd: float, budget: AdvisorBudget | None = None) -> AttemptPlan:
+                 projected_usd: float, budget: AdvisorBudget | None = None,
+                 project_id: object = None, gate=None) -> AttemptPlan:
     """Modelo de UMA tentativa do `run_agent` sob `on`.
 
     tentativa 0 ⇒ papel exigido pelos fatos duros (rework/env=prod/piso QA); reparos ⇒ Orchestrator,
@@ -479,7 +518,7 @@ def plan_attempt(*, required: str, models: RoleModels, repair_attempt: int, sche
         key = f"anon|{uuid.uuid4().hex}"
     else:
         key = escalation_key(task_id, f"{stage}:{st}", ADVISOR, rework_attempt)
-    rsv = budget.reserve(scope, key, projected_usd)
+    rsv = budget.reserve(scope, key, projected_usd, project_id=project_id, gate=gate)
     if not rsv.allowed:
         return AttemptPlan(models.orchestrator, ADVISOR, ORCHESTRATOR, False, None, rsv.code)
     return AttemptPlan(res.model, ADVISOR, ADVISOR, True, key, "")

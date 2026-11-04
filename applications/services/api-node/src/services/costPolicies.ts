@@ -6,7 +6,7 @@
  *
  * Chaves suportadas:
  *  - `advisor_pct`      percentual (1–100) do ORÇAMENTO TOTAL do projeto-dono reservado ao Advisor (escopo global ou tenant).
- *                       Nesta etapa só é EXPOSTO pelo Guard; a aplicação do teto é a C4'.
+ *                       C4': o Guard APLICA o teto (`advisorGate` em llmGuard.ts): gasto = ledger `llm_role='advisor'` do projeto-dono.
  *  - `breaker_hour_usd` / `breaker_day_usd`  disjuntor global da plataforma (valor em US$ > 0; 0 é recusado). Só escopo global.
  *                       Quando existe linha, vence o valor de `llm_guard_settings`/env.
  * Todo valor nasce `calibrado=false`: só um zentriz_admin marca calibrado.
@@ -218,6 +218,8 @@ export interface AdvisorPolicyView {
   pct: number; base: string; baseUsd: number; capUsd: number;
   floorUsd: number | null; absCapUsd: number | null; calibrated: boolean; version: number;
   scopeType: "global" | "tenant";
+  /** C4': snapshot da configuração (quem e quando) — vai nos eventos e na resposta do gate. */
+  author: string; updatedAt: string;
 }
 
 /** Exposição do Advisor: X % do orçamento total do dono, limitado pelo teto absoluto quando houver. Sem política ⇒ `null`. */
@@ -230,6 +232,7 @@ export async function advisorPolicyView(db: Queryable, tenantId: string | null, 
   return {
     pct: p.pct, base: p.base ?? ADVISOR_BASE, baseUsd: budgetUsd, capUsd: Math.round(cap * 10000) / 10000,
     floorUsd: p.floorUsd, absCapUsd: p.absCapUsd, calibrated: p.calibrated, version: p.version, scopeType: p.scopeType,
+    author: p.author, updatedAt: p.updatedAt,
   };
 }
 

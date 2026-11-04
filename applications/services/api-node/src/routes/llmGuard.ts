@@ -3,6 +3,7 @@
  *
  * Internas (server-to-server, `authenticateInternal`, fail-closed em prod):
  *   POST /api/internal/llm-guard/preflight — licença ANTES de toda chamada paga (agents/runner/cyborg/Deadpool)
+ *   POST /api/internal/llm-guard/advisor-gate — licença da escalada ao Advisor (C4')
  *   POST /api/internal/llm-guard/record    — registro DEPOIS da chamada (tokens + USD) e consequências
  * Usuário (authMiddleware + canAccessProjectRow):
  *   GET/PUT /api/projects/:id/budget — orçamento em USD, passo de alerta, gasto, previsão
@@ -15,7 +16,7 @@ import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { authenticateInternal } from "./internalLlm.js";
 import {
-  ALERT_STEP_OPTIONS, budgetSummary, getGuardSettings, maybeResumeBudget, preflight, recordCall,
+  ALERT_STEP_OPTIONS, advisorGate, budgetSummary, getGuardSettings, maybeResumeBudget, preflight, recordCall,
   resolveBudgetOwner, setGuardSetting, evaluateBudget, type PreflightInput, type RecordInput,
 } from "../services/llmGuard.js";
 
@@ -89,6 +90,17 @@ export async function llmGuardInternalRoutes(app: FastifyInstance): Promise<void
       if (String(decision.code ?? "").startsWith("BUDGET")) scheduleCardSync(projectId);
     }
     return reply.send({ ...decision, projectId });
+  });
+
+  // C4': licença de UMA escalada ao Advisor. Negar aqui só tira o Advisor (o chamador segue no Orchestrator do slot).
+  app.post<{ Body: GuardBody & { projectedUsd?: number; inflightUsd?: number } }>("/api/internal/llm-guard/advisor-gate", async (request, reply) => {
+    if (!authenticateInternal(request).ok) return reply.status(401).send({ allow: false, code: "UNAUTHORIZED" });
+    const body = request.body ?? {};
+    const projectId = await resolveProjectId(body, runnerProjectOf(request)).catch(() => null);
+    if (!projectId) {
+      return reply.send({ allow: false, mode: "policy", code: "advisor_denied_no_base", message: "Sem projeto: sem base para o teto do Advisor." });
+    }
+    return reply.send(await advisorGate(pool, { projectId, projectedUsd: Number(body.projectedUsd ?? 0), inflightUsd: Number(body.inflightUsd ?? 0) }));
   });
 
   app.post<{ Body: GuardBody }>("/api/internal/llm-guard/record", async (request, reply) => {

@@ -4,12 +4,14 @@
  *   GET    /api/cost-policies/history  — trilha de versões (mesma visibilidade)
  *   PUT    /api/cost-policies          — cria/atualiza (gera nova versão + histórico + evento de auditoria)
  *   DELETE /api/cost-policies          — remove (a remoção também fica no histórico)
+ * `advisor_pct` aceita `baseBudgetUsd` (C4'): recusa a gravação se `pct % × base` ficar abaixo do piso calculado (lib/advisorFloor.ts).
  * Escrita: SOMENTE pessoa. Token de serviço (`user.svc`: runner/agents) é negado, como o PUT de orçamento.
  *   zentriz_admin: qualquer escopo/chave e pode marcar `calibrated`. tenant_admin: só `advisor_pct` do PRÓPRIO tenant, sempre `calibrated=false`.
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { advisorFloorViolation } from "../lib/advisorFloor.js";
 import {
   deletePolicy, listPolicies, policyHistory, upsertPolicy, validatePolicy, type PolicyInput,
 } from "../services/costPolicies.js";
@@ -73,6 +75,15 @@ export async function costPolicyRoutes(app: FastifyInstance): Promise<void> {
     const v = parsed.value;
     const denied = denyWrite(request, reply, { scopeType: v.scopeType, scopeId: v.scopeId, key: v.key });
     if (denied) return denied;
+    // C4': piso do Advisor. Com `baseBudgetUsd` (orçamento-base de referência) recusa pct × base abaixo do piso calculado.
+    const baseRef = (request.body as { baseBudgetUsd?: unknown } | undefined)?.baseBudgetUsd;
+    if (v.key === "advisor_pct" && baseRef != null && baseRef !== "") {
+      const base = Number(baseRef);
+      const why = Number.isFinite(base) && base > 0
+        ? advisorFloorViolation(v.pct as number, base, v.floorUsd)
+        : "baseBudgetUsd deve ser um valor em US$ maior que zero.";
+      if (why) return reply.status(400).send({ code: "ADVISOR_BELOW_FLOOR", message: why });
+    }
     const saved = await upsertPolicy(pool, v, user.email, user.role === "zentriz_admin");
     await pool.query(
       "INSERT INTO llm_guard_events (kind, detail) VALUES ('cost_policy_changed', $1::jsonb)",
