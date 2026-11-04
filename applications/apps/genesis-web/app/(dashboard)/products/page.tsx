@@ -124,8 +124,6 @@ function lifecycleChip(ls: string | null): { label: string; color: "default" | "
 function ProductsPageInner() {
   const router = useRouter();
   const [products, setProducts] = useState<ProductRow[]>([]);
-  // Cards da Bancada: a flag é do tenant; um produto da lista serve de sonda (sem flag, nada muda na tela).
-  const cardsOn = useCardsEnabled(products[0]?.id);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -159,6 +157,10 @@ function ProductsPageInner() {
 
   // Master escopa por tenant selecionado no topo (null = todos).
   const scopeTenantId = tenantScopeStore.selectedTenantId;
+  // Cards da Bancada: a flag é do TENANT. A sonda usa um produto do tenant em foco (o escolhido no escopo ou o próprio do usuário);
+  // a conta de gestão sem escopo vê produtos de vários tenants, então não há tenant para sondar (Y-19) e nada muda na tela.
+  const cardsTenantKey = scopeTenantId ?? (authStore.isZentrizAdmin ? null : authStore.user?.tenantId ?? "proprio");
+  const cardsOn = useCardsEnabled(cardsTenantKey ? (products.find((p) => p.project_count > 0) ?? products[0])?.id : undefined, { tenantKey: cardsTenantKey });
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);

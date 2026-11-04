@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "@/lib/api";
-import { blockedReasonLabel, cardErrorMessage, errorDetail, tableMessage } from "./cardErrors";
+import { PREPARED, blockedReasonLabel, cardErrorMessage, errorDetail, eventReasonLabel, tableMessage } from "./cardErrors";
 
 const err = (status: number, code: string | undefined, message = "msg do servidor", body?: Record<string, unknown>, retry?: number) => new ApiError(message, status, code, body, retry);
 
@@ -49,5 +49,30 @@ describe("blockedReasonLabel", () => {
     expect(blockedReasonLabel("materialization_failed:X")).toMatch(/A promoção falhou no meio do caminho/);
     expect(blockedReasonLabel(null)).toBe("não registrado");
     expect(blockedReasonLabel("outro")).toBe("outro");
+  });
+});
+
+describe("códigos novos do backend da Fase 3 (revisão adversarial) — tabela preparada em PT-BR", () => {
+  it("USE_CARDS, INVALID_ID, USE_CARD_DELETE, CARD_PATH_COLLIDES_WITH_BASE e CARD_NOT_READY têm mensagem; o userMessage do servidor sempre vence", () => {
+    for (const c of ["USE_CARDS", "INVALID_ID", "USE_CARD_DELETE", "CARD_PATH_COLLIDES_WITH_BASE", "CARD_NOT_READY"]) {
+      expect(tableMessage(c), c).toBeTruthy();
+      expect(PREPARED[c], c).toMatch(/[.!?]$/);
+      expect(cardErrorMessage(err(409, c, "técnica", { userMessage: "Do servidor." })), c).toBe("Do servidor.");
+    }
+    expect(cardErrorMessage(err(409, "USE_CARDS", "x"))).toMatch(/usa cards/);
+    expect(cardErrorMessage(err(409, "USE_CARD_DELETE", "x"))).toMatch(/rascunho de um card/);
+  });
+  it("403 de papel (sem código conhecido) vira texto claro", () => {
+    expect(cardErrorMessage(err(403, undefined, ""))).toMatch(/papel neste tenant não permite/);
+  });
+});
+
+describe("eventReasonLabel — motivos do histórico para pessoas", () => {
+  it("traduz os motivos conhecidos, reaproveita bloqueios e deixa o desconhecido como veio", () => {
+    expect(eventReasonLabel("spec_write")).toBe("especificação alterada");
+    expect(eventReasonLabel("budget:BUDGET_PAUSED")).toMatch(/^orçamento — /);
+    expect(eventReasonLabel("child_failed")).toMatch(/não está mais ativa \(failed\)/);
+    expect(eventReasonLabel("outro_motivo")).toBe("outro_motivo");
+    expect(eventReasonLabel(null)).toBe("");
   });
 });

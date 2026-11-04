@@ -19,6 +19,12 @@ describe("promoteChecks (pré-requisitos lidos dos bloqueios do servidor)", () =
   it("orçamento pausado: só o saldo fica pendente", () => {
     expect(promoteChecks(detailOf("ready"), journeyOf("ready-budget-paused"))).toMatchObject({ spec: "ok", budget: "pending", base: "ok" });
   });
+  it("bloqueador 'globs não conferidos' (backend novo, código com GLOB) deixa a base pendente e bloqueia o botão", () => {
+    const j = { ...journeyOf("ready"), blockers: [{ code: "CARD_GLOBS_UNVERIFIED", message: "Globs não conferidos.", userMessage: "Os arquivos permitidos do RFC não foram conferidos contra a versão corrente. Revalide.", details: undefined }] };
+    expect(promoteChecks(detailOf("ready"), j)).toMatchObject({ spec: "ok", base: "pending" });
+    render(<PromotePanel card={detailOf("ready")} journey={j} runner={runner()} />);
+    expect(screen.getByRole("button", { name: "Promover à fábrica" })).toBeDisabled();
+  });
   it("sem jornada: saldo e base ficam 'conferidos ao promover' (o servidor decide)", () => {
     expect(promoteChecks(detailOf("ready"), null)).toEqual({ spec: "ok", budget: "unknown", base: "unknown" });
   });
@@ -51,5 +57,20 @@ describe("PromotePanel", () => {
     expect(screen.getByRole("link", { name: /Evolução v2/ })).toHaveAttribute("href", expect.stringMatching(/^\/projects\//));
     expect(screen.getByRole("link", { name: /abrir no GitHub/ })).toHaveAttribute("href", "https://github.com/zentriz-demo/entregas/pull/42");
     expect(screen.queryByRole("button", { name: /Promover/ })).not.toBeInTheDocument();
+  });
+
+  it("Y-20: enquanto a situação do card carrega (journeyLoading) 'Promover' fica desabilitado, com aviso de que o servidor está sendo consultado", () => {
+    render(<PromotePanel card={detailOf("ready")} journey={null} runner={runner()} journeyLoading />);
+    expect(screen.getByRole("button", { name: "Promover à fábrica" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Conferindo a situação do card");
+  });
+
+  it("Y-18: prUrl que não é https:// (javascript:, data:, http:) não vira link", () => {
+    for (const bad of ["javascript:alert(1)", "data:text/html,x", "http://github.com/x/y/pull/1"]) {
+      const j = journeyOf("delivered");
+      const { unmount } = render(<PromotePanel card={{ ...detailOf("delivered"), prUrl: bad }} journey={{ ...j, execution: j.execution ? { ...j.execution, prUrl: bad } : null }} runner={runner()} />);
+      expect(screen.queryByRole("link", { name: /abrir no GitHub/ }), bad).not.toBeInTheDocument();
+      unmount();
+    }
   });
 });

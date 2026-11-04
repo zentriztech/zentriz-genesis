@@ -15,7 +15,7 @@ export interface Sch<T> {
   readonly opt?: true;
   check(v: unknown, path: string, errs: string[]): void;
 }
-type Out<S> = S extends Sch<infer T> ? T : never;
+export type Out<S> = S extends Sch<infer T> ? T : never;
 type Shape = Record<string, Sch<unknown>>;
 type OptKeys<S extends Shape> = { [K in keyof S]: S[K] extends { opt: true } ? K : never }[keyof S];
 type ObjOut<S extends Shape> = { [K in Exclude<keyof S, OptKeys<S>>]: Out<S[K]> } & { [K in OptKeys<S>]?: Exclude<Out<S[K]>, undefined> };
@@ -169,8 +169,109 @@ export const promoteSchema = s.object({
   evolutionSourceError: s.optional(s.nullable(s.string)), inheritedFiles: s.optional(s.nullable(s.number)),
 });
 
-/** Corpo de erro de QUALQUER rota de card. `userMessage` ausente só na recusa da flag off e nas rotas fora de `cards.ts` (ex.: /evolve). */
+// ── Erros: UM schema ESTRITO por código (Y-11) ───────────────────────────────────────────────────
+// O corpo de erro deixou de ser `passthrough`: cada código declara TODOS os campos que o backend manda e que o portal lê
+// (`details`, `writable`, `missing`, `freeUsd`, `services`, `errors`, `guardCode`, `expectedHead`…). Renomear ou tirar um campo no
+// backend quebra a suíte; um campo novo também (atualize o schema e, se o portal passar a ler, `errorDetail`).
+// `userMessage` é opcional só onde a rota não passa por `cardErrors.ts` (flag desligada, /evolve legado, rotas de spec).
+const errBase = { message: s.string, userMessage: s.optional(s.string) };
+const E = <S extends Shape>(code: string, extra?: S) => s.object({ code: s.literal(code), ...errBase, ...((extra ?? {}) as S) });
+const rfcProblem = s.object({ path: s.string, problems: s.array(s.string) });
+
+export const ERROR_SCHEMAS: Record<string, Sch<unknown>> = {
+  BAD_REQUEST: E("BAD_REQUEST"),
+  NOT_FOUND: E("NOT_FOUND"),
+  BAD_PATH: E("BAD_PATH"),
+  EXISTS: E("EXISTS"),
+  NOT_EVOLUTION: E("NOT_EVOLUTION"),
+  CONFLICT: E("CONFLICT", { currentSha: s.nullable(s.string) }),
+  ATTACHMENTS_UNAVAILABLE: E("ATTACHMENTS_UNAVAILABLE"),
+  ATTACHMENT_INVALID: E("ATTACHMENT_INVALID", { errors: s.array(s.object({ code: s.string, filename: s.string, message: s.string })) }),
+  BUDGET_MISSING: E("BUDGET_MISSING", { projectId: s.string }),
+  BUDGET_PAUSED: E("BUDGET_PAUSED"),
+  BUDGET_FREE_BELOW_MIN: E("BUDGET_FREE_BELOW_MIN", { freeUsd: s.number, minFreeUsd: s.number }),
+  CARD_BUDGET_BLOCKED: E("CARD_BUDGET_BLOCKED", { guardCode: s.string, cardState: s.string }),
+  CARD_NOT_DELETABLE: E("CARD_NOT_DELETABLE", { state: s.string }),
+  CARD_NOT_EDITABLE: E("CARD_NOT_EDITABLE", { state: s.string }),
+  CARD_NOT_READY: E("CARD_NOT_READY", { state: s.string }),
+  CARD_INVALID_TRANSITION: E("CARD_INVALID_TRANSITION", { from: s.string, to: s.string, allowed: s.optional(s.array(s.string)) }),
+  CARD_SPEC_LOCKED: E("CARD_SPEC_LOCKED", { state: s.string, canReopen: s.boolean, cardId: s.string, reopen: s.optional(s.string) }),
+  CARD_BASE_STALE: E("CARD_BASE_STALE", { expectedHead: s.string, currentHead: s.string, state: s.string, revalidate: s.string }),
+  CARD_PATH_OUT_OF_SCOPE: E("CARD_PATH_OUT_OF_SCOPE", { path: s.string, writable: s.array(s.string) }),
+  MATERIALIZATION_IN_PROGRESS: E("MATERIALIZATION_IN_PROGRESS", { childProjectId: s.string }),
+  CARD_KIND_MISMATCH: E("CARD_KIND_MISMATCH", { details: s.object({ kind: s.string, compat: s.string, breaking: s.boolean, rfcs: s.array(s.string) }) }),
+  CARD_KIND_REQUIREMENT: E("CARD_KIND_REQUIREMENT", { details: s.object({ kind: s.string, missing: s.array(s.string), rfcs: s.array(s.string) }) }),
+  EVOLUTION_RFC_INVALID: E("EVOLUTION_RFC_INVALID", { details: s.array(rfcProblem) }),
+  EVOLUTION_RFC_REQUIRED: E("EVOLUTION_RFC_REQUIRED", { details: s.object({ template_endpoint: s.string, rfc_dir: s.string }) }),
+  USE_CARD_PROMOTE: E("USE_CARD_PROMOTE", { cardId: s.string }),
+};
+// Códigos que o backend (frente L1) ainda vai enviar: o portal já os aceita com o formato básico até a fixture real chegar na integração
+// — nessa hora o teste de contrato exige o schema estrito deles (campos extras = erro).
+export const ERROR_SCHEMAS_PREPARED = ["USE_CARDS", "INVALID_ID", "USE_CARD_DELETE", "CARD_PATH_COLLIDES_WITH_BASE"] as const;
+for (const code of ERROR_SCHEMAS_PREPARED) ERROR_SCHEMAS[code] ??= E(code);
+
+/** Corpo de erro genérico (só para tipar o que o cliente recebe): o contrato estrito é `errorSchemaFor(code)`. */
 export const errorBodySchema = s.object({ code: s.string, message: s.string, userMessage: s.optional(s.string) }, { passthrough: true });
+/** Schema estrito do corpo de erro pelo `code`; `null` = código sem schema (o teste de contrato falha e pede o cadastro). */
+export function errorSchemaFor(code: unknown): Sch<unknown> | null {
+  return typeof code === "string" ? ERROR_SCHEMAS[code] ?? null : null;
+}
+
+// ── Rotas de spec do rascunho (aba Especificação), chat e planner de RFC (Y-03) ─────────────────
+export const specTreeSchema = s.object({
+  projectId: s.string, status: s.string, editable: s.boolean, truncated: s.boolean, totalFiles: s.number,
+  files: s.array(s.object({ path: s.string, ext: s.string, isPrimary: s.boolean, contentSha256: s.nullable(s.string), createdAt: s.nullable(s.date) })),
+});
+export const specFilesLegacySchema = s.array(s.object({
+  id: s.string, filename: s.string, filePath: s.string, mimeType: s.string, relDir: s.nullable(s.string), isPrimary: s.boolean, contentSha256: s.nullable(s.string), createdAt: s.date,
+}));
+export const specFileGetSchema = s.object({ path: s.string, content: s.string, contentSha256: s.string, isPrimary: s.boolean, editable: s.boolean });
+export const specFilePutSchema = s.object({ ok: s.boolean, path: s.string, contentSha256: s.string });
+export const specFilePostSchema = s.object({ ok: s.boolean, path: s.string, contentSha256: s.string });
+export const chatStartSchema = s.object({ jobId: s.string, status: s.literal("pending"), filePath: s.nullable(s.string), baseSha: s.nullable(s.string), deadlineAt: s.date });
+export const chatJobSchema = s.object({
+  jobId: s.string, status: s.literal("done", "error", "pending", "running"),
+  specMarkdown: s.optional(s.nullable(s.string)), reply: s.optional(s.nullable(s.string)), error: s.optional(s.nullable(s.string)),
+  filePath: s.optional(s.nullable(s.string)), baseSha: s.optional(s.nullable(s.string)), baseSpecSha: s.optional(s.nullable(s.string)), truncated: s.optional(s.boolean),
+  elapsed: s.optional(s.number), deadlineAt: s.optional(s.nullable(s.date)),
+});
+export const planStartSchema = s.object({ jobId: s.string, status: s.literal("pending") });
+export const planJobSchema = s.object({
+  jobId: s.string, status: s.literal("pending", "running", "done", "error", "interrupted"),
+  result: s.nullable(s.object({
+    written: s.array(s.object({ path: s.string, action: s.literal("created", "updated", "skipped") })),
+    rfcProblems: s.array(rfcProblem), warnings: s.array(s.string), compat: s.string, summary: s.string, questions: s.array(s.string),
+  })),
+  error: s.nullable(s.string), createdAt: s.date, finishedAt: s.nullable(s.date),
+});
+export const rfcFromTemplateSchema = s.object({ ok: s.boolean, path: s.string, number: s.number });
+
+export type SpecTree = Out<typeof specTreeSchema>;
+export type SpecFileGet = Out<typeof specFileGetSchema>;
+export type SpecFileWrite = Out<typeof specFilePutSchema>;
+export type ChatStart = Out<typeof chatStartSchema>;
+export type ChatJob = Out<typeof chatJobSchema>;
+export type PlanStart = Out<typeof planStartSchema>;
+export type PlanJob = Out<typeof planJobSchema>;
+export type RfcFromTemplate = Out<typeof rfcFromTemplateSchema>;
+
+/** Schema de uma fixture de `__contract__/spec/` (pelo nome do arquivo e status). */
+export function schemaForSpecFixture(name: string, status: number, body?: unknown): Sch<unknown> | null {
+  if (name === "index") return null;
+  if (status >= 400) return errorSchemaFor((body as { code?: unknown } | null)?.code) ?? errorBodySchemaMissing;
+  if (name.startsWith("spec-tree.")) return specTreeSchema;
+  if (name.startsWith("spec-files.")) return specFilesLegacySchema;
+  if (name.startsWith("spec-file.get")) return specFileGetSchema;
+  if (name.startsWith("spec-file.put")) return specFilePutSchema;
+  if (name.startsWith("spec-file.post")) return specFilePostSchema;
+  if (name === "spec-chat.post-202") return chatStartSchema;
+  if (name.startsWith("spec-chat.get")) return chatJobSchema;
+  if (name === "evolution-plan.post-202") return planStartSchema;
+  if (name.startsWith("evolution-plan.get")) return planJobSchema;
+  if (name.startsWith("rfc-from-template.")) return rfcFromTemplateSchema;
+  throw new Error(`Fixture de spec sem schema: ${name}. Registre-a em schemaForSpecFixture().`);
+}
+const errorBodySchemaMissing: Sch<unknown> = { check: (_v, p, e) => { e.push(`${p}: código de erro sem schema estrito — cadastre em ERROR_SCHEMAS (schemas.ts)`); } };
 
 // ── Amarração tipo × schema (compilação) ───────────────────────────────────────────────────────
 type Mutual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
@@ -190,10 +291,10 @@ const _promote: PromoteResponse = {} as Out<typeof promoteSchema>;
 void _promote;
 
 /** Qual schema vale para cada fixture (pelo nome do arquivo). `null` = sem corpo. */
-export function schemaForFixture(name: string, status: number): Sch<unknown> | null {
+export function schemaForFixture(name: string, status: number, body?: { code?: unknown } | null): Sch<unknown> | null {
   if (name === "error-codes" || name === "index") return null;
   if (status === 204) return null;
-  if (status >= 400) return errorBodySchema;
+  if (status >= 400) return errorSchemaFor(body?.code) ?? errorBodySchemaMissing;
   if (name.startsWith("capabilities.")) return capabilitiesSchema;
   if (name.startsWith("detail.")) return cardDetailSchema;
   if (name.startsWith("journey.")) return journeySchema;

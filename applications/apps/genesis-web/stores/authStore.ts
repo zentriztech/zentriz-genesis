@@ -4,6 +4,7 @@ import { makeAutoObservable } from "mobx";
 import type { User, Tenant } from "@/types";
 import { apiPost } from "@/lib/api";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
+import { resetCardsCapabilitiesCache } from "@/lib/cards/capabilitiesCache";
 
 export const PLANS = [
   { id: "prata", slug: "prata" as const, name: "Prata", maxProjects: 3, maxUsersPerTenant: 5 },
@@ -105,6 +106,8 @@ class AuthStore {
     // Só remover a chave do localStorage deixaria o observável em memória com o tenant
     // anterior (SPA não recarrega no logout) → a próxima sessão herdaria o filtro errado.
     tenantScopeStore.clear();
+    // A flag de cards é do tenant: o cache de capacidades não pode sobreviver ao logout (Y-19).
+    resetCardsCapabilitiesCache();
     if (typeof window !== "undefined") {
       localStorage.removeItem("genesis_token");
       localStorage.removeItem("genesis_user");

@@ -2,7 +2,7 @@
 // Não é importado pelo app.
 import type { CardActions, CardDetail, CardJourney, CardSummary } from "./types";
 import { ApiError } from "@/lib/api";
-import { body, fixture } from "./contractFixtures";
+import { body, fixture, specFixture } from "./contractFixtures";
 
 export const NO_ACTIONS: CardActions = { edit: false, refine: false, ready: false, promote: false, revalidate: false, reopen: false, reject: false, resume: false, delete: false };
 
@@ -33,4 +33,10 @@ export function apiErrorFrom(name: string): ApiError {
   const f = fixture<Record<string, unknown>>(name);
   const ra = f.headers?.["retry-after"] ? Number(f.headers["retry-after"]) : undefined;
   return new ApiError(String(f.body?.message ?? ""), f.status, typeof f.body?.code === "string" ? f.body.code : undefined, f.body ?? undefined, ra);
+}
+
+/** `ApiError` de uma resposta de erro REAL das rotas de spec/chat/planner (`__contract__/spec/<name>.json`). */
+export function specApiErrorFrom(name: string): ApiError {
+  const f = specFixture<Record<string, unknown>>(name);
+  return new ApiError(String(f.body?.message ?? ""), f.status, typeof f.body?.code === "string" ? f.body.code : undefined, f.body ?? undefined);
 }
