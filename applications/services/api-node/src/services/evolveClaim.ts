@@ -37,6 +37,7 @@ import { gitLinkProjectFolder, checkoutNewBranch } from "./githubPush.js";
 import { recomputeProductLifecycle } from "./productLifecycle.js";
 import { recordTicketEvent, ticketTransitionsEnabled } from "./ticketTransitions.js";
 import { inheritTriages } from "./findingTriage.js";
+import { transitionCard } from "./cardState.js";
 
 /** Espaço de chaves do advisory lock (forma de DOIS inteiros: não colide com as de 1 inteiro do credit-ledger). */
 export const NS_EVOLVE = 7341;
@@ -50,7 +51,15 @@ export interface EvolveLog {
   info: (obj: unknown, msg?: string) => void;
   warn: (obj: unknown, msg?: string) => void;
 }
+/**
+ * Fase 2 (2.6): promoção de CARD. O mesmo claim em duas etapas, adaptado: `parentId` é o HEAD registrado na maturação do card
+ * (`card_ready.base_head_project_id`); o HEAD corrente diferente ⇒ 409 CARD_BASE_STALE; o ticket precisa estar `ready` e a promoção
+ * do ticket é `ready → promoted` PELA máquina de estados (mesma transação do INSERT do filho); a etapa 2 ganha o passo `card_spec`
+ * (move a spec do rascunho para o filho). Sem `card`, nada muda no caminho legado.
+ */
+export interface EvolveCardInput { draftProjectId: string; actorId: string }
 export interface EvolveClaimInput {
+  card?: EvolveCardInput;
   parentId: string;
   user: AuthUser;
   ticketId: string;
@@ -94,7 +103,7 @@ const retry = (s = 2) => ({ "Retry-After": String(s) });
  * pode travar a evolução se um ANCESTRAL (avô…raiz) tem orçamento: sobe `parent_project_id` (≤ 8 níveis) até achar um dono
  * com `budget_usd`. Devolve o projeto-âncora (para o Guard) e o dono terminal; `null` = nenhum na cadeia.
  */
-async function resolveBudgetAnchor(db: Pick<Pool | PoolClient, "query">, projectId: string): Promise<{ anchorId: string; ownerId: string; inherited: boolean } | null> {
+export async function resolveBudgetAnchor(db: Pick<Pool | PoolClient, "query">, projectId: string): Promise<{ anchorId: string; ownerId: string; inherited: boolean } | null> {
   let cur: string | null = projectId;
   for (let depth = 0; cur && depth < 8; depth++) {
     const owner = await resolveBudgetOwner(db, cur);
@@ -104,7 +113,7 @@ async function resolveBudgetAnchor(db: Pick<Pool | PoolClient, "query">, project
   return null;
 }
 
-async function budgetPreflight(pool: Pool, headCandidateId: string, tenantId: string | null, versionNumber: number): Promise<EvolveResult | null> {
+export async function budgetPreflight(pool: Pool, headCandidateId: string, tenantId: string | null, versionNumber: number): Promise<EvolveResult | null> {
   const anchor = await resolveBudgetAnchor(pool, headCandidateId);
   const gateTarget = anchor?.anchorId ?? headCandidateId;
   const gate = await checkProjectBudgetGate(pool, gateTarget);
@@ -214,7 +223,7 @@ async function respondExisting(
 
 // ── Entrada ───────────────────────────────────────────────────────────────────────────────
 export async function runEvolveWithClaim(pool: Pool, input: EvolveClaimInput): Promise<EvolveResult> {
-  const { parentId, user, ticketId, evolutionRequest, workMode, log } = input;
+  const { parentId, user, ticketId, evolutionRequest, workMode, log, card } = input;
 
   const parentRow = (await pool.query(
     "SELECT id, title, status, product_id, tenant_id, created_by, version_number, complexity_hint FROM projects WHERE id = $1",
@@ -224,6 +233,7 @@ export async function runEvolveWithClaim(pool: Pool, input: EvolveClaimInput): P
     return { status: 404, body: { code: "NOT_FOUND", message: "Projeto não encontrado" } };
   }
   if (parentRow.status !== "accepted") {
+    if (card) return { status: 409, body: { code: "CARD_BASE_STALE", message: `A versão-base do card (status ${parentRow.status}) não é mais uma versão aceita. Revalide o card.`, expectedHead: parentId } };
     return { status: 409, body: { code: "CONFLICT", message: `Evolução só permitida em projetos aceitos. Status atual: ${parentRow.status}` } };
   }
   const tenantId = String(parentRow.tenant_id);
@@ -285,7 +295,7 @@ export async function runEvolveWithClaim(pool: Pool, input: EvolveClaimInput): P
 
   let outcome: ClaimOutcome;
   try {
-    outcome = await claim(pool, { parentId, rootId, parentRow, user, ticket, requestText, workMode, key, reqSha, childProductId, tenantId });
+    outcome = await claim(pool, { parentId, rootId, parentRow, user, ticket, requestText, workMode, key, reqSha, childProductId, tenantId, card });
   } catch (e) {
     const code = (e as { code?: string })?.code;
     if (code === "55P03" || code === "57014") {
@@ -344,6 +354,7 @@ function inFlightResult(f: InFlightRow): EvolveResult {
 async function claim(pool: Pool, a: {
   parentId: string; rootId: string; parentRow: Record<string, unknown>; user: AuthUser; ticket: TicketRow | null;
   requestText: string; workMode: "copy" | "branch"; key: string | null; reqSha: string; childProductId: string; tenantId: string;
+  card?: EvolveCardInput;
 }): Promise<ClaimOutcome> {
   const client = await pool.connect();
   try {
@@ -375,6 +386,16 @@ async function claim(pool: Pool, a: {
         };
       }
       ticket = t;
+      // Fase 2: um ticket-card só é promovido pelo caminho do card (`ready`); o caminho legado nunca o promove (H §9 item 10).
+      const cs = (t as unknown as { card_state?: string | null }).card_state ?? null;
+      if (a.card && cs !== "ready") {
+        await client.query("ROLLBACK");
+        return { kind: "reject", result: { status: 409, body: { code: "CARD_NOT_READY", message: `${ticketCode(ticket.number)} não está pronto para promover (estado ${cs ?? "legado"}).`, state: cs } } };
+      }
+      if (!a.card && cs !== null) {
+        await client.query("ROLLBACK");
+        return { kind: "reject", result: { status: 409, body: { code: "USE_CARD_PROMOTE", message: `${ticketCode(ticket.number)} é um card: promova por POST /api/cards/${ticket.id}/promote.`, cardId: ticket.id } } };
+      }
     }
 
     // (c) HEAD corrente
@@ -385,6 +406,9 @@ async function claim(pool: Pool, a: {
     }
     if (head.id !== a.parentId) {
       await client.query("ROLLBACK");
+      if (a.card) {
+        return { kind: "reject", result: { status: 409, body: { code: "CARD_BASE_STALE", message: "A versão-base do card foi superada por uma versão mais nova da linhagem. Revalide o card (POST /api/cards/:id/revalidate) e valide de novo antes de promover.", expectedHead: a.parentId, currentHead: head.id } } };
+      }
       return {
         kind: "reject",
         result: { status: 409, body: { code: "PARENT_SUPERSEDED", message: "Este projeto já foi superado por uma versão mais nova — evolua a versão corrente.", currentProjectId: head.id } },
@@ -424,6 +448,7 @@ async function claim(pool: Pool, a: {
       evolution: true,
       evolution_request: a.requestText,
       ...(ticket ? { ticket_id: ticket.id, ticket_number: ticket.number, ticket_kind: ticket.change_kind } : {}),
+      ...(a.card ? { card_draft_project_id: a.card.draftProjectId, evolution_origin: "card" } : {}),
       evolution_work_mode: a.workMode,
       evolution_parent_id: head.id,
       evolution_root_id: a.rootId,
@@ -448,7 +473,14 @@ async function claim(pool: Pool, a: {
     const childId = String(ins.rows[0].id);
 
     // (g) promoção do ticket com CAS, na MESMA transação (corrige o defeito (b) do estudo F)
-    if (ticket) {
+    if (ticket && a.card) {
+      // Card: `ready → promoted` pela máquina (CAS, status legado derivado e evento auditado na MESMA transação do INSERT do filho).
+      const tr = await transitionCard(client, { ticketId: ticket.id, to: "promoted", actorKind: "user", actorId: a.card.actorId, childProjectId: childId, dedupeKey: claimId });
+      if (tr.kind !== "applied") {
+        await client.query("ROLLBACK");
+        return { kind: "reject", result: { status: 409, body: { code: tr.kind === "invalid" ? "CARD_INVALID_TRANSITION" : "CARD_NOT_READY", message: `${ticketCode(ticket.number)} mudou de estado durante a promoção.`, result: tr.kind } } };
+      }
+    } else if (ticket) {
       const up = await client.query(
         `UPDATE tickets SET status = 'promoted', child_project_id = $2, promoted_at = now(), updated_at = now()
           WHERE id = $1 AND status = 'open' RETURNING id`,
@@ -578,6 +610,7 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
   const requestText = String(extra.evolution_request ?? "");
   const workMode = extra.evolution_work_mode === "branch" ? "branch" : "copy";
   const ticketId = typeof extra.ticket_id === "string" ? extra.ticket_id : null;
+  const cardDraftId = typeof extra.card_draft_project_id === "string" ? extra.card_draft_project_id : null;
 
   try {
     const head = (await pool.query("SELECT id, title, product_id FROM projects WHERE id = $1", [headId])).rows[0] as
@@ -637,6 +670,10 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
         return { files: mat3.files, error: null };
       });
     }
+    // S3b (card) — move a spec do rascunho do card (RFCs, documentos) para a árvore do filho, com `spec_origin = card:TK-NNNN`
+    if (ticket && cardDraftId) {
+      await runStep("card_spec", (ctx) => stepCardSpec(pool, { childId, draftId: cardDraftId, ticket, ctx }));
+    }
     // S4 — triagens de GAPs vivas da versão corrente
     await runStep("triages", async () => {
       let n = 0;
@@ -668,6 +705,7 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
       evolution_inherited_files: inheritedFiles,
       evolution_inherited_spec: steps.spec_tree?.inherited_spec ?? [],
       ...(ticket ? { ticket_files: steps.ticket?.files ?? [], ticket_materialize_error: steps.ticket?.error ?? null } : {}),
+      ...(cardDraftId ? { card_spec_files: steps.card_spec?.paths ?? [] } : {}),
     };
     // M-11: CAS conjunto — o filho só finaliza se o pedido AINDA estiver 'promoted' apontando para ele.
     const fin = await pool.query(
@@ -754,9 +792,14 @@ async function failTerminal(
     if (!marked) {
       await client.query("ROLLBACK");
     } else {
+      // Fase 2: card cujo filho morreu na materialização vai a `blocked` PELA máquina (H §4.1); o ticket legado reabre como sempre.
+      const cards = await client.query("SELECT id FROM tickets WHERE child_project_id = $1 AND card_state IS NOT NULL AND card_state IN ('promoted', 'in_factory')", [childId]);
+      for (const c of cards.rows) {
+        await transitionCard(client, { ticketId: String(c.id), to: "blocked", actorKind: "system", reason: `materialization_failed:${f.code}`, dedupeKey: `mat_failed:${childId}` });
+      }
       const reopened = await client.query(
         `UPDATE tickets SET status = 'open', child_project_id = NULL, promoted_at = NULL, updated_at = now()
-          WHERE child_project_id = $1 AND status = 'promoted'
+          WHERE child_project_id = $1 AND status = 'promoted' AND card_state IS NULL
         RETURNING id, tenant_id`,
         [childId],
       );
@@ -829,6 +872,54 @@ async function stepSpecTree(
     }
   }
   return { files: inherited, inherited_spec: inheritedSpec };
+}
+
+/**
+ * Passo `card_spec` (Fase 2): copia para o filho tudo que o rascunho do card tem FORA da pasta `tickets/TK-NNNN/` (RFCs, notas, anexos
+ * de texto nascidos na maturação) — a pasta do ticket é regenerada pelo passo `ticket`. Idempotente (upsert + tmp/rename). O rascunho
+ * não é alterado: continua como histórico do card. Grava `spec_origin = card:TK-NNNN` nos arquivos do card no filho.
+ */
+async function stepCardSpec(
+  pool: Pool,
+  a: { childId: string; draftId: string; ticket: TicketRow; ctx: StepCtx },
+): Promise<Json> {
+  const code = ticketCode(a.ticket.number);
+  const tkDir = `tickets/${code}`;
+  const rows = (await pool.query(
+    "SELECT file_path, filename, mime_type, rel_dir FROM project_spec_files WHERE project_id = $1 ORDER BY rel_dir, filename",
+    [a.draftId],
+  )).rows as Array<{ file_path: string; filename: string; mime_type: string | null; rel_dir: string | null }>;
+  const { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync } = await import("fs");
+  const { join } = await import("path");
+  const uploadDir = (process.env.UPLOAD_DIR ?? "/shared/uploads").trim();
+  const childSpecDir = join(uploadDir, a.childId);
+  const paths: string[] = [];
+  for (const r of rows) {
+    a.ctx.assertAlive();
+    const rel = (r.rel_dir ?? "").replace(/^\/+|\/+$/g, "");
+    if (rel === tkDir || rel.startsWith(`${tkDir}/`)) continue;
+    if (!r.file_path || !existsSync(r.file_path)) throw new TerminalFailure("CARD_DRAFT_UNREADABLE", `Arquivo do rascunho do card não encontrado no disco: ${rel ? rel + "/" : ""}${r.filename}.`);
+    const content = readFileSync(r.file_path);
+    const dir = rel ? join(childSpecDir, rel) : childSpecDir;
+    mkdirSync(dir, { recursive: true });
+    const dest = join(dir, r.filename);
+    const tmp = `${dest}.tmp-${process.pid}`;
+    writeFileSync(tmp, content);
+    renameSync(tmp, dest);
+    await pool.query(
+      `INSERT INTO project_spec_files (project_id, filename, file_path, mime_type, rel_dir, is_primary, content_sha256, spec_origin)
+       VALUES ($1, $2, $3, $4, $5, false, $6, $7)
+       ON CONFLICT (project_id, rel_dir, filename)
+       DO UPDATE SET file_path = EXCLUDED.file_path, mime_type = EXCLUDED.mime_type, content_sha256 = EXCLUDED.content_sha256, spec_origin = EXCLUDED.spec_origin`,
+      [a.childId, r.filename, dest, r.mime_type ?? "text/markdown", rel, sha256Hex(content), `card:${code}`],
+    );
+    paths.push(rel ? `${rel}/${r.filename}` : r.filename);
+  }
+  await pool.query(
+    "UPDATE project_spec_files SET spec_origin = $2 WHERE project_id = $1 AND spec_origin IS NULL AND (rel_dir = $3 OR rel_dir LIKE $4)",
+    [a.childId, `card:${code}`, tkDir, `${tkDir}/%`],
+  );
+  return { files: paths.length, paths };
 }
 
 /** Erros de git que NÃO se resolvem repetindo (repo/credencial/ref inexistentes, git ausente). O resto é tratado como transitório. */

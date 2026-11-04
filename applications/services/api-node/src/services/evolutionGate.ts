@@ -53,6 +53,8 @@ export interface ParsedRfc {
   compat: RfcCompat | null;
   breaking: boolean;
   hasNonGoals: boolean;
+  /** Fase 2 (2.6): há um cenário de REPRODUÇÃO (FAIL_TO_PASS) nos critérios de aceite/requisitos — exigência do tipo Correção. */
+  hasReproScenario: boolean;
   problems: string[];
 }
 
@@ -125,13 +127,19 @@ export function parseRfcMarkdown(pathOrName: string, content: string): ParsedRfc
   const breaking = /breaking\s*:\s*(true|sim)|\bmajor\b|\bbreaking change\b|\bincompat/i.test(compatSec);
   const compat: RfcCompat | null = breaking ? "major" : /\bminor\b|nova funcionalidade|feature/i.test(compatSec) ? "minor" : /\bpatch\b|correção|bugfix|fix\b/i.test(compatSec) ? "patch" : null;
   const hasNonGoals = /(n[ãa]o[- ]objetivos|non-goals|fora de escopo)/i.test(content);
+  // Cenário de reprodução: uma linha de cenário que cita reprodução/reproduction/regressão, ou a marca FAIL_TO_PASS, DENTRO das
+  // seções de critérios de aceite/requisitos (prosa solta fora delas não conta — mesmo critério do Gherkin).
+  const hasReproScenario = Boolean(acSec) && (
+    /^\s*(?:[-*+]\s*|\d+[.)]\s*|#{1,6}\s*)?(?:\*\*|__)?\s*(?:cen[áa]rio|scenario)\b[^\n]*(?:reprodu[çc][ãa]o|reproduction|reproduce|regress[ãa]o|regression)/im.test(acSec)
+    || /FAIL_TO_PASS/.test(acSec)
+  );
   const problems: string[] = [];
   if (!hasGherkin) problems.push(acSec ? "critérios de aceite sem Gherkin em bullets (Dado/Quando/Então no início da linha, em `## Critérios de aceite` ou sob cada requisito)" : "sem seção `## Critérios de aceite`/`## Requisitos` com cenários Gherkin (Dado/Quando/Então)");
   if (unrestricted.length > 0) problems.push(`escopo irrestrito em files_allowed (${unrestricted.join(", ")}) — declare módulos/pastas específicos; "tudo" anula o gate de escopo`);
   if (filesAllowed.length === 0) problems.push("seção `## Impacto` sem `files_allowed` (globs dos arquivos que a fábrica pode tocar)");
   else if (codeGlobs.length === 0) problems.push("files_allowed só com testes/docs — declare ≥1 pasta/arquivo de CÓDIGO que a fábrica pode alterar");
   if (!num) problems.push("nome fora do padrão RFC-NNNN-<slug>.md");
-  return { path: pathOrName, number: num ? parseInt(num, 10) : null, title, summary, hasGherkin, gherkinScenarios, mustCount, filesAllowed, compat, breaking, hasNonGoals, problems };
+  return { path: pathOrName, number: num ? parseInt(num, 10) : null, title, summary, hasGherkin, gherkinScenarios, mustCount, filesAllowed, compat, breaking, hasNonGoals, hasReproScenario, problems };
 }
 
 /**
@@ -227,4 +235,63 @@ export async function evaluateEvolutionGate(
     );
   }
   return { ok: true, applied: true, rfcs: rfcs.length, scope, compat };
+}
+
+// ── Fase 2 (2.6): gate do CARD por tipo ────────────────────────────────────────────────────────
+// O gate base (`evaluateEvolutionGate`: RFC presente, Gherkin, `## Impacto` com `files_allowed`) é INVARIANTE para os três tipos.
+// O tipo só ACRESCENTA exigências — nunca dispensa o gate base:
+//   evolution  → nenhuma exigência extra (rito atual);
+//   fix        → ≥1 cenário de reprodução (FAIL_TO_PASS) e compatibilidade ≤ patch (senão 409 CARD_KIND_MISMATCH);
+//   feature    → `Non-goals` / `Não-objetivos` obrigatório em ≥1 RFC do card.
+export type CardKind = "evolution" | "fix" | "feature";
+
+export type CardKindGateResult =
+  | { ok: true; kind: CardKind; rfcs: number; scope: string[]; compat: RfcCompat | null }
+  | { ok: false; code: "EVOLUTION_RFC_REQUIRED" | "EVOLUTION_RFC_INVALID" | "CARD_KIND_MISMATCH" | "CARD_KIND_REQUIREMENT"; message: string; details?: unknown };
+
+/** Núcleo puro (testável sem banco) das exigências do tipo sobre RFCs que já passaram no gate base. */
+export function checkCardKindRequirements(kind: CardKind, rfcs: ParsedRfc[]): Extract<CardKindGateResult, { ok: false }> | null {
+  if (kind === "fix") {
+    const compat = compatMax(rfcs.map((r) => r.compat));
+    if (compat === "minor" || compat === "major" || rfcs.some((r) => r.breaking)) {
+      return {
+        ok: false, code: "CARD_KIND_MISMATCH",
+        message: `Card do tipo Correção declara compatibilidade ${compat === "minor" ? "MINOR" : "MAJOR/breaking"} no RFC: uma correção não pode passar de PATCH. Troque o tipo do card para Evolução/Recurso novo ou ajuste \`## Compatibilidade\` para PATCH.`,
+        details: { kind, compat, breaking: rfcs.some((r) => r.breaking), rfcs: rfcs.map((r) => r.path) },
+      };
+    }
+    if (!rfcs.some((r) => r.hasReproScenario)) {
+      return {
+        ok: false, code: "CARD_KIND_REQUIREMENT",
+        message: "Card do tipo Correção exige um cenário de reprodução do defeito (vira o FAIL_TO_PASS do QA): acrescente nos critérios de aceite um `Cenário: reprodução do defeito` com Dado/Quando/Então que hoje FALHA.",
+        details: { kind, missing: ["repro_scenario"], rfcs: rfcs.map((r) => r.path) },
+      };
+    }
+  }
+  if (kind === "feature" && !rfcs.some((r) => r.hasNonGoals)) {
+    return {
+      ok: false, code: "CARD_KIND_REQUIREMENT",
+      message: "Card do tipo Recurso novo exige a seção `Non-goals` (Não-objetivos) em pelo menos um RFC: declare o que este recurso NÃO faz.",
+      details: { kind, missing: ["non_goals"], rfcs: rfcs.map((r) => r.path) },
+    };
+  }
+  return null;
+}
+
+/**
+ * Gate do card sobre o RASCUNHO (`extra.evolution=true`, RFCs em `docs/rfc/` do rascunho). Somente leitura (nada é gravado em
+ * `extra`): quem grava o carimbo é o gate da fábrica na promoção do filho. Gate base primeiro; só se passar o tipo é avaliado.
+ */
+export async function evaluateCardKindGate(
+  db: Db, draftProjectId: string, extra: Record<string, unknown> | null | undefined, kind: CardKind,
+): Promise<CardKindGateResult> {
+  const base = await evaluateEvolutionGate(db, draftProjectId, extra, { readOnly: true });
+  if (!base.ok) return base;
+  if (!base.applied) {
+    return { ok: false, code: "EVOLUTION_RFC_REQUIRED", message: "O rascunho do card não está marcado como evolução (extra.evolution)." };
+  }
+  const rfcs = await collectEvolutionRfcs(db, draftProjectId, extra);
+  const miss = checkCardKindRequirements(kind, rfcs);
+  if (miss) return miss;
+  return { ok: true, kind, rfcs: base.rfcs, scope: base.scope, compat: base.compat };
 }
