@@ -119,6 +119,8 @@ Modo **DO-CONFIRM**: faça a ação, depois confirme com o comando. Parar na pri
 11. [ ] Só então `EVOLVE_RECONCILER=on` (se ainda estava em `shadow` e a plataforma decidiu ligar), seguindo o fluxo do runbook §5. É global, não por tenant (runbook A8): a decisão é da plataforma, não do tenant da vez.
 12. [ ] Comunicar o tenant (§6) e abrir a janela de observação (§4).
 
+Regras que valem em TODA promoção durante o rollout (4.5c, RUNBOOK §2.7): conferir `spend.lastHourUsd` antes de promover (um card por hora, no máximo dois com o teto horário elevado e registrado); não promover o card seguinte antes de o PR do anterior estar mergeado (`CARD_PREVIOUS_UNMERGED`); `factoryHealth` ≠ `ok` pede revisão do diff antes de mergear.
+
 ## 4. Observação
 
 Frequência proposta (A-R2): a cada card nos 3 primeiros; depois diária nos 7 dias da janela; depois semanal.
@@ -255,6 +257,20 @@ O relatório da 4.5b existe agora (`EVOLUIR-PROJETO-AS-execucao-real-4-5b.md`; o
 | N-4/N-5: baseline `no_tests`/`error` | Produto sem configuração de testes (ex.: jest sem `ts-jest`) ⇒ sem baseline e sem P2P ⇒ o merge só passa com `confirm:"MERGE"`; a mensagem agora explica isso e o `confirm` fica registrado (quem, quando, motivo). Pré-condição por tenant: o produto-base deve ter suíte executável |
 | N-8: religar após pausa de orçamento | `POST /api/projects/:id/budget/resume` (humano, idempotente, auditado; RUNBOOK §3.1) em vez de repetir o `PUT /budget`; depois reiniciar cada filho listado. O Guard não é afrouxado |
 | N-1/N-2 | Do orchestrator e do ambiente (evo/r1 / decisão de ambiente); não resolvidos aqui |
+
+### 7.5 Execução 4.5c real (relatório BA) e correções da BC
+
+Resumo honesto: dos três cards, só o de Evolução (TK-0005) foi entregue (e com `confirm:"MERGE"`); o PR #8 quebrava o build do produto e o v8 herdou esse código por `disk-copy`. Correções do api-node/portal (BC; detalhe no relatório `EVOLUIR-PROJETO-BC-correcoes-promocao-base-portal.md`; D-1/D-2/D-3/D-8 são do orchestrator/`scripts/`, frente evo/u1):
+
+| Lição | O que fazer antes de ligar um tenant / ao operar |
+|---|---|
+| D-4: card promovido sobre filho aceito e não mergeado | A promoção agora responde `409 CARD_PREVIOUS_UNMERGED` (card/PR bloqueante e ação). Mergeie o PR anterior antes de promover o próximo; RUNBOOK §2.7 item 2. Fluxo legado e tenant sem a flag: inalterados. |
+| D-4: `disk-copy` silencioso | Filho de card com repositório na linhagem **não** copia do disco: falha com retry (`CODE_BASE_FETCH_FAILED`) e alerta no diálogo; `EVOLVE_CARD_DISK_COPY=on` só por decisão explícita e sempre com `codeBaseWarning` no card. RUNBOOK §2.7 item 3. |
+| Card "saudável" com gates reprovados | `factoryHealth` (ok/atenção/falhou) no card e no portal, derivado dos cinco gates reais do aceite. Tratar `failed`/`attention` como pendência de revisão, mesmo com PR publicado. |
+| Merge com escopo violado só pela API | A aba Evolução do portal tem `blocked_scope`, a lista de arquivos e a confirmação dupla; o checklist do §3 (item 9) continua: se aparecer `confirmScope`, pare e investigue. |
+| D-6: kill switch por gasto horário | **Escalone as promoções pelo gasto da última hora** (RUNBOOK §2.7 item 1; era a nota A14). Antes de cada promoção: `spend.lastHourUsd + 8 ≤ teto horário`. Teto do tenant abaixo do global. |
+
+Condição nova para a onda 1 (ZFactory) e para qualquer cliente: rodar de novo os três tipos de card só depois de D-1/D-2 (aceite do Cyborg) estarem corrigidos no orchestrator; a BC não os resolve.
 
 ## 8. Lacunas
 
