@@ -4,7 +4,7 @@
 
 ## Status
 
-Rascunho
+Aceito/Implementado (decisão do Jean em 2026-11-04; implementado na migration 128 e nas rotas de tickets). Evolução prevista: cards na Bancada — ver `project/docs/plans/EVOLUIR-PROJETO-BANCADA-plano.md`.
 
 ## Data
 
