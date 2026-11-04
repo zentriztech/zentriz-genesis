@@ -1964,7 +1964,134 @@ def parse_cyborg_done(stdout: str) -> dict:
 
 # ── Orquestrador V3 ───────────────────────────────────────────────────────────
 
+# ── N-3 (4.5b): gate de ÁRVORE do Cyborg — enxerga qualquer arquivo novo/alterado, inclusive lockfiles ──────
+# O gate D-1 só cobre o que o Cyborg grava via `autonomous_rework`. O `/cyborg-build` (pnpm install) criou
+# `pnpm-lock.yaml` (+5.486 linhas) fora do `files_allowed` e `violations` ficou `{}`: ninguém viu. Agora a
+# árvore de apps/ é fotografada ANTES do Cyborg e comparada DEPOIS (build, engenheiro e rework incluídos).
+_GEN_LOCKFILES = frozenset({"pnpm-lock.yaml", "package-lock.json", "yarn.lock", "npm-shrinkwrap.json", "bun.lockb"})
+_BUILD_BYPRODUCT_SUFFIXES = (".tsbuildinfo",)
+_BUILD_BYPRODUCT_NAMES = frozenset({"next-env.d.ts", ".eslintcache"})
+_SNAPSHOT_HASH_MAX = 2_000_000
+
+
+def snapshot_apps_tree(apps_dir: Path) -> dict[str, tuple]:
+    """`{rel_path: (sha1|size, bytes|None)}` de apps/ SEM descer em node_modules/dist/.next/.git…
+    (dependências/artefatos de build não entram: não são publicáveis e fotografá-los custaria minutos).
+    Bytes só são guardados para lockfiles (permitem restaurar um lockfile pré-existente que o build reescreveu)."""
+    import hashlib
+    from orchestrator.context_files import CONTEXT_SKIP_DIRS
+    out: dict[str, tuple] = {}
+    if not apps_dir or not Path(apps_dir).is_dir():
+        return out
+    for dirpath, dirnames, filenames in os.walk(apps_dir):
+        dirnames[:] = [d for d in dirnames if d not in CONTEXT_SKIP_DIRS]
+        for fn in filenames:
+            fp = Path(dirpath) / fn
+            if fp.is_symlink():
+                continue
+            rel = str(fp.relative_to(apps_dir)).replace("\\", "/")
+            try:
+                size = fp.stat().st_size
+                if size <= _SNAPSHOT_HASH_MAX or fn in _GEN_LOCKFILES:
+                    data = fp.read_bytes()
+                    out[rel] = (hashlib.sha1(data).hexdigest(), data if fn in _GEN_LOCKFILES else None)
+                else:
+                    out[rel] = (f"size:{size}", None)
+            except OSError:
+                continue
+    return out
+
+
+def audit_apps_tree_changes(apps_dir: Path, before: dict[str, tuple], scope: list[str] | None,
+                            *, fix: bool = True) -> tuple[list[str], list[str]]:
+    """Compara apps/ agora vs `before`. Devolve `(violações_pendentes, corrigidas)`.
+
+    - lockfile NOVO fora do escopo ⇒ gerado por install/build ⇒ REMOVIDO (se `fix`) e registrado (corrigida);
+    - lockfile pré-existente REESCRITO fora do escopo ⇒ restaurado do snapshot (corrigida);
+    - qualquer outro arquivo novo/alterado/removido fora de `files_allowed` (só quando há escopo de evolução)
+      ⇒ violação PENDENTE (não é desfeita automaticamente: pode ser trabalho legítimo a revisar).
+    Subprodutos de build conhecidos (`*.tsbuildinfo`, `next-env.d.ts`) não contam."""
+    from orchestrator.runner import _evo_path_allowed
+    after = snapshot_apps_tree(apps_dir)
+    pending: list[str] = []
+    fixed: list[str] = []
+    scope = list(scope or [])
+    for rel in sorted(set(before) | set(after)):
+        b, a = before.get(rel), after.get(rel)
+        if b is not None and a is not None and b[0] == a[0]:
+            continue
+        name = rel.rsplit("/", 1)[-1]
+        if name in _BUILD_BYPRODUCT_NAMES or name.endswith(_BUILD_BYPRODUCT_SUFFIXES):
+            continue
+        allowed = bool(scope) and _evo_path_allowed(rel, scope)
+        if name in _GEN_LOCKFILES:
+            if allowed:
+                continue
+            if b is None:
+                msg = f"LOCKFILE GERADO por install/build fora do escopo: apps/{rel}"
+                if fix:
+                    try:
+                        (Path(apps_dir) / rel).unlink(); fixed.append(msg + " — REMOVIDO")
+                    except OSError as e:
+                        pending.append(msg + f" — falha ao remover ({e})")
+                else:
+                    pending.append(msg)
+            elif a is not None and b[1] is not None:
+                msg = f"LOCKFILE REESCRITO por install/build fora do escopo: apps/{rel}"
+                if fix:
+                    try:
+                        (Path(apps_dir) / rel).write_bytes(b[1]); fixed.append(msg + " — RESTAURADO")
+                    except OSError as e:
+                        pending.append(msg + f" — falha ao restaurar ({e})")
+                else:
+                    pending.append(msg)
+            elif a is None:
+                pending.append(f"LOCKFILE REMOVIDO fora do escopo: apps/{rel}")
+            continue
+        if scope and not allowed:
+            kind = "NOVO" if b is None else ("REMOVIDO" if a is None else "ALTERADO")
+            pending.append(f"ARQUIVO {kind} FORA DO ESCOPO do RFC: apps/{rel}")
+    return pending, fixed
+
+
 def run_cyborg_v3(project_id: str, tenant_id: str | None, prod_id: str | None) -> CyborgV3Run:
+    """Executa o Cyborg V3 e, ao final, audita a ÁRVORE de apps/ contra o escopo do RFC (N-3).
+    `CYBORG_TREE_GATE=off` desliga (volta ao comportamento anterior)."""
+    gate_on = os.environ.get("CYBORG_TREE_GATE", "on").strip().lower() not in ("0", "off", "false", "no")
+    apps_dir = _resolve_proj_dir(project_id, prod_id) / "apps" if gate_on else None
+    before = snapshot_apps_tree(apps_dir) if gate_on else {}
+    run, err = None, None
+    try:
+        run = _run_cyborg_v3_impl(project_id, tenant_id, prod_id)
+    except BaseException as e:  # a auditoria/limpeza de lockfiles roda mesmo se o Cyborg explodiu; depois re-lança
+        err = e
+    if not gate_on:
+        if err is not None:
+            raise err
+        return run
+    try:
+        scope = _cyborg_evolution_scope(project_id)
+        pending, fixed = audit_apps_tree_changes(apps_dir, before, scope)
+        if fixed or pending:
+            _persist_cyborg_violations(project_id, prod_id, fixed + pending)
+            logger.warning("[Cyborg tree] %d corrigida(s), %d pendente(s): %s", len(fixed), len(pending),
+                           "; ".join((fixed + pending)[:5]))
+            _post_dialogue(project_id,
+                f"⛔ Cyborg — gate de árvore: {len(fixed)} artefato(s) de build/install revertido(s) e "
+                f"{len(pending)} violação(ões) de escopo: " + "; ".join((fixed + pending)[:3])
+                + ("…" if len(fixed) + len(pending) > 3 else ""))
+        if pending and run is not None and run.final_status == "delivered":
+            run.final_status = "needs_human"
+            run.reason = (f"gate de árvore: {len(pending)} arquivo(s) novo(s)/alterado(s) fora do escopo do RFC: "
+                          + "; ".join(pending[:3]) + " — ver docs/cyborg/scope_violations.json. " + (run.reason or ""))
+    except Exception as e:  # o gate nunca derruba a entrega por falha própria, mas falha ALTO no log
+        logger.error("[Cyborg tree] gate de árvore falhou (%s: %s) — árvore NÃO auditada", type(e).__name__, e)
+    if err is not None:
+        raise err
+    return run
+
+
+def _run_cyborg_v3_impl(project_id: str, tenant_id: str | None, prod_id: str | None) -> CyborgV3Run:
     # ⚖️ LEI 2026-09-10 — o Cyborg passa a nascer do SLOT do tenant (provider + modelo +
     # credencial), como a Bancada e a Fábrica. Antes ele era o único plano 100% env: modelo literal
     # da Zentriz invocado com a identidade do container. Falha alto: sem slot, não há run.

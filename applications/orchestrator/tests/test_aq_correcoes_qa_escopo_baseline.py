@@ -174,7 +174,9 @@ def test_d4_casos_que_nao_reprovam(monkeypatch):
     monkeypatch.delenv("EVOLUTION_P2P_MODE", raising=False)
     monkeypatch.delenv("EVOLUTION_P2P_REQUIRED", raising=False)
     assert runner._evo_p2p_unmeasured_reason(_ctx({"status": "ok", "passed": 10, "failed": 0})) is None
-    assert runner._evo_p2p_unmeasured_reason(_ctx({"status": "ok", "no_tests": True})) is None   # nada a comparar
+    # N-4 (4.5b): `no_tests` NÃO é mais "nada a comparar" — é baseline não medida (falha alto, acionável).
+    _nt = runner._evo_p2p_unmeasured_reason(_ctx({"status": "ok", "no_tests": True}))
+    assert _nt and "NÃO medida" in _nt and "EVOLUTION_P2P_REQUIRED=0" in _nt
     assert runner._evo_p2p_unmeasured_reason(_ctx(None)) is None                                 # baseline não tentada
     assert runner._evo_p2p_unmeasured_reason(None) is None
     monkeypatch.setenv("EVOLUTION_P2P_REQUIRED", "0")

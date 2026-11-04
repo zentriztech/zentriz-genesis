@@ -362,7 +362,35 @@ def _cli_env_from_slot(llm: dict, model_id: str = "", fallback_id: str = "",
     return out
 
 
-def _slot_cli_attempts(payload: dict, creds_dir: str = "") -> list:
+def _slot_unusable_reason(llm: dict, model: str = "") -> str:
+    """N-7 (4.5b) — POR QUE um slot "não dirige o executor". Mesma árvore de decisão de `_cli_env_from_slot`,
+    só que devolvendo o motivo acionável (sem segredo). Causa-raiz do 502 do `/run-full-test` no dev: o slot
+    Bedrock do tenant chegou SEM `aws_access_key_id`/`aws_secret_access_key` (o runner só os repassa se estiverem
+    no env do processo; no dev o Bedrock roda por instance role) e a LEI dos slots proíbe rodar o executor na
+    identidade do host ⇒ fail-closed. Não é bug do CLI: é credencial própria ausente no slot."""
+    prov = (llm.get("provider") or "").strip().lower()
+    model = (model or llm.get("model") or "").strip()
+    if not prov or not model:
+        return "slot sem provider/modelo"
+    if prov == "bedrock":
+        if not (llm.get("aws_access_key_id") or "").strip() or not (llm.get("aws_secret_access_key") or "").strip():
+            return ("slot Bedrock sem credencial própria (aws_access_key_id/aws_secret_access_key ausentes — "
+                    "instance role do host é proibida pela LEI dos slots); cadastre as chaves no slot do tenant")
+    elif prov == "anthropic":
+        if not (llm.get("api_key") or "").strip():
+            return "slot Anthropic sem api_key"
+    elif prov == "foundry":
+        return "slot Foundry sem foundry_api_key e base_url/resource"
+    elif prov == "google":
+        if "claude" not in model.lower():
+            return "provider google com modelo não-Claude (o CLI só fala o protocolo Anthropic)"
+        return "slot Vertex sem projeto/service account"
+    else:
+        return f"provider '{prov}' não é dirigido pelo CLI (só bedrock/anthropic/foundry/google-Claude)"
+    return "credencial do slot inutilizável"
+
+
+def _slot_cli_attempts(payload: dict, creds_dir: str = "", skipped: list | None = None) -> list:
     """Fila `[(slot_env, rótulo), …]` na ordem do tenant: o slot escolhido e depois as
     contingências. Lista VAZIA ⇒ o payload não trouxe slot (chamador legado).
 
@@ -386,7 +414,10 @@ def _slot_cli_attempts(payload: dict, creds_dir: str = "") -> list:
         vistos.add(chave)
         env = _cli_env_from_slot(llm, model, fb, creds_dir)
         if env is None:
-            log.warning(f"[slot] {prov or '?'}/{model or '?'} não dirige o executor — pulado")
+            _why = _slot_unusable_reason(llm, model)
+            log.warning(f"[slot] {prov or '?'}/{model or '?'} não dirige o executor — pulado: {_why}")
+            if skipped is not None:
+                skipped.append(f"{prov or '?'}/{model or '?'}: {_why}")
             continue
         out.append((env, f"{prov}/{model}"))
     return out
@@ -469,7 +500,8 @@ def _run_claude_cli(cmd: list, cwd: str, env: dict, entrada: str, timeout: int) 
 
 
 def _slot_envs(payload: dict, project_id: str, prod_id: str, model_id: str,
-               scoped_token: str, creds_dir: str, com_wrappers: bool = True) -> list:
+               scoped_token: str, creds_dir: str, com_wrappers: bool = True,
+               skipped: list | None = None) -> list:
     """Envs COMPLETOS de sandbox, um por slot utilizável, na ordem do tenant.
 
     Três saídas distintas, de propósito:
@@ -492,7 +524,7 @@ def _slot_envs(payload: dict, project_id: str, prod_id: str, model_id: str,
         return env
 
     tentativas = [(_montar(slot_env), label)
-                  for slot_env, label in _slot_cli_attempts(payload, creds_dir)]
+                  for slot_env, label in _slot_cli_attempts(payload, creds_dir, skipped)]
     if tentativas:
         return tentativas
     if payload.get("llm_config"):
@@ -509,8 +541,8 @@ def _rodar_com_cascata_de_slots(payload: dict, project_id: str, prod_id: str, mo
 
     ⚖️ *"sempre testando se funciona e em caso de nao funcionar testa o proximo"*.
     """
-    tentativas = _slot_envs(payload, project_id, prod_id, model_id, scoped_token, creds_dir)
     falhas: list = []
+    tentativas = _slot_envs(payload, project_id, prod_id, model_id, scoped_token, creds_dir, skipped=falhas)
     for i, (env, label) in enumerate(tentativas):
         ultimo = (i == len(tentativas) - 1)
         if label:
@@ -641,6 +673,85 @@ def _heartbeat_thread(project_id: str, genesis_api_url: str, genesis_token: str,
             urllib.request.urlopen(req, timeout=10)
         except Exception as e:
             log.debug("[CYBORG] heartbeat falhou: %s", e)
+
+
+# ── 4.5b N-2/N-3/N-4 — helpers puros (testáveis sem subir o servidor) ────────────────────────────────────
+_COPY_IGNORE = ("node_modules", ".git", ".venv-genesis", ".venv", "venv", "__pycache__", ".next", "dist", "build",
+                "coverage", ".turbo", ".pytest_cache")
+_LOCKFILES = ("pnpm-lock.yaml", "package-lock.json", "yarn.lock", "npm-shrinkwrap.json", "bun.lockb")
+
+
+def _copy_project_for_tests(src: Path, dst: Path) -> Path:
+    """N-2 (4.5b) — copia o projeto para um diretório PRÓPRIO do executor e o torna gravável.
+
+    O runner (container, root) cria `/tmp/zentriz-files/<id>/` como root; o FTS roda como `ubuntu` ⇒ `npm
+    install` no diretório do projeto dava EACCES (rc=243) e a baseline virava `error`. Instalar/rodar numa
+    cópia resolve sem mexer em ownership do runner e ainda evita poluir o projeto (node_modules,
+    package-lock.json, .venv-genesis) com artefatos que o Dev/Cyborg depois leriam ou publicariam (N-1/N-3).
+    Dependências/artefatos NÃO são copiados (são reinstalados na cópia)."""
+    shutil.copytree(src, dst, symlinks=True, ignore=shutil.ignore_patterns(*_COPY_IGNORE))
+    for root, dirs, files in os.walk(dst):
+        for n in dirs + files:
+            fp = os.path.join(root, n)
+            if os.path.islink(fp):
+                continue
+            try:
+                os.chmod(fp, os.stat(fp).st_mode | 0o200 | (0o100 if os.path.isdir(fp) else 0))
+            except OSError:
+                pass
+    try:
+        os.chmod(dst, os.stat(dst).st_mode | 0o700)
+    except OSError:
+        pass
+    return dst
+
+
+def _jest_zero_tests_error(parsed: dict, rc) -> str | None:
+    """N-4 (4.5b) — jest/vitest que termina com exit≠0 e 0 testes por SUÍTES que falharam ao carregar/transformar
+    (produto sem `jest.config`/`ts-jest`: 23 de 23 suítes falhavam no Babel) NÃO é "sem testes": é medição
+    quebrada. Devolve a mensagem de erro (⇒ status `error`) ou None quando é um `no_tests` legítimo."""
+    if int(parsed.get("numTotalTests") or 0) != 0:
+        return None
+    failed_suites = int(parsed.get("numFailedTestSuites") or 0) + int(parsed.get("numRuntimeErrorTestSuites") or 0)
+    if rc in (0, None) and failed_suites == 0:
+        return None
+    first = ""
+    for fr in parsed.get("testResults") or []:
+        msg = str(fr.get("message") or "").strip()
+        if msg:
+            first = msg.splitlines()[0][:200]
+            break
+    total_suites = int(parsed.get("numTotalTestSuites") or 0)
+    return (f"{failed_suites or '?'} de {total_suites or '?'} suíte(s) falharam ao carregar/transformar (0 testes executados, "
+            f"exit {rc}); provável falta de configuração de testes do produto (jest.config/ts-jest).{(' ' + first) if first else ''}")
+
+
+def _pick_node_pm(apps_dir: Path) -> tuple[str, str, str]:
+    """N-3 (4.5b) — gerenciador pelo LOCKFILE EXISTENTE (antes: sempre pnpm, que gerou `pnpm-lock.yaml`
+    +5.486 linhas num projeto npm). Devolve `(nome, install_cmd, build_cmd)`. Sem lockfile → pnpm (legado),
+    mas o chamador remove o lockfile gerado."""
+    if (apps_dir / "package-lock.json").is_file() or (apps_dir / "npm-shrinkwrap.json").is_file():
+        return "npm", "npm install --no-audit --no-fund --prefer-offline 2>&1 | tail -50", "npm run build 2>&1 | tail -80"
+    if (apps_dir / "yarn.lock").is_file():
+        return "yarn", "yarn install 2>&1 | tail -50", "yarn build 2>&1 | tail -80"
+    return "pnpm", "pnpm install --prefer-offline --no-frozen-lockfile 2>&1 | tail -50", "pnpm build 2>&1 | tail -80"
+
+
+def _lockfiles_present(apps_dir: Path) -> set[str]:
+    return {n for n in _LOCKFILES if (apps_dir / n).is_file()}
+
+
+def _remove_generated_lockfiles(apps_dir: Path, before: set[str]) -> list[str]:
+    """N-3 — remove os lockfiles que o install/build CRIOU (não existiam antes). O build é verificação, não
+    pode deixar artefato rastreável no produto. Lockfile pré-existente nunca é tocado aqui."""
+    removed = []
+    for n in sorted(_lockfiles_present(apps_dir) - set(before)):
+        try:
+            (apps_dir / n).unlink()
+            removed.append(n)
+        except OSError as e:
+            log.warning(f"[cyborg-build] não consegui remover {n} gerado: {e}")
+    return removed
 
 
 # ── Evoluir bloco 3 F3a — parsers PUROS dos reporters (testáveis com fixtures; sem I/O de processo) ─────────
@@ -781,7 +892,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except FileNotFoundError as e:
                 return -1, f"binário ausente: {e}"
 
+        workdir_root = None
         try:
+            # N-2 (4.5b): instala/roda numa CÓPIA do projeto, de propriedade do executor — o diretório do runner
+            # (root) não é gravável pelo FTS (EACCES no npm install) e não deve receber node_modules/lockfile.
+            # `FTS_TESTS_INPLACE=1` restaura o comportamento antigo (cache de node_modules no projeto).
+            if os.environ.get("FTS_TESTS_INPLACE", "0").strip().lower() not in ("1", "true", "on", "yes"):
+                try:
+                    workdir_root = Path(tempfile.mkdtemp(prefix="genesis-run-tests-"))
+                    app_dir = _copy_project_for_tests(app_dir, workdir_root / "apps")
+                    result["workdir"] = "copy"
+                except Exception as e:
+                    result.update({"status": "error", "error": f"cópia do projeto para o diretório de testes falhou: {type(e).__name__}: {str(e)[:300]}"})
+                    raise StopIteration
             pkg = app_dir / "package.json"
             if pkg.is_file():
                 try:
@@ -828,6 +951,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if isinstance(parsed, dict) and "numTotalTests" in parsed:
                     result.update(_parse_jest_json(parsed, app_dir))
                     result["status"] = "no_tests" if result["no_tests"] else ("passed" if result["failed"] == 0 and rc == 0 else "failed")
+                    _zero_err = _jest_zero_tests_error(parsed, rc)  # N-4: suítes quebradas ≠ "sem testes"
+                    if _zero_err:
+                        result.update({"status": "error", "no_tests": False, "error": _zero_err})
                 else:
                     # npm test sem reporter: só exit code (sem ids) — honesto sobre a limitação
                     result["status"] = "passed" if rc == 0 else "failed"
@@ -890,6 +1016,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for f in tmp_files:
                 try: os.unlink(f)
                 except OSError: pass
+            if workdir_root is not None:
+                shutil.rmtree(workdir_root, ignore_errors=True)
         result["duration_ms"] = int((time.time() - t0) * 1000)
         result["tests"] = result["tests"][:2000]
         self._json(200, result)
@@ -1022,12 +1150,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # chaves AWS, JWT_SECRET, Foundry). Um postinstall malicioso não acha nada nosso.
         build_env = _sanitized_base_env()
 
-        # 1. pnpm install (leve — usa lockfile se existir)
-        log.info(f"[cyborg-build] {project_id[:8]}: pnpm install em {apps_dir}")
+        # 1. install (gerenciador pelo LOCKFILE EXISTENTE — N-3: antes sempre pnpm, que criou pnpm-lock.yaml
+        #    (+5.486 linhas) num projeto npm e o arquivo foi parar no PR).
+        _pm, _install_cmd, _build_cmd = _pick_node_pm(apps_dir)
+        _locks_before = _lockfiles_present(apps_dir)
+        log.info(f"[cyborg-build] {project_id[:8]}: {_pm} install em {apps_dir}")
         install_rc = -1; install_out = ""
         try:
             r = subprocess.run(
-                "pnpm install --prefer-offline --no-frozen-lockfile 2>&1 | tail -50",
+                _install_cmd,
                 cwd=str(apps_dir), shell=True, capture_output=True, text=True, timeout=180,
                 env=build_env,
             )
@@ -1037,11 +1168,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             install_out = "TIMEOUT after 180s"
 
         # 2. pnpm build
-        log.info(f"[cyborg-build] {project_id[:8]}: pnpm build")
+        log.info(f"[cyborg-build] {project_id[:8]}: {_pm} build")
         build_rc = -1; build_out = ""
         try:
             r = subprocess.run(
-                "pnpm build 2>&1 | tail -80",
+                _build_cmd,
                 cwd=str(apps_dir), shell=True, capture_output=True, text=True, timeout=timeout,
                 env=build_env,
             )
@@ -1062,6 +1193,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             tc_out = (r.stdout or "")[-2000:]
         except Exception:
             pass
+
+        # N-3: o build é VERIFICAÇÃO — não pode deixar lockfile novo no produto (seria publicado no PR).
+        _removed_locks = _remove_generated_lockfiles(apps_dir, _locks_before)
+        if _removed_locks:
+            log.warning(f"[cyborg-build] {project_id[:8]}: lockfile(s) gerado(s) pelo build removido(s): {_removed_locks}")
 
         # T-09 sub-fase 2f: fingerprint check (grep semântico contra type_policy)
         # Só roda se payload trouxer project_type e o módulo type_fingerprint estiver disponível.
@@ -1098,6 +1234,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._json(200, {
             "build_rc": build_rc,
             "build_output": build_out,
+            "package_manager": _pm,
+            "generated_lockfiles_removed": _removed_locks,
             "install_rc": install_rc,
             "install_output": install_out,
             "type_check_rc": tc_rc,
@@ -1626,7 +1764,7 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
         try:
             subprocess_env, slot_label, slot_falhas = None, "", []
             for _env, _label in _slot_envs(body, project_id, "", body.get("model_id", ""), "",
-                                           creds_dir, com_wrappers=False):
+                                           creds_dir, com_wrappers=False, skipped=slot_falhas):
                 if _label:
                     _ok, _motivo = _probe_cli_slot(CLAUDE_BIN, _env, str(apps_path))
                     if not _ok:
@@ -1640,7 +1778,8 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
                 self._json(502, {"status": "error", "approved": False,
                                  "llm_slots_descartados": slot_falhas,
                                  "output": "nenhum slot de LLM do tenant conseguiu rodar o "
-                                           "TSK-FULL-TEST — revise Configurações → LLM"})
+                                           "TSK-FULL-TEST — revise Configurações → LLM"
+                                           + (f" ({'; '.join(slot_falhas)[:300]})" if slot_falhas else "")})
                 return
             if not slot_label and api_key:
                 subprocess_env["ANTHROPIC_API_KEY"] = api_key

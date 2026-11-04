@@ -710,11 +710,27 @@ def _evo_p2p_unmeasured_reason(pipeline_ctx) -> str | None:
     if os.environ.get("EVOLUTION_P2P_REQUIRED", "1").strip().lower() in ("0", "off", "false", "no"):
         return None
     bl = getattr(pipeline_ctx, "evolution_baseline", None)
-    if not isinstance(bl, dict) or bl.get("no_tests"):
+    if not isinstance(bl, dict):
         return None
+    if bl.get("no_tests"):
+        # N-4 (4.5b): `no_tests` NÃO é baseline confiável. Era tratado como "nada a comparar" e desligava o
+        # P2P em silêncio (produto sem `jest.config`: 23 de 23 suítes falhavam ao transformar TS e a
+        # medição virava "0 testes"). Agora é "não medida": falha ALTO, acionável; a saída explícita é
+        # `EVOLUTION_P2P_REQUIRED=0` (opt-out acima) — ou dar ao produto uma suíte executável.
+        return ("baseline da suíte NÃO medida: o produto não tem testes executáveis (status=no_tests; "
+                "sem configuração de testes ou sem nenhum teste). Adicione/configure a suíte do produto "
+                "(ex.: jest.config + ts-jest) ou defina EVOLUTION_P2P_REQUIRED=0 para aceitar a evolução sem "
+                "gate de não-regressão")
     if bl.get("status") == "error":
         return f"baseline da suíte NÃO medida ({str(bl.get('error') or 'erro desconhecido')[:160]})"
     return None
+
+
+def _evo_baseline_needs_measure(baseline) -> bool:
+    """N-5 (4.5b): baseline ausente OU com `status=error` precisa ser (re)medida ao iniciar/retomar.
+    Antes só `not baseline` era testado: um dict de erro é "truthy" e ficava preso no checkpoint para
+    sempre (foi preciso apagar o checkpoint à mão). `no_tests`/`ok` são medições concluídas: não se repetem."""
+    return not isinstance(baseline, dict) or not baseline or baseline.get("status") == "error"
 
 
 def _evo_path_is_infra(rel_path: str) -> bool:
@@ -3360,6 +3376,31 @@ def _validate_response_quality(agent: str, response: dict) -> tuple[bool, list[s
 FULL_TEST_NOT_RUN_STATUS = "CANCELLED"   # único status terminal "não executada" aceito pelo schema (project_tasks_status_check)
 
 
+def _full_test_failure_reason(exc: BaseException) -> str:
+    """N-7/TSK-FULL-TEST (4.5b) — motivo LEGÍVEL da não-execução do `/run-full-test`.
+
+    Antes o `except` engolia tudo num `logger.info` e o NOT_RUN dizia só "full-test-server indisponível ou
+    sem resultado": um 502 por "slot sem credencial própria" (decisão da LEI dos slots, não indisponibilidade)
+    era indistinguível de servidor fora do ar. Agora o motivo carrega o HTTP e o `output`/`llm_slots_descartados`
+    do corpo (sem segredos: o FTS já os higieniza)."""
+    msg = str(exc) or type(exc).__name__
+    m = re.search(r"/run-full-test retornou (\d+): (.*)$", msg, re.S)
+    if not m:
+        return f"full-test-server inacessível ({msg[:200]})"
+    code, body = m.group(1), m.group(2)
+    detail = body
+    try:
+        j = json.loads(body)
+        if isinstance(j, dict):
+            partes = [str(j.get("output") or j.get("error") or "").strip()]
+            if j.get("llm_slots_descartados"):
+                partes.append("slots descartados: " + "; ".join(str(x) for x in j["llm_slots_descartados"])[:200])
+            detail = " | ".join(x for x in partes if x) or body
+    except Exception:
+        pass
+    return f"full-test-server respondeu HTTP {code}: {detail[:300]}"
+
+
 def _declare_full_test_not_run(project_id: str | None, request_id: str, reason: str, host_cmd: str,
                                proj_container_dir: "Path | None", task_state=None) -> str:
     """D-3 (AQ) — `TSK-FULL-TEST` que NÃO executou nada não pode terminar `DONE`/aprovada.
@@ -5689,6 +5730,7 @@ Execute agora sem pedir confirmação.
 
                     # Tentar executar Claude Code Agent automaticamente via subprocess no host
                     _ft_executed = False
+                    _ft_fail_reason = ""  # N-7: causa REAL da não-execução (HTTP/corpo do FTS), nunca só "indisponível"
                     _ft_result_text = ""
                     # GAP-85: o veredicto ESTRUTURADO do agente era logado e jogado fora, e a decisão
                     # saía de substring na prosa. Agora ele sobrevive até a decisão.
@@ -5749,7 +5791,8 @@ Execute agora sem pedir confirmação.
                             logger.info("[TASK-FULL-TEST] Server respondeu: status=%s approved=%s",
                                         _ft_resp.get("status"), _ft_resp.get("approved"))
                         except Exception as _srv_err:
-                            logger.info("[TASK-FULL-TEST] full-test-server indisponível (%s) — modo manual", _srv_err)
+                            _ft_fail_reason = _full_test_failure_reason(_srv_err)
+                            logger.warning("[TASK-FULL-TEST] full-test-server não executou (%s) — NOT_RUN", _ft_fail_reason)
 
                     if _ft_executed and _ft_result_text:
                         # Salvar resultado no disco
@@ -5887,8 +5930,8 @@ Execute agora sem pedir confirmação.
                         _host_cmd = f"claude --print --dangerously-skip-permissions --cwd '{_proj_host_dir}/apps' \"Execute as instruções em: {Path(_host_root or '') / (project_id or '') / 'project' / 'full-test-prompt.md'}\""
                         _declare_full_test_not_run(
                             project_id, request_id,
-                            "full-test-server indisponível ou sem resultado (FULL_TEST_SERVER_URL="
-                            f"{os.environ.get('FULL_TEST_SERVER_URL', '?')})",
+                            (_ft_fail_reason or "full-test-server indisponível ou sem resultado")
+                            + f" (FULL_TEST_SERVER_URL={os.environ.get('FULL_TEST_SERVER_URL', '?')})",
                             _host_cmd, _proj_container_dir, _task_state,
                         )
 
@@ -6452,7 +6495,7 @@ def main() -> int:
 
         # Bloco 3 F3b — BASELINE da suíte legada (antes de qualquer mudança do Dev), via executor isolado
         # (rota B). Só quando há código e EVOLUTION_P2P_MODE != off; falha → sem baseline (nunca bloqueia).
-        if _child_has_code and os.environ.get("EVOLUTION_P2P_MODE", "final").lower() != "off" and not pipeline_ctx.evolution_baseline:
+        if _child_has_code and os.environ.get("EVOLUTION_P2P_MODE", "final").lower() != "off" and _evo_baseline_needs_measure(pipeline_ctx.evolution_baseline):
             try:
                 # Baseline é síncrona antes do CTO → teto PRÓPRIO menor (adversarial D); o final usa EVOLUTION_P2P_TIMEOUT.
                 _bl = _evo_run_tests(project_id, Path(_files_root_evo) / project_id, timeout=int(os.environ.get("EVOLUTION_P2P_BASELINE_TIMEOUT", "300")))
@@ -6466,7 +6509,9 @@ def main() -> int:
                     if _bl.get("tests_reliable") is False:
                         _post_step(f"Evolução: a suíte roda ({_bl.get('stack')}) mas sem reporter por teste — não-regressão só por exit code/contagem.", request_id)
                     if _bl.get("no_tests"):
-                        _post_step("Evolução: a versão anterior não tem suíte de testes executável — sem baseline de não-regressão.", request_id)
+                        _post_step("🔴 Evolução: a versão anterior não tem suíte de testes executável (no_tests) — baseline NÃO medida; "
+                                   "o gate de não-regressão (P2P) será REPROVADO ALTO no TSK-FULL-TEST "
+                                   "(EVOLUTION_P2P_REQUIRED=0 é a saída explícita).", request_id)
                     elif _bl.get("status") == "error":
                         _post_step(
                             f"🔴 Evolução: baseline da suíte NÃO MEDIDA ({str(_bl.get('error') or '')[:120]}) — o gate de "
