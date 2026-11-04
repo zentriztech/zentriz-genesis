@@ -2,7 +2,7 @@
  * featureFlags.ts — RESOLUÇÃO ÚNICA das flags da Fase 1' (achado M-03 da revisão adversarial).
  *
  * Flags cobertas (todas `off` por padrão): EVOLVE_CLAIM, TICKET_TRANSITIONS, EVOLUTION_PROMOTE_BANCADA,
- * ATTACHMENTS_STRICT, TASK_INHERIT_TRANSITIVE, CARDS_BANCADA (bool 0|1) e EVOLVE_RECONCILER (tri 0=off | 1=shadow | 2=on).
+ * ATTACHMENTS_STRICT, ATTACHMENT_CONVERSION, TASK_INHERIT_TRANSITIVE, CARDS_BANCADA (bool 0|1) e EVOLVE_RECONCILER (tri 0=off | 1=shadow | 2=on).
  *
  * PRECEDÊNCIA (a mais específica vence; NUNCA o ambiente sobrepõe o tenant):
  *   1. `genesis_runtime_config` com `tenant_id = <tenant do recurso>`  — decisão EXPLÍCITA do tenant (só zentriz_admin grava);
@@ -29,6 +29,7 @@ export const FLAG_DEFS = {
   EVOLUTION_PROMOTE_BANCADA: { key: "EVOLUTION_PROMOTE_BANCADA", kind: "bool", label: "Evoluir: filho promovível na Bancada" },
   ATTACHMENTS_STRICT: { key: "ATTACHMENTS_STRICT", kind: "bool", label: "Anexos do card: modo estrito (api e runner)" },
   TASK_INHERIT_TRANSITIVE: { key: "TASK_INHERIT_TRANSITIVE", kind: "bool", label: "Herança transitiva de tasks (runner)" },
+  ATTACHMENT_CONVERSION: { key: "ATTACHMENT_CONVERSION", kind: "bool", label: "Anexos do card: conversão automática pdf/doc/docx para .md (exige ATTACHMENTS_STRICT)" },
   EVOLVE_RECONCILER: { key: "EVOLVE_RECONCILER", kind: "tri", label: "Reconciliador do /evolve (0=off, 1=shadow, 2=on)" },
   // Fase 2 (2.5): portas de entrada dos cards na Bancada. Ligar para o tenant dispara o backfill de card_state (services/cardsBackfill.ts).
   CARDS_BANCADA: { key: "CARDS_BANCADA", kind: "bool", label: "Bancada: cards (máquina de estados, rascunho de card)" },

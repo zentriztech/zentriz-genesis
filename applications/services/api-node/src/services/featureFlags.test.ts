@@ -76,7 +76,7 @@ describe("resolveFlag — precedência", () => {
     expect(await effectiveProjectFlags(fakeDb(rows), "B")).toMatchObject({ attachmentsStrict: false });
   });
   it("as sete flags de rollout são reconhecidas (guarda adminOnly)", () => {
-    expect([...FLAG_NAMES].sort()).toEqual(["ATTACHMENTS_STRICT", "CARDS_BANCADA", "EVOLUTION_PROMOTE_BANCADA", "EVOLVE_CLAIM", "EVOLVE_RECONCILER", "TASK_INHERIT_TRANSITIVE", "TICKET_TRANSITIONS"]);
+    expect([...FLAG_NAMES].sort()).toEqual(["ATTACHMENTS_STRICT", "ATTACHMENT_CONVERSION", "CARDS_BANCADA", "EVOLUTION_PROMOTE_BANCADA", "EVOLVE_CLAIM", "EVOLVE_RECONCILER", "TASK_INHERIT_TRANSITIVE", "TICKET_TRANSITIONS"]);
     expect(isRolloutFlagKey("EVOLVE_CLAIM")).toBe(true);
     expect(isRolloutFlagKey("AGENT_TIMEOUT_PM")).toBe(false);
     expect(isRolloutFlagKey("toString")).toBe(false);

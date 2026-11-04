@@ -17,6 +17,7 @@ import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { sha256Hex } from "../lib/specTreeHash.js";
+import { kickTicketConversions } from "../services/attachmentConversionQueue.js";
 import {
   allocTicketNumber, isTicketChangeKind, loadTicket, loadTicketAttachments,
   ticketCode, ticketUploadDir, type TicketRow,
@@ -226,6 +227,9 @@ export async function ticketRoutes(app: FastifyInstance) {
         }
       }
       await client.query("COMMIT");
+      // Tarefa Q (ATTACHMENT_CONVERSION=on + ATTACHMENTS_STRICT=on): enfileira a conversão pdf/doc/docx → .md em segundo plano.
+      // Nunca lança nem atrasa a resposta; com a flag off é só uma leitura de config.
+      if (strictAttachments && files.length > 0) void kickTicketConversions(pool, product.tenant_id, ticket.id);
       const [out] = await hydrate([ticket]);
       return reply.status(201).send(out);
     } catch (err) {
