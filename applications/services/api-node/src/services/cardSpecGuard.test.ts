@@ -7,6 +7,7 @@ import {
   cardPathOutOfScopeBody, cardSpecLockedBody, cardSpecWriteBlock, cardWritableRoots, isCardWritablePath, loadCardDraftInfo, type CardDraftInfo,
 } from "./cardSpecGuard.js";
 import { decideCardDraftPromotability, decideSpecPromotability } from "./promotability.js";
+import { runStageA } from "./specValidation.js";
 
 const PID = "11111111-1111-4111-8111-111111111111";
 const TID = "22222222-2222-4222-8222-222222222222";
@@ -90,5 +91,22 @@ describe("veredito do card_draft (não é spec de produto)", () => {
     expect(decideCardDraftPromotability({ cardId: TID, state: "refining" }).card?.promoteVia).toBeNull();
     expect(decideCardDraftPromotability({ cardId: TID, state: "refining" }).message).toContain("valide o card");
     expect(decideCardDraftPromotability({ cardId: TID, state: "promoted" }).message).toContain("histórico");
+  });
+});
+
+describe("Estágio A da validação sobre o rascunho do card", () => {
+  const files = [
+    { filename: "request.md", file_path: "/x/request.md", rel_dir: "tickets/TK-0001", content: "# Pedido\n\n" + "Exportar entregas em CSV com ponto e vírgula e UTF-8. ".repeat(8) },
+  ];
+  it("não acusa README/connect.yaml ausentes (são da versão corrente); spec comum continua acusando", () => {
+    const titles = (f: ReturnType<typeof runStageA>) => f.map((x) => x.title);
+    expect(titles(runStageA(files, { evolution: true, cardDraft: true }))).toEqual([]);
+    const comum = titles(runStageA(files, { evolution: true }));
+    expect(comum).toContain("Spec sem manifesto (README.md)");
+    expect(comum).toContain("Spec sem declaração Connect (connect.yaml)");
+  });
+  it("mas o RFC do card continua sendo exigido como em toda evolução (blocker)", () => {
+    const f = runStageA([...files, { filename: "RFC-0001-x.md", file_path: "/x/r.md", rel_dir: "docs/rfc", content: "# RFC-0001 — x\n\nsó prosa solta sem Gherkin nem impacto" }], { evolution: true, cardDraft: true });
+    expect(f.some((x) => x.severity === "blocker" && x.file === "docs/rfc/RFC-0001-x.md")).toBe(true);
   });
 });

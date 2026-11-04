@@ -21,6 +21,7 @@
  */
 import { transitionCard, type CardState } from "./cardState.js";
 import { readRuntimeNumber, type RuntimeConfigDb } from "./runtimeTunables.js";
+import { cardUserMessage } from "./cardErrors.js";
 
 type Row = Record<string, unknown>;
 export type GuardDb = { query(sql: string, params?: unknown[]): Promise<{ rows: Row[]; rowCount?: number | null }> };
@@ -99,6 +100,7 @@ export function cardSpecLockedBody(info: CardDraftInfo): Record<string, unknown>
       : info.state
         ? `A spec de ${code} está travada: o card está em '${info.state}' e o rascunho virou histórico.`
         : "A spec deste rascunho está travada: ele não está ligado a nenhum card.",
+    userMessage: cardUserMessage("CARD_SPEC_LOCKED"),
     state: info.state, canReopen,
     ...(info.ticketId ? { cardId: info.ticketId, ...(canReopen ? { reopen: `POST /api/cards/${info.ticketId}/reopen` } : {}) } : {}),
   };
@@ -109,6 +111,7 @@ export function cardPathOutOfScopeBody(info: CardDraftInfo, path: string): Recor
   return {
     code: "CARD_PATH_OUT_OF_SCOPE",
     message: `O card só escreve em ${cardWritableRoots(code).map((r) => `${r}/`).join(", ")}. O caminho '${path}' pertence à spec da versão corrente (somente leitura).`,
+    userMessage: cardUserMessage("CARD_PATH_OUT_OF_SCOPE"),
     path, writable: cardWritableRoots(code).map((r) => `${r}/**`),
   };
 }
@@ -151,7 +154,7 @@ export async function cardBudgetBlock(db: GuardDb, projectId: string, knownStatu
   return {
     status: 402,
     body: {
-      code: gate.code, message: gate.message,
+      code: gate.code, message: gate.message, userMessage: cardUserMessage(gate.code),
       ...(info.ticketId ? { cardId: info.ticketId, cardState: info.state } : {}),
     },
   };
@@ -165,6 +168,7 @@ export async function cardDraftUnsupportedBlock(db: GuardDb, projectId: string, 
     status: 409,
     body: {
       code: "CARD_OPERATION_UNSUPPORTED",
+      userMessage: cardUserMessage("CARD_OPERATION_UNSUPPORTED"),
       message: `${what} não se aplica ao rascunho de um card: o card escreve só a pasta dele (tickets/${info.code ?? "TK-NNNN"}/**, RFC e ADR). Use o Chat IA do card ou o planner de RFC.`,
     },
   };
