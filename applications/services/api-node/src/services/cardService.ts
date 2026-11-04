@@ -8,7 +8,7 @@
  *   • `applyCardTextEdit`   — edição de texto (título, corpo, tipo) com `request.md` do rascunho regravado;
  *   • `deleteCard`          — exclusão só em `draft`, com CAS no banco;
  *   • `markCardReady`       — "Validar": gate de RFC invariante + exigências do tipo + orçamento + base registrada;
- *   • `revalidateCard`      — rebaseia o card para o HEAD corrente (base vencida) e devolve a `refining`;
+ *   • `revalidateCard`      — confere o card contra o HEAD corrente (ok | stale | conflict, com motivos) e rebaseia quando cabe;
  *   • `loadBaseSpec`        — spec da versão corrente em modo SOMENTE LEITURA.
  * Toda mudança de `card_state` passa por `transitionCard` (cardState.ts): nenhuma escrita direta aqui.
  *
@@ -33,7 +33,10 @@ import {
 } from "./tickets.js";
 import { attachmentsStrictEnabled, classifyAttachment } from "./ticketAttachments.js";
 import { computeCurrentSpecHash } from "./specValidation.js";
-import { evaluateCardKindGate, type CardKind, type CardKindGateResult } from "./evolutionGate.js";
+import { evaluateCardKindGate, parseRfcMarkdown, RFC_DIR, RFC_FILENAME_RE, type CardKind, type CardKindGateResult } from "./evolutionGate.js";
+import {
+  evaluateRevalidation, listRepoTree, listSpecSnapshot, type GlobCheck, type RevalidateOutcome, type RevalidateReason, type RevalidateVerdict,
+} from "./cardRevalidate.js";
 import { budgetPreflight, resolveBudgetAnchor } from "./evolveClaim.js";
 import {
   CARD_CONTRACT_VERSION, recordCardEvent, transitionCard, type CardState, type CardTransitionResult,
@@ -229,22 +232,26 @@ export type CardEditResult =
   | { kind: "not_found" }
   | { kind: "not_a_card" }
   | { kind: "not_editable"; state: CardState }
+  /** Fase 3 (3.3): card `ready` — a spec do rascunho está TRAVADA até o `reopen` explícito (409 CARD_SPEC_LOCKED). */
+  | { kind: "spec_locked"; state: CardState }
   | { kind: "empty_body" }
   | { kind: "attachment_unreadable"; message: string }
   | { kind: "transition_failed"; result: CardTransitionResult };
 
 /**
- * Atualiza título/corpo/tipo enquanto `draft|refining` (com `autoRefine`, também `ready`, que volta a `refining` — H §4.4).
- * Reescreve o `request.md` do rascunho (a spec do card é a verdade que a promoção copia). `draft → refining` na 1ª escrita.
+ * Atualiza título/corpo/tipo enquanto `draft|refining`. Reescreve o `request.md` do rascunho (a spec do card é a verdade que a
+ * promoção copia). `draft → refining` na 1ª escrita. Fase 3 (3.3): com o card `ready` a spec está TRAVADA (`spec_locked`, 409
+ * CARD_SPEC_LOCKED) até o `reopen` explícito — a edição de texto deixou de reabrir o card sozinha (antes: `autoRefine`, H §4.4).
  */
-export async function applyCardTextEdit(pool: Pool, ticketId: string, patch: { title?: string; body?: string; kind?: CardKind }, o: { actorId: string; actorEmail?: string | null; autoRefine?: boolean }): Promise<CardEditResult> {
+export async function applyCardTextEdit(pool: Pool, ticketId: string, patch: { title?: string; body?: string; kind?: CardKind }, o: { actorId: string; actorEmail?: string | null }): Promise<CardEditResult> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     const cur = (await client.query("SELECT * FROM tickets WHERE id = $1 FOR UPDATE", [ticketId])).rows[0] as CardRow | undefined;
     if (!cur) { await client.query("ROLLBACK"); return { kind: "not_found" }; }
     if (!cur.card_state) { await client.query("ROLLBACK"); return { kind: "not_a_card" }; }
-    const editable = cur.card_state === "draft" || cur.card_state === "refining" || (o.autoRefine === true && cur.card_state === "ready");
+    if (cur.card_state === "ready") { await client.query("ROLLBACK"); return { kind: "spec_locked", state: cur.card_state }; }
+    const editable = cur.card_state === "draft" || cur.card_state === "refining";
     if (!editable) { await client.query("ROLLBACK"); return { kind: "not_editable", state: cur.card_state }; }
     const title = patch.title !== undefined ? patch.title.trim().slice(0, MAX_CARD_TITLE) : cur.title;
     const body = patch.body !== undefined ? patch.body.trim().slice(0, MAX_CARD_BODY) : cur.body;
@@ -256,8 +263,8 @@ export async function applyCardTextEdit(pool: Pool, ticketId: string, patch: { t
     );
     const row = up.rows[0] as CardRow | undefined;
     if (!row) { await client.query("ROLLBACK"); return { kind: "not_editable", state: cur.card_state }; }
-    // 1ª escrita na spec do rascunho: draft → refining; escrita em ready: ready → refining (a escrita invalida o carimbo "pronto").
-    if (cur.card_state === "draft" || cur.card_state === "ready") {
+    // 1ª escrita na spec do rascunho: draft → refining. (`ready` já saiu acima: travado até o `reopen`.)
+    if (cur.card_state === "draft") {
       const t = await transitionCard(client, { ticketId: cur.id, to: "refining", actorKind: "user", actorId: o.actorId });
       if (t.kind !== "applied" && t.kind !== "noop") { await client.query("ROLLBACK"); return { kind: "transition_failed", result: t }; }
     }
@@ -378,17 +385,46 @@ export async function markCardReady(pool: Pool, card: CardRow, user: AuthUser): 
   return { kind: "ready", replayed: t.kind === "noop", gate };
 }
 
-// ── Revalidar (rebase) ────────────────────────────────────────────────────────────────────────
+// ── Revalidar (rebase + conferência contra o HEAD novo) ──────────────────────────────────────
 export type CardRevalidateResult =
-  | { kind: "revalidated"; headProjectId: string; headVersion: number; previousBase: string | null }
+  | {
+      kind: "revalidated"; verdict: RevalidateVerdict; reasons: RevalidateReason[]; globs: GlobCheck[]; repo: RevalidateOutcome["repo"];
+      specDiff: RevalidateOutcome["specDiff"]; headProjectId: string; headVersion: number; previousBase: string | null;
+      /** O ponteiro de base do card foi movido para o HEAD corrente (só em `stale`). */
+      rebased: boolean;
+      /** O card voltou de `ready` a `refining` (carimbo "pronto" invalidado). */
+      reopened: boolean;
+    }
   | { kind: "not_revalidable"; state: CardState }
   | { kind: "no_head" }
   | { kind: "draft_unreadable" }
   | { kind: "transition_failed"; result: CardTransitionResult };
 
+/** Globs `files_allowed` + texto dos RFCs do rascunho (`docs/rfc/RFC-NNNN-*.md`). */
+async function draftRfcsForRevalidation(db: Db, draftId: string): Promise<Array<{ path: string; filesAllowed: string[]; text: string }>> {
+  const rows = (await db.query(
+    "SELECT filename, file_path, rel_dir FROM project_spec_files WHERE project_id = $1 ORDER BY filename ASC", [draftId],
+  )).rows as Array<{ filename: string; file_path: string; rel_dir: string | null }>;
+  const { readFile } = await import("fs/promises");
+  const out: Array<{ path: string; filesAllowed: string[]; text: string }> = [];
+  for (const r of rows) {
+    const rel = (r.rel_dir ?? "").replace(/^\/+|\/+$/g, "");
+    if (rel.toLowerCase() !== RFC_DIR || !RFC_FILENAME_RE.test(r.filename)) continue;
+    const text = await readFile(r.file_path, "utf-8").catch(() => null);
+    if (text === null) continue;
+    const path = `${rel}/${r.filename}`;
+    out.push({ path, filesAllowed: parseRfcMarkdown(path, text).filesAllowed, text });
+  }
+  return out;
+}
+
 /**
- * "Rebasear card" (H §5.4): regrava a base do rascunho para o HEAD corrente, invalida o carimbo `card_ready` e devolve o card a
- * `refining` (se estava `ready`); o humano roda "Validar" de novo (gate de RFC + exigências do tipo contra a base nova).
+ * "Revalidar card" (H §5.4, 3.5): confere o card contra o HEAD CORRENTE e devolve `ok | stale | conflict` com motivos
+ * (`cardRevalidate.ts`). Efeitos (todos pela máquina de estados / UPDATE guardado por `status = 'card_draft'`):
+ *   • `ok`       — nada muda (a base já era o HEAD): o card continua onde está, `ready` inclusive;
+ *   • `stale`    — rebaseia (`card_base`, `evolution_parent_id`, dono do orçamento compartilhado), invalida o carimbo `card_ready` e
+ *                  devolve `ready → refining`: a validação (gate de RFC + tipo + orçamento) precisa ser refeita contra a base nova;
+ *   • `conflict` — NÃO rebaseia (o RFC precisa ser ajustado antes), invalida o carimbo e devolve `ready → refining`.
  * Nada do RFC é reescrito automaticamente.
  */
 export async function revalidateCard(pool: Pool, card: CardRow, user: AuthUser): Promise<CardRevalidateResult> {
@@ -400,15 +436,77 @@ export async function revalidateCard(pool: Pool, card: CardRow, user: AuthUser):
   const head = rootId ? await resolveLineageHead(pool, rootId) : null;
   if (!head) return { kind: "no_head" };
   const previousBase = ((draft.extra.card_base ?? {}) as Json).head_project_id as string | undefined ?? null;
-  await pool.query(
-    `UPDATE projects SET extra = (COALESCE(extra, '{}'::jsonb) - 'card_ready') || $2::jsonb, updated_at = now() WHERE id = $1 AND status = 'card_draft'`,
-    [draft.id, JSON.stringify({ evolution_parent_id: head.id, card_base: { head_project_id: head.id, head_version: head.version_number } })],
-  );
-  if (state === "ready") {
+  const ready = (draft.extra.card_ready ?? null) as CardReadySnapshot | null;
+  const baseMoved = !!previousBase && previousBase !== head.id;
+
+  const headSpecHash = await specHashOf(pool, head.id);
+  const headSpecHashChanged = !baseMoved && !!ready?.base_spec_hash && ready.base_head_project_id === head.id && headSpecHash !== ready.base_spec_hash;
+  const [rfcs, treeNow, treeBefore, specNow, specBefore] = await Promise.all([
+    draftRfcsForRevalidation(pool, draft.id),
+    listRepoTree(head.id, head.product_id),
+    baseMoved ? listRepoTree(previousBase!, head.product_id) : Promise.resolve(null),
+    listSpecSnapshot(pool, head.id),
+    baseMoved ? listSpecSnapshot(pool, previousBase!) : Promise.resolve(null),
+  ]);
+  const out = evaluateRevalidation({
+    rfcs, requestText: `${card.title}\n${card.body}`, previousBase, head: { id: head.id, version: head.version_number },
+    productId: head.product_id, specNow, specBefore: specBefore && specBefore.length > 0 ? specBefore : null, treeNow, treeBefore,
+    headSpecHashChanged,
+  });
+
+  const rebase = out.verdict === "stale";
+  const invalidate = out.verdict !== "ok";
+  if (rebase || invalidate) {
+    const patch: Json = {};
+    if (rebase) {
+      patch.evolution_parent_id = head.id;
+      patch.card_base = { head_project_id: head.id, head_version: head.version_number };
+    }
+    // Orçamento compartilhado com o dono da versão corrente: acompanha a base quando ela é movida.
+    if (rebase) {
+      const anchor = await resolveBudgetAnchor(pool, head.id).catch(() => null);
+      if (anchor) await pool.query("UPDATE projects SET budget_owner_project_id = $2 WHERE id = $1 AND status = 'card_draft'", [draft.id, anchor.ownerId]);
+    }
+    await pool.query(
+      `UPDATE projects SET extra = (COALESCE(extra, '{}'::jsonb) - 'card_ready') || $2::jsonb, updated_at = now() WHERE id = $1 AND status = 'card_draft'`,
+      [draft.id, JSON.stringify(patch)],
+    );
+  }
+  let reopened = false;
+  if (invalidate && state === "ready") {
     const t = await transitionCard(pool, { ticketId: card.id, to: "refining", actorKind: "system", actorId: user.id, reason: "revalidate_base" });
     if (t.kind !== "applied" && t.kind !== "noop") return { kind: "transition_failed", result: t };
+    reopened = t.kind === "applied";
   }
-  return { kind: "revalidated", headProjectId: head.id, headVersion: head.version_number, previousBase };
+  return {
+    kind: "revalidated", verdict: out.verdict, reasons: out.reasons, globs: out.globs, repo: out.repo, specDiff: out.specDiff,
+    headProjectId: head.id, headVersion: head.version_number, previousBase, rebased: rebase, reopened,
+  };
+}
+
+// ── Reabrir (ready → refining) ───────────────────────────────────────────────────────────────
+export type CardReopenResult =
+  | { kind: "reopened"; replayed: boolean }
+  | { kind: "not_reopenable"; state: CardState | null }
+  | { kind: "transition_failed"; result: CardTransitionResult };
+
+/**
+ * `reopen` (Fase 3, 3.3): a transição EXPLÍCITA `ready → refining` que destrava a spec do rascunho (`CARD_SPEC_LOCKED` até aqui).
+ * Pela máquina de estados (ator `user`, motivo `user_reopen`, evento em `ticket_card_events`) e invalida o carimbo `card_ready`
+ * do rascunho: a promoção volta a exigir "Validar". Já em `refining` ⇒ repetição segura (`replayed`). Outros estados ⇒ `not_reopenable`.
+ */
+export async function reopenCard(pool: Pool, card: CardRow, user: AuthUser): Promise<CardReopenResult> {
+  if (card.card_state === "refining") return { kind: "reopened", replayed: true };
+  if (card.card_state !== "ready") return { kind: "not_reopenable", state: card.card_state };
+  const t = await transitionCard(pool, { ticketId: card.id, to: "refining", actorKind: "user", actorId: user.id, reason: "user_reopen" });
+  if (t.kind !== "applied" && t.kind !== "noop") return { kind: "transition_failed", result: t };
+  if (card.draft_project_id) {
+    await pool.query(
+      `UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) - 'card_ready', updated_at = now() WHERE id = $1 AND status = 'card_draft'`,
+      [card.draft_project_id],
+    );
+  }
+  return { kind: "reopened", replayed: t.kind === "noop" };
 }
 
 // ── Spec base (somente leitura) ───────────────────────────────────────────────────────────────
@@ -449,6 +547,13 @@ export async function loadBaseSpec(db: Db & RuntimeConfigDb, card: CardRow): Pro
     readOnly: true, headProjectId: head.id, headVersion: head.version_number, title: head.title, specHash: await specHashOf(db, head.id),
     baseHeadProjectId: baseHead, stale: baseHead !== null && baseHead !== head.id, files,
   };
+}
+
+/** Mesma leitura de `loadBaseSpec`, a partir do id do RASCUNHO (Chat IA / GAPs / planner / validador só conhecem o `projectId`). */
+export async function loadBaseSpecForDraft(db: Db & RuntimeConfigDb, draftProjectId: string): Promise<BaseSpec | null> {
+  if (!/^[0-9a-f-]{36}$/i.test(draftProjectId)) return null;
+  const card = (await db.query("SELECT * FROM tickets WHERE draft_project_id = $1 AND card_state IS NOT NULL", [draftProjectId])).rows[0] as CardRow | undefined;
+  return card ? loadBaseSpec(db, card) : null;
 }
 
 // ── Saída ─────────────────────────────────────────────────────────────────────────────────────
@@ -498,7 +603,7 @@ export type LegacyPatchResult =
 /**
  * `PATCH /api/tickets/:id` sobre um ticket que JÁ É card (`card_state` não nulo): o contrato de resposta do ticket é mantido
  * (a rota devolve a linha hidratada), mas as escritas passam por `applyCardTextEdit`/`transitionCard` — nunca por `UPDATE status`.
- *   • texto (title/body/changeKind): draft|refining (e `ready`, que volta a `refining`); depois disso 409 TICKET_IMMUTABLE como antes;
+ *   • texto (title/body/changeKind): draft|refining; `ready` ⇒ 409 CARD_SPEC_LOCKED (Fase 3: reabrir é explícito); depois disso 409 TICKET_IMMUTABLE como antes;
  *   • status `rejected` ⇒ transição `→ rejected` (humano); `delivered` ⇒ 409 CARD_DELIVERY_IS_AUTOMATIC (a 4.3 marca);
  *     `open` ⇒ no-op se o card ainda está em draft|refining|ready, senão 409 (só o descarte do filho reabre).
  */
@@ -522,7 +627,10 @@ export async function legacyPatchCard(pool: Pool, card: CardRow, b: { title?: st
       ...(b.title !== undefined ? { title: String(b.title) } : {}),
       ...(b.body !== undefined ? { body: String(b.body) } : {}),
       ...(b.changeKind !== undefined ? { kind: b.changeKind as CardKind } : {}),
-    }, { actorId: user.id, actorEmail: user.email, autoRefine: true });
+    }, { actorId: user.id, actorEmail: user.email });
+    if (r.kind === "spec_locked") {
+      return { kind: "error", status: 409, body: { code: "CARD_SPEC_LOCKED", state: r.state, canReopen: true, cardId: card.id, reopen: `POST /api/cards/${card.id}/reopen`, message: `${code} está pronto (ready): a spec está travada. Reabra o card (POST /api/cards/${card.id}/reopen) para voltar a editar.` } };
+    }
     if (r.kind === "not_editable") {
       return { kind: "error", status: 409, body: { code: "TICKET_IMMUTABLE", message: `${code} já foi promovido — o pedido original é imutável. Abra um novo pedido para pedir outra coisa.` } };
     }

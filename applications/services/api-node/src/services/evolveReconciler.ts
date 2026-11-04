@@ -81,6 +81,8 @@ export interface ReconcilerResult {
   resolved: number;
   notified: number;
   byKind: Record<string, number>;
+  /** Fase 3 (3.5): transições card × filho aplicadas nesta passada (só em `on`; ausente nos demais modos). */
+  cardsSynced?: number;
 }
 const empty = (mode: ReconcilerMode, skipped?: ReconcilerResult["skipped"]): ReconcilerResult =>
   ({ mode, skipped, detected: 0, cleaned: 0, resolved: 0, notified: 0, byKind: {} });
@@ -411,6 +413,12 @@ export async function runReconcilerPass(pool: Pool, env: NodeJS.ProcessEnv = pro
     await run(["evolution_in_flight_stuck"], async () => { findings.push(...await detectStuckInFlight(pool, p)); });
     await run(["uniqueness_index_missing"], async () => { findings.push(...await detectMissingIndexes(pool)); });
     await run(["card_status_divergence"], async () => { findings.push(...await detectCardDivergences(pool)); });
+    // Fase 3 (3.5): card × filho. O Guard de custo pausa o filho (`stopped_by='budget'`) sem saber que há um card ligado a ele; aqui o card
+    // vai a `blocked` (reason `budget:<código>`) e, com a pausa liberada, volta a `in_factory` — nunca `failed`. Só em `on` (age sobre dados).
+    if (mode === "on") {
+      const { syncCardsWithChildren } = await import("./cardPromote.js");
+      res.cardsSynced = await syncCardsWithChildren(pool);
+    }
 
     const seen = new Set<string>();
     for (const f of findings) {

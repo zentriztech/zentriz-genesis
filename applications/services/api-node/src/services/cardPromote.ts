@@ -142,15 +142,24 @@ export function childInFactory(status: string): boolean {
   return !(PRE_FACTORY_CHILD_STATUSES as readonly string[]).includes(status) && !DEAD_CHILD.has(status) && status !== "card_draft";
 }
 
+/** Prefixo de `blocked_reason` quando o Guard de custo parou o filho (`stopped_by = 'budget'`). */
+export const BUDGET_BLOCK_PREFIX = "budget:";
+export const isBudgetBlockReason = (r: string | null | undefined): boolean => typeof r === "string" && r.startsWith(BUDGET_BLOCK_PREFIX);
+
 /**
  * Aplica a transição que o estado REAL do filho pede (ator `system`): `promoted|blocked → in_factory` quando o filho está na
  * fábrica; `promoted|in_factory → blocked` quando o filho morreu (failed/archived). Idempotente; nunca lança por regra.
- * Esperas humanas (`blocked_cyborg`, `needs_spec_input`, `stopped`) NÃO bloqueiam o card (H §4.1).
+ * Esperas humanas (`blocked_cyborg`, `needs_spec_input`, `stopped`) NÃO bloqueiam o card (H §4.1) — com UMA exceção (Fase 3, 3.5):
+ * filho parado PELO GUARD DE CUSTO (`stopped` + `stopped_by = 'budget'`) e orçamento ainda sem saldo ⇒ card `blocked` com
+ * `blocked_reason = 'budget:<CÓDIGO_DO_GUARD>'` (ator `guard`) — nunca `failed`. Com saldo de volta (pausa liberada) o bloqueio de
+ * orçamento cai: o card volta a `in_factory` e o filho segue `stopped` esperando o usuário religá-lo (liberar a pausa não religa a execução).
  */
 export async function syncCardWithChild(pool: Pool, ticketId: string): Promise<CardTransitionResult | null> {
   const t = (await pool.query(
-    `SELECT t.card_state, p.status AS child_status FROM tickets t LEFT JOIN projects p ON p.id = t.child_project_id
-      WHERE t.id = $1 AND t.card_state IS NOT NULL`, [ticketId])).rows[0] as { card_state: CardState; child_status: string | null } | undefined;
+    `SELECT t.card_state, t.blocked_reason, t.child_project_id, p.status AS child_status, p.stopped_by AS child_stopped_by
+       FROM tickets t LEFT JOIN projects p ON p.id = t.child_project_id
+      WHERE t.id = $1 AND t.card_state IS NOT NULL`, [ticketId])).rows[0] as
+    { card_state: CardState; blocked_reason: string | null; child_project_id: string | null; child_status: string | null; child_stopped_by: string | null } | undefined;
   if (!t || !t.child_status) return null;
   if (DEAD_CHILD.has(t.child_status)) {
     if (t.card_state === "promoted" || t.card_state === "in_factory") {
@@ -158,10 +167,56 @@ export async function syncCardWithChild(pool: Pool, ticketId: string): Promise<C
     }
     return null;
   }
+  const budgetStopped = t.child_status === "stopped" && t.child_stopped_by === "budget";
+  if (budgetStopped && t.child_project_id) {
+    const gate = await childBudgetGate(pool, t.child_project_id);
+    if (!gate.ok && (t.card_state === "promoted" || t.card_state === "in_factory")) {
+      // `dedupeKey` por código: a mesma parada não escreve dois eventos; outro motivo do Guard atualiza o `blocked_reason`.
+      return transitionCard(pool, { ticketId, to: "blocked", actorKind: "guard", reason: `${BUDGET_BLOCK_PREFIX}${gate.code}`, dedupeKey: `budget_stop:${t.child_project_id}:${gate.code}` });
+    }
+    if (!gate.ok && t.card_state === "blocked" && isBudgetBlockReason(t.blocked_reason) && t.blocked_reason !== `${BUDGET_BLOCK_PREFIX}${gate.code}`) {
+      return transitionCard(pool, { ticketId, to: "blocked", actorKind: "guard", reason: `${BUDGET_BLOCK_PREFIX}${gate.code}` });
+    }
+    if (!gate.ok) return null;
+    // saldo de volta: cai no ramo "bloqueio de orçamento resolvido" abaixo.
+  }
+  if (t.card_state === "blocked" && isBudgetBlockReason(t.blocked_reason)) {
+    // Bloqueio de orçamento só cai quando o Guard libera de novo (pausa limpa e saldo para a próxima atividade).
+    const gate = t.child_project_id ? await childBudgetGate(pool, t.child_project_id) : { ok: false as const, code: "PROJECT_NOT_FOUND" };
+    if (gate.ok && !DEAD_CHILD.has(t.child_status)) {
+      return transitionCard(pool, { ticketId, to: "in_factory", actorKind: "system", reason: "budget_released" });
+    }
+    return null;
+  }
   if (childInFactory(t.child_status) && (t.card_state === "promoted" || t.card_state === "blocked")) {
     return transitionCard(pool, { ticketId, to: "in_factory", actorKind: "system", reason: "child_in_factory" });
   }
   return null;
+}
+
+/** Guard de custo do filho (orçamento compartilhado: o dono é resolvido por `budget_owner_project_id`). */
+async function childBudgetGate(pool: Pool, childProjectId: string): Promise<{ ok: true } | { ok: false; code: string; message: string }> {
+  const { checkProjectBudgetGate } = await import("./llmGuard.js");
+  return checkProjectBudgetGate(pool as never, childProjectId);
+}
+
+/**
+ * Reconciliador (Fase 3, 3.5): passa pelos cards com filho (`promoted|in_factory|blocked`) e aplica `syncCardWithChild` — é o que leva
+ * a `blocked` (orçamento) o card cujo filho o Guard pausou, mesmo que ninguém consulte o card. Só roda com `EVOLVE_RECONCILER=on`.
+ * Devolve quantas transições foram aplicadas. Nunca lança.
+ */
+export async function syncCardsWithChildren(pool: Pool, opts: { limit?: number } = {}): Promise<number> {
+  let n = 0;
+  try {
+    const rows = (await pool.query(
+      `SELECT id FROM tickets WHERE card_state IN ('promoted','in_factory','blocked') AND child_project_id IS NOT NULL
+        ORDER BY updated_at ASC LIMIT $1`, [opts.limit ?? 200])).rows;
+    for (const r of rows) {
+      const res = await syncCardWithChild(pool, String(r.id)).catch(() => null);
+      if (res && res.kind === "applied") n++;
+    }
+  } catch { /* detector nunca derruba a passada */ }
+  return n;
 }
 
 /** Gancho fire-and-forget (início da fábrica): sincroniza o card ligado ao projeto, se houver. Nunca lança. */
@@ -173,22 +228,39 @@ export async function syncCardForChildProject(pool: Pool, childProjectId: string
 }
 
 export type CardResumeResult =
-  | { kind: "resumed_in_factory" }
+  | { kind: "resumed_in_factory"; childRestartRequired: boolean; childProjectId: string | null; childStatus: string | null }
   | { kind: "back_to_ready" }
   | { kind: "not_blocked"; state: CardState | null }
   | { kind: "child_not_in_factory"; childStatus: string }
+  /** Bloqueio de orçamento e o Guard ainda nega: o card CONTINUA `blocked` (402 `CARD_BUDGET_BLOCKED`). */
+  | { kind: "budget_still_blocked"; guardCode: string; guardMessage: string }
   | { kind: "transition_failed"; result: CardTransitionResult };
 
-/** Retomada de `blocked` (humano): filho na fábrica ⇒ `in_factory`; filho descartado/inexistente ⇒ `ready` (vínculo limpo). */
+/**
+ * Retomada de `blocked` (humano): filho na fábrica ⇒ `in_factory`; filho descartado/inexistente ⇒ `ready` (vínculo limpo).
+ * Bloqueio de ORÇAMENTO (`blocked_reason = 'budget:*'`, Fase 3): só retoma quando o Guard libera de novo (saldo e pausa); sem saldo ⇒
+ * `budget_still_blocked` e o card segue `blocked`. Com saldo, o card volta a `in_factory`; se o filho ainda está `stopped` (liberar a
+ * pausa não religa a execução) a resposta traz `childRestartRequired` e o caminho para religá-lo.
+ */
 export async function resumeCard(pool: Pool, card: CardRow, user: AuthUser): Promise<CardResumeResult> {
   if (card.card_state !== "blocked") return { kind: "not_blocked", state: card.card_state };
   const child = card.child_project_id
     ? (await pool.query("SELECT status FROM projects WHERE id = $1", [card.child_project_id])).rows[0] as { status: string } | undefined
     : undefined;
   if (child && !DEAD_CHILD.has(child.status)) {
+    if (isBudgetBlockReason(card.blocked_reason)) {
+      const gate = await childBudgetGate(pool, card.child_project_id!);
+      if (!gate.ok) return { kind: "budget_still_blocked", guardCode: gate.code, guardMessage: gate.message };
+      const t = await transitionCard(pool, { ticketId: card.id, to: "in_factory", actorKind: "user", actorId: user.id, reason: "resume_budget" });
+      return t.kind === "applied" || t.kind === "noop"
+        ? { kind: "resumed_in_factory", childRestartRequired: child.status === "stopped", childProjectId: card.child_project_id, childStatus: child.status }
+        : { kind: "transition_failed", result: t };
+    }
     if (!childInFactory(child.status)) return { kind: "child_not_in_factory", childStatus: child.status };
     const t = await transitionCard(pool, { ticketId: card.id, to: "in_factory", actorKind: "user", actorId: user.id, reason: "resume" });
-    return t.kind === "applied" || t.kind === "noop" ? { kind: "resumed_in_factory" } : { kind: "transition_failed", result: t };
+    return t.kind === "applied" || t.kind === "noop"
+      ? { kind: "resumed_in_factory", childRestartRequired: false, childProjectId: card.child_project_id, childStatus: child.status }
+      : { kind: "transition_failed", result: t };
   }
   const t = await transitionCard(pool, { ticketId: card.id, to: "ready", actorKind: "system", actorId: user.id, reason: "child_discarded", dedupeKey: `resume_discard:${card.child_project_id ?? "none"}` });
   return t.kind === "applied" || t.kind === "noop" ? { kind: "back_to_ready" } : { kind: "transition_failed", result: t };
