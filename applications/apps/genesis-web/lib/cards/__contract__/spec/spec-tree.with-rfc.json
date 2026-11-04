@@ -1,0 +1,27 @@
+{
+  "request": "GET /api/projects/:draftId/spec-tree",
+  "status": 200,
+  "body": {
+    "projectId": "00000000-0000-4000-8000-000000000001",
+    "status": "card_draft",
+    "editable": true,
+    "files": [
+      {
+        "path": "docs/rfc/RFC-0001-exportar-csv.md",
+        "ext": ".md",
+        "isPrimary": false,
+        "contentSha256": "0000000000000000000000000000000000000000000000000000000000000001",
+        "createdAt": "2026-11-04T12:00:00.000Z"
+      },
+      {
+        "path": "tickets/TK-0001/request.md",
+        "ext": ".md",
+        "isPrimary": false,
+        "contentSha256": "0000000000000000000000000000000000000000000000000000000000000002",
+        "createdAt": "2026-11-04T12:00:00.000Z"
+      }
+    ],
+    "truncated": false,
+    "totalFiles": 2
+  }
+}

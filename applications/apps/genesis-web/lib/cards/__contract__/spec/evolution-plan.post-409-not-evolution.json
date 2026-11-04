@@ -1,0 +1,8 @@
+{
+  "request": "POST /api/projects/:id/evolution-plan",
+  "status": 409,
+  "body": {
+    "code": "NOT_EVOLUTION",
+    "message": "Este projeto não é uma evolução — use Evoluir no projeto aceito."
+  }
+}

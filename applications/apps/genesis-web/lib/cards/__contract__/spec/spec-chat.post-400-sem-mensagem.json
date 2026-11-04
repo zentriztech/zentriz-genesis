@@ -1,0 +1,8 @@
+{
+  "request": "POST /api/spec-chat",
+  "status": 400,
+  "body": {
+    "code": "BAD_REQUEST",
+    "message": "Envie ao menos uma mensagem do usuário"
+  }
+}

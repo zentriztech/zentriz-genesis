@@ -1,0 +1,11 @@
+{
+  "request": "GET /api/projects/:draftId/spec-file?path=",
+  "status": 200,
+  "body": {
+    "path": "tickets/TK-0001/request.md",
+    "content": "---\nticket: TK-0001\ntipo: feature\ntipo_label: recurso novo\ntitulo: \"Exportar entregas em CSV\"\naberto_em: 2026-11-04\nautor: u@00000000-0000-4000-8000-000000000001.test\nservico: \"App Demo\"\nimutavel: true\n---\n# TK-0001 — Exportar entregas em CSV\n> **Tipo declarado:** recurso novo. Este arquivo é o pedido ORIGINAL do humano,\n> gravado cru e sem revisão. Não edite: a maturação acontece na spec, não aqui.\n## O que foi pedido\nQuero baixar a lista de entregas em CSV.\n",
+    "contentSha256": "0000000000000000000000000000000000000000000000000000000000000001",
+    "isPrimary": false,
+    "editable": true
+  }
+}

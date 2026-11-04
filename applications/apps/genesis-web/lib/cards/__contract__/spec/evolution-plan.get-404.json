@@ -1,0 +1,8 @@
+{
+  "request": "GET /api/projects/:draftId/evolution-plan/:jobId",
+  "status": 404,
+  "body": {
+    "code": "NOT_FOUND",
+    "message": "Job não encontrado."
+  }
+}

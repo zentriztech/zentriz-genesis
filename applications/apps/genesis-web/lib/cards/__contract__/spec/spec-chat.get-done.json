@@ -1,0 +1,14 @@
+{
+  "request": "GET /api/spec-chat/:jobId",
+  "status": 200,
+  "body": {
+    "jobId": "00000000-0000-4000-8000-000000000001",
+    "status": "done",
+    "specMarkdown": "# RFC-0001 — Exportar entregas em CSV\n\n## Sumário\nPermitir exportar a lista de entregas em CSV a partir da tela de entregas.\n\n## Non-goals\nNão altera o cálculo de prazos nem a tela de mapa.\n\n## Requisitos\n- REQ-01 — O sistema DEVE gerar um CSV com as entregas do filtro atual.\n- REQ-02 — O CSV DEVE usar ponto e vírgula como separador.\n\n## Critérios de aceite\n### Cenário: exportar entregas\n- **Dado** um usuário autenticado com entregas\n- **Quando** clica em \"Exportar CSV\"\n- **Então** recebe um arquivo CSV com todas as entregas\n\n## Compatibilidade\n- Tipo (SemVer): MINOR\n- breaking: false\n\n## Impacto\n```yaml\nfiles_allowed:\n  - \"apps/api/src/deliveries/**\"\n  - \"tests/**\"\n```",
+    "reply": "Revisão pronta — confira e clique em “Aplicar ao arquivo”.",
+    "filePath": "docs/rfc/RFC-0001-exportar-csv.md",
+    "baseSha": "0000000000000000000000000000000000000000000000000000000000000001",
+    "baseSpecSha": "0000000000000000000000000000000000000000000000000000000000000002",
+    "truncated": false
+  }
+}

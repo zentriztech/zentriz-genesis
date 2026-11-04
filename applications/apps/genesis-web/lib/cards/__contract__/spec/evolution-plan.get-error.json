@@ -1,0 +1,12 @@
+{
+  "request": "GET /api/projects/:draftId/evolution-plan/:jobId",
+  "status": 200,
+  "body": {
+    "jobId": "00000000-0000-4000-8000-000000000001",
+    "status": "error",
+    "result": null,
+    "error": "EMPTY_RESPONSE",
+    "createdAt": "2026-11-04T12:00:00.000Z",
+    "finishedAt": "2026-11-04T12:00:00.000Z"
+  }
+}

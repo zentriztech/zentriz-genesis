@@ -1,0 +1,9 @@
+{
+  "request": "PUT /api/projects/:draftId/spec-file?path=",
+  "status": 409,
+  "body": {
+    "code": "CONFLICT",
+    "message": "O arquivo mudou desde a sua leitura. Recarregue e reaplique a edição.",
+    "currentSha": "0000000000000000000000000000000000000000000000000000000000000001"
+  }
+}

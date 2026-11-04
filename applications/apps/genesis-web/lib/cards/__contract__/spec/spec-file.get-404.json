@@ -1,0 +1,8 @@
+{
+  "request": "GET /api/projects/:draftId/spec-file?path=",
+  "status": 404,
+  "body": {
+    "code": "NOT_FOUND",
+    "message": "Arquivo não encontrado"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "request": "GET /api/spec-chat/:jobId",
+  "status": 200,
+  "body": {
+    "jobId": "00000000-0000-4000-8000-000000000001",
+    "status": "error",
+    "error": "A IA não retornou conteúdo para o arquivo. Reformule o pedido e tente de novo.",
+    "specMarkdown": null,
+    "filePath": "docs/rfc/RFC-0001-exportar-csv.md",
+    "baseSha": "0000000000000000000000000000000000000000000000000000000000000001",
+    "baseSpecSha": "0000000000000000000000000000000000000000000000000000000000000002",
+    "truncated": false
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "request": "PUT /api/projects/:draftId/spec-file?path=",
+  "status": 200,
+  "body": {
+    "ok": true,
+    "path": "docs/rfc/RFC-0001-exportar-csv.md",
+    "contentSha256": "0000000000000000000000000000000000000000000000000000000000000001"
+  }
+}

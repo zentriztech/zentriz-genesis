@@ -1,0 +1,9 @@
+{
+  "request": "POST /api/projects/:draftId/spec-file",
+  "status": 201,
+  "body": {
+    "ok": true,
+    "path": "docs/adr/ADR-001-formato-csv.md",
+    "contentSha256": "0000000000000000000000000000000000000000000000000000000000000001"
+  }
+}

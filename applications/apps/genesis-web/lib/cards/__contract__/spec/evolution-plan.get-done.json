@@ -1,0 +1,34 @@
+{
+  "request": "GET /api/projects/:draftId/evolution-plan/:jobId",
+  "status": 200,
+  "body": {
+    "jobId": "00000000-0000-4000-8000-000000000001",
+    "status": "done",
+    "result": {
+      "compat": "major",
+      "summary": "Exportar entregas em CSV",
+      "written": [
+        {
+          "path": "docs/rfc/RFC-0002-exportar-csv.md",
+          "action": "created"
+        },
+        {
+          "path": "docs/adr/ADR-001-formato-csv.md",
+          "action": "created"
+        }
+      ],
+      "warnings": [
+        "Itens de CHANGELOG e connect.yaml propostos pelo arquiteto NÃO foram gravados: o card escreve só o RFC/ADR. Registre-os no RFC (seção Impacto/Compatibilidade); o fechamento do CHANGELOG ocorre no aceite da versão.",
+        "1 RFC(s) de rodadas anteriores permanecem na árvore e CONTINUAM no escopo desta evolução — a fábrica implementa TODOS (`RFC-0001-exportar-entregas-em-csv.md`). Replanejar não substitui os RFCs anteriores: se algum não faz mais parte desta evolução, remova-o na árvore antes de promover.",
+        "Compatibilidade efetiva desta evolução: **MAJOR** — o arquiteto declarou MINOR neste plano, mas um RFC da árvore é MAJOR e o gate de promoção usa a MAIS ALTA."
+      ],
+      "questions": [
+        "O CSV deve incluir entregas canceladas?"
+      ],
+      "rfcProblems": []
+    },
+    "error": null,
+    "createdAt": "2026-11-04T12:00:00.000Z",
+    "finishedAt": "2026-11-04T12:00:00.000Z"
+  }
+}

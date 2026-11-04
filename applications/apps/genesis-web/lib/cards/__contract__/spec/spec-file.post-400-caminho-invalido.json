@@ -1,0 +1,8 @@
+{
+  "request": "POST /api/projects/:draftId/spec-file",
+  "status": 400,
+  "body": {
+    "code": "BAD_PATH",
+    "message": "path inválido"
+  }
+}

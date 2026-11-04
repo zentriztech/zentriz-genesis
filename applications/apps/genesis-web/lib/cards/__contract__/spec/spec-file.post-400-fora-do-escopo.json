@@ -1,0 +1,15 @@
+{
+  "request": "POST /api/projects/:draftId/spec-file",
+  "status": 400,
+  "body": {
+    "code": "CARD_PATH_OUT_OF_SCOPE",
+    "message": "O card só escreve em tickets/TK-0001/, docs/rfc/, docs/adr/. O caminho 'rfc/RFC-001.md' pertence à spec da versão corrente (somente leitura).",
+    "userMessage": "O card só escreve na própria pasta e no RFC/ADR dele. A spec da versão corrente é somente leitura.",
+    "path": "rfc/RFC-001.md",
+    "writable": [
+      "tickets/TK-0001/**",
+      "docs/rfc/**",
+      "docs/adr/**"
+    ]
+  }
+}
