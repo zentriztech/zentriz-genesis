@@ -20,6 +20,7 @@ import {
   attachmentsStrictEnabled, classifyAttachment, attachmentExt, utf8Problem, AttachmentUnreadableError,
 } from "./ticketAttachments.js";
 import { getAttachmentConverter, conversionOrigin } from "./attachmentConversion.js";
+import { attachmentConversionEnabled, drainTicketConversions } from "./attachmentConversionQueue.js";
 
 export type TicketChangeKind = "evolution" | "fix" | "feature";
 export type TicketStatus = "open" | "promoted" | "delivered" | "rejected";
@@ -235,6 +236,8 @@ export async function materializeTicketIntoSpecTree(
 
     const strict = await attachmentsStrictEnabled(db, args.ticket.tenant_id);
     if (strict) await runAttachmentConversions(db, args.ticket.id);
+    // Tarefa Q (ATTACHMENT_CONVERSION=on): garante que o que dá para converter (pdf/doc/docx) já tenha o derivado .md. Nunca lança.
+    if (strict && await attachmentConversionEnabled(db, args.ticket.tenant_id)) await drainTicketConversions(db, args.ticket.id);
     const allAttachments = await loadTicketAttachments(db, args.ticket.id);
     // ATTACHMENTS_STRICT=on: só txt/md (ou derivados .md) seguem para a árvore da spec. pdf/doc/docx e qualquer
     // outra coisa (legado: png, xlsx…) ficam guardados no card — nunca em `project_spec_files`.

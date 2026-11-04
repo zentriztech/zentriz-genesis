@@ -15,6 +15,7 @@ import { startEvolutionMergeWorker, stopEvolutionMergeWorker } from "./services/
 import { startSpecChatWorker, stopSpecChatWorker } from "./services/specChatWorker.js";
 import { startAnomalyWorker, stopAnomalyWorker } from "./services/llmAnomaly.js";
 import { startReconcilerWorker, stopReconcilerWorker } from "./services/evolveReconciler.js";
+import { startAttachmentConversionWorker, stopAttachmentConversionWorker } from "./services/attachmentConversionQueue.js";
 
 const app = await buildApp();
 
@@ -146,11 +147,13 @@ try {
   startAnomalyWorker(() => anomalyPool);
   // Tarefa 1.8: reconciliador do /evolve (flag EVOLVE_RECONCILER, default off = nem agenda timer).
   startReconcilerWorker(() => anomalyPool);
+  // Tarefa Q: retoma conversões pdf/doc/docx → .md pendentes (flag ATTACHMENT_CONVERSION, default off = só 1 leitura por passada, e só se houver fila).
+  startAttachmentConversionWorker(() => anomalyPool);
 } catch (err) {
   app.log.error(err);
   process.exit(1);
 }
 
 // Desligar workers graciosamente ao receber sinal de término
-process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); stopAnomalyWorker(); stopReconcilerWorker(); process.exit(0); });
-process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); stopAnomalyWorker(); stopReconcilerWorker(); process.exit(0); });
+process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); stopAnomalyWorker(); stopReconcilerWorker(); stopAttachmentConversionWorker(); process.exit(0); });
+process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); stopAnomalyWorker(); stopReconcilerWorker(); stopAttachmentConversionWorker(); process.exit(0); });

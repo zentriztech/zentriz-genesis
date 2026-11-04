@@ -75,8 +75,8 @@ describe("resolveFlag — precedência", () => {
     expect(await effectiveProjectFlags(fakeDb(rows), "A")).toMatchObject({ attachmentsStrict: true, taskInheritTransitive: false, sources: { attachmentsStrict: "tenant" } });
     expect(await effectiveProjectFlags(fakeDb(rows), "B")).toMatchObject({ attachmentsStrict: false });
   });
-  it("as seis flags de rollout são reconhecidas (guarda adminOnly)", () => {
-    expect([...FLAG_NAMES].sort()).toEqual(["ATTACHMENTS_STRICT", "EVOLUTION_PROMOTE_BANCADA", "EVOLVE_CLAIM", "EVOLVE_RECONCILER", "TASK_INHERIT_TRANSITIVE", "TICKET_TRANSITIONS"]);
+  it("as sete flags de rollout são reconhecidas (guarda adminOnly)", () => {
+    expect([...FLAG_NAMES].sort()).toEqual(["ATTACHMENTS_STRICT", "ATTACHMENT_CONVERSION", "EVOLUTION_PROMOTE_BANCADA", "EVOLVE_CLAIM", "EVOLVE_RECONCILER", "TASK_INHERIT_TRANSITIVE", "TICKET_TRANSITIONS"]);
     expect(isRolloutFlagKey("EVOLVE_CLAIM")).toBe(true);
     expect(isRolloutFlagKey("AGENT_TIMEOUT_PM")).toBe(false);
     expect(isRolloutFlagKey("toString")).toBe(false);
