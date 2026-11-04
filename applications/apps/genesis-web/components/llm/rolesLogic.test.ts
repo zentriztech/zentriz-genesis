@@ -1,6 +1,6 @@
 /**
- * Testes de lógica pura da UI de papéis (2A.10). O portal não tem runner de componente; rode com o
- * vitest do api-node:  cd applications/services/api-node && npx vitest run --root ../../apps/genesis-web
+ * Testes de lógica pura da UI de papéis (2A.10). Rodam no vitest do próprio portal: `npm test`
+ * (antes eram rodados de forma improvisada pelo vitest do api-node com --root).
  */
 import { describe, it, expect } from "vitest";
 import {

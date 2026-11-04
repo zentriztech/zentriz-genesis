@@ -1,0 +1,38 @@
+# Falhas conhecidas da suíte do orchestrator (baseline de 2026-11-04, branch evo/e2 a partir de dev).
+# Lidas por scripts/ci/pytest_known_failures.py: o job `orchestrator` do CI só falha se aparecer uma
+# falha FORA desta lista. Se um item daqui passar a passar, o script avisa (lista obsoleta) — remova-o.
+#
+# Origem (causa observada, NÃO é falha de dependência: reproduzidas igualmente num venv limpo com
+# requirements.txt + constraints.txt do agents e num venv local com versões mais novas):
+#  - test_spec_validator / test_thinking_arm_gap144 / test_prompt_census_invoke_raw_gap146 /
+#    test_workbench_llm_config / test_spec_dossier_downstream:
+#      "spec_validator sem modelo: nenhum slot de LLM resolvido" (422 em vez de 400 nos endpoints) —
+#      os testes assumem um slot de LLM resolvível que não existe num ambiente limpo (Lei dos slots).
+#  - test_connect_contracts::TestLoadConnectDeclarationR4PR4: "schema Connect indisponível neste
+#    ambiente (ZENTRIZ_CONNECT_ROOT)" — exigem o repositório irmão zentriz-connect, ausente no CI.
+#  - test_spec_dossier_downstream: `_default_product_spec_cap("DEV")` devolve 20000 (esperado > 40000)
+#    sem a env de teto — depende de configuração de ambiente do runner.
+# Pendência rastreada: corrigir cada teste (injetar o slot via fixture) e esvaziar este arquivo.
+applications/orchestrator/tests/test_connect_contracts.py::TestLoadConnectDeclarationR4PR4::test_invalido_no_schema_retorna_erros_mas_nao_lanca
+applications/orchestrator/tests/test_connect_contracts.py::TestLoadConnectDeclarationR4PR4::test_valido_retorna_declaracao_sem_erros
+applications/orchestrator/tests/test_prompt_census_invoke_raw_gap146.py::test_body_incompleto_continua_400_e_nao_e_medido
+applications/orchestrator/tests/test_prompt_census_invoke_raw_gap146.py::test_censo_isola_o_que_a_lição_do_CAG_acrescentou
+applications/orchestrator/tests/test_prompt_census_invoke_raw_gap146.py::test_censo_mede_o_total_que_sai
+applications/orchestrator/tests/test_prompt_census_invoke_raw_gap146.py::test_censo_nao_carrega_conteudo_do_prompt
+applications/orchestrator/tests/test_spec_dossier_downstream.py::test_dev_e_qa_nao_levantam_o_teto_global_do_prompt
+applications/orchestrator/tests/test_spec_validator.py::test_cache_marcado_no_refutador_quando_ha_multi_voto
+applications/orchestrator/tests/test_spec_validator.py::test_continuity_reaches_refuter_but_not_triage
+applications/orchestrator/tests/test_spec_validator.py::test_contract_findings_passthrough
+applications/orchestrator/tests/test_spec_validator.py::test_multivote_blocker_union_uses_identity_key_not_title
+applications/orchestrator/tests/test_spec_validator.py::test_multivote_fallback_when_consolidation_fails
+applications/orchestrator/tests/test_spec_validator.py::test_multivote_runs_n_refuters_then_consolidates
+applications/orchestrator/tests/test_spec_validator.py::test_retry_that_explodes_salvages_findings_of_first_response
+applications/orchestrator/tests/test_spec_validator.py::test_sem_multi_voto_nao_se_paga_escrita_de_cache
+applications/orchestrator/tests/test_spec_validator.py::test_spec_is_fenced_and_system_has_antiinjection
+applications/orchestrator/tests/test_spec_validator.py::test_tolerates_code_fences_in_reply
+applications/orchestrator/tests/test_spec_validator.py::test_triage_failure_does_not_block
+applications/orchestrator/tests/test_spec_validator.py::test_triage_runs_when_model_configured
+applications/orchestrator/tests/test_spec_validator.py::test_without_known_findings_prompt_is_byte_identical
+applications/orchestrator/tests/test_thinking_arm_gap144.py::test_sem_pedido_o_refutador_segue_sem_raciocinio
+applications/orchestrator/tests/test_thinking_arm_gap144.py::test_thinking_vai_SO_ao_refutador_nunca_a_triagem_nem_a_consolidacao
+applications/orchestrator/tests/test_workbench_llm_config.py::test_validate_spec_precedencia_do_modelo
