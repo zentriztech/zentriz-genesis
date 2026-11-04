@@ -1,37 +1,53 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "@/lib/api";
-import { CARD_ERRORS, cardErrorMessage } from "./cardErrors";
+import { blockedReasonLabel, cardErrorMessage, errorDetail, tableMessage } from "./cardErrors";
 
-const err = (status: number, code: string, message = "msg do servidor", body?: Record<string, unknown>) => new ApiError(message, status, code, body);
+const err = (status: number, code: string | undefined, message = "msg do servidor", body?: Record<string, unknown>, retry?: number) => new ApiError(message, status, code, body, retry);
 
-describe("cardErrorMessage (tabela única PT-BR)", () => {
-  it("traduz os códigos do contrato R §2 com acentuação", () => {
-    expect(cardErrorMessage(err(409, "CARD_BASE_STALE"))).toMatch(/base vencida/);
-    expect(cardErrorMessage(err(409, "USE_CARD_PROMOTE"))).toMatch(/Promova-o pela tela do card/);
-    expect(cardErrorMessage(err(409, "CARD_SPEC_LOCKED"))).toMatch(/Reabrir para edição/);
-    expect(cardErrorMessage(err(409, "CARD_KIND_MISMATCH"))).toMatch(/Correção/);
-    expect(cardErrorMessage(err(409, "NO_ACCEPTED_HEAD"))).toMatch(/fabricado e aceito/);
+describe("cardErrorMessage — ordem de precedência", () => {
+  it("1) userMessage do servidor vence a tabela local", () => {
+    expect(cardErrorMessage(err(409, "CARD_BASE_STALE", "técnica", { userMessage: "Mensagem do servidor." }))).toBe("Mensagem do servidor.");
   });
-  it("CARD_KIND_REQUIREMENT escolhe a frase pelo campo faltante", () => {
-    expect(cardErrorMessage(err(409, "CARD_KIND_REQUIREMENT", "x", { details: { missing: "repro_scenario" } }))).toMatch(/cenário de reprodução/);
-    expect(cardErrorMessage(err(409, "CARD_KIND_REQUIREMENT", "x", { details: { missing: "non_goals" } }))).toMatch(/Non-goals/);
+  it("2) sem userMessage: tabela espelho do backend (flag off, /evolve legado)", () => {
+    expect(cardErrorMessage(err(409, "USE_CARD_PROMOTE"))).toBe("Este pedido é um card: promova-o pelo próprio card.");
+    expect(cardErrorMessage(err(403, "TENANT_INACTIVE"))).toBe("O tenant está suspenso. Fale com o administrador.");
+    expect(tableMessage("CARD_SPEC_LOCKED")).toMatch(/Reabra o card/);
   });
-  it("orçamento: saldo livre e mínimo vêm do corpo; 402 sem código usa a mensagem do servidor", () => {
-    expect(cardErrorMessage(err(402, "BUDGET_FREE_BELOW_MIN", "x", { freeUsd: 1.5, minFreeUsd: 5 }))).toMatch(/US\$ 1\.50 livres, mínimo exigido US\$ 5\.00/);
-    expect(cardErrorMessage(err(402, "GUARD_X", "Limite do Guard atingido"))).toBe("Limite do Guard atingido");
-  });
-  it("anexos: lista os motivos do servidor", () => {
-    expect(cardErrorMessage(err(400, "ATTACHMENT_INVALID", "x", { errors: ["a.png: tipo não permitido", "b.pdf: acima do teto"] }))).toMatch(/a\.png: tipo não permitido; b\.pdf: acima do teto/);
-  });
-  it("código desconhecido ⇒ mensagem do servidor; sem nada ⇒ genérico", () => {
+  it("3) código fora da tabela: mensagem do servidor; 402 e 401 têm texto próprio; sem nada, genérico", () => {
     expect(cardErrorMessage(err(409, "GITHUB_APP_NOT_INSTALLED", "Instale o GitHub App no repositório"))).toBe("Instale o GitHub App no repositório");
+    expect(cardErrorMessage(err(402, undefined, ""))).toMatch(/Orçamento insuficiente/);
+    expect(cardErrorMessage(err(401, undefined, ""))).toMatch(/Sessão expirada/);
     expect(cardErrorMessage(new ApiError("", 500))).toMatch(/Não foi possível concluir/);
     expect(cardErrorMessage("boom")).toMatch(/Não foi possível concluir/);
+    expect(cardErrorMessage(new Error("falha de rede"))).toBe("falha de rede");
   });
-  it("todas as mensagens fixas estão em PT-BR acentuado (sem 'nao', 'voce')", () => {
-    for (const [code, e] of Object.entries(CARD_ERRORS)) {
-      const m = typeof e === "string" ? e : e({ status: 409, body: {}, serverMessage: "s" });
-      expect(m, code).not.toMatch(/\b(nao|voce|especificacao|promocao)\b/i);
-    }
+  it("BAD_REQUEST usa o message do servidor (diz QUAL campo falhou)", () => {
+    expect(cardErrorMessage(err(400, "BAD_REQUEST", "Descreva o que o card pede (campo 'body').", { userMessage: "Não entendemos o pedido." }))).toBe("Descreva o que o card pede (campo 'body').");
+  });
+});
+
+describe("errorDetail — frase extra montada do corpo", () => {
+  it("tipo exigido aceita lista (formato real) e texto", () => {
+    expect(errorDetail(err(409, "CARD_KIND_REQUIREMENT", "x", { details: { missing: ["non_goals"] } }))).toBe("Falta: seção “Non-goals” (não-objetivos).");
+    expect(errorDetail(err(409, "CARD_KIND_REQUIREMENT", "x", { details: { missing: "repro_scenario" } }))).toMatch(/FAIL_TO_PASS/);
+    expect(errorDetail(err(409, "CARD_KIND_REQUIREMENT", "x", { details: {} }))).toBe("");
+  });
+  it("serviços do produto (lista de objetos) e transição inválida", () => {
+    expect(errorDetail(err(400, "SERVICE_REQUIRED", "x", { services: [{ projectId: "p", title: "API", versionNumber: 3 }, { projectId: "q", title: null, versionNumber: 1 }] }))).toBe("Serviços: API (v3), q (v1).");
+    expect(errorDetail(err(409, "CARD_INVALID_TRANSITION", "x", { from: "ready", to: "ready" }))).toMatch(/De “ready” para “ready”/);
+  });
+  it("Retry-After só aparece quando o servidor manda", () => {
+    expect(errorDetail(err(409, "EVOLUTION_BUSY", "x", {}, 2))).toBe("Tente de novo em 2 s.");
+    expect(errorDetail(err(409, "EVOLUTION_BUSY"))).toBe("");
+  });
+});
+
+describe("blockedReasonLabel", () => {
+  it("traduz os motivos de bloqueio do backend", () => {
+    expect(blockedReasonLabel("budget:BUDGET_PAUSED")).toBe("orçamento — O orçamento de IA está pausado. Aumente o orçamento para continuar.");
+    expect(blockedReasonLabel("child_failed")).toBe("a execução não está mais ativa (failed)");
+    expect(blockedReasonLabel("materialization_failed:X")).toMatch(/A promoção falhou no meio do caminho/);
+    expect(blockedReasonLabel(null)).toBe("não registrado");
+    expect(blockedReasonLabel("outro")).toBe("outro");
   });
 });

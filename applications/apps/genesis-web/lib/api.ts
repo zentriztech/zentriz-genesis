@@ -19,8 +19,11 @@ export class ApiError extends Error {
   readonly code: string | undefined;
   /** Corpo JSON do erro (campos extras como `details`, `errors[]`, `freeUsd`), quando houver. */
   readonly body: Record<string, unknown> | undefined;
-  constructor(message: string, status: number, code?: string, body?: Record<string, unknown>) {
+  /** Segundos do cabeçalho `Retry-After` (409 de promoção em andamento, por exemplo), quando o servidor envia. */
+  readonly retryAfterSeconds: number | undefined;
+  constructor(message: string, status: number, code?: string, body?: Record<string, unknown>, retryAfterSeconds?: number) {
     super(message);
+    this.retryAfterSeconds = retryAfterSeconds;
     this.name = "ApiError";
     this.status = status;
     this.code = code;
@@ -47,7 +50,8 @@ async function toApiError(res: Response): Promise<ApiError> {
     const parsed = JSON.parse(text) as unknown;
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Record<string, unknown>;
   } catch { /* corpo não JSON */ }
-  return new ApiError(message, res.status, getErrorCode(text), body);
+  const ra = Number(res.headers?.get?.("retry-after"));
+  return new ApiError(message, res.status, getErrorCode(text), body, Number.isFinite(ra) && ra > 0 ? ra : undefined);
 }
 
 /** Extrai mensagem amigável do corpo de erro da API (ex.: { code, message }) */

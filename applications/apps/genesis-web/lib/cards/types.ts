@@ -1,6 +1,7 @@
-// Tipos e rótulos dos cards da Bancada (plano EVOLUIR-PROJETO, Fase 3). Contrato real: relatório R
-// (project/docs/analysis/EVOLUIR-PROJETO-R-fase2-api-de-cards.md §2). Campos marcados "ASSUMIDO"
-// ainda não existem no api-node (frente K1) e são tratados como opcionais pelo portal.
+// Tipos e rótulos dos cards da Bancada (plano EVOLUIR-PROJETO, Fase 3). O contrato é o do BACKEND REAL
+// (`api-node`: routes/cards.ts, services/cardJourney.ts, cardErrors.ts…), provado pelas fixtures de
+// `__contract__/*.json` (geradas pelo teste de contrato do api-node: `npm run contract:gen`) e validadas por
+// `schemas.ts`. Nada aqui é "assumido": se o backend mudar, o teste de contrato do portal quebra.
 
 export const CARD_STATES = ["draft", "refining", "ready", "promoted", "in_factory", "delivered", "blocked", "rejected"] as const;
 export type CardState = (typeof CARD_STATES)[number];
@@ -68,7 +69,7 @@ export interface CardListResponse { items: CardSummary[]; total: number; limit: 
 export interface CardAttachment {
   id: string; filename: string; mimeType: string; sizeBytes: number; downloadUrl: string;
   /** Presentes com ATTACHMENTS_STRICT. `origin: "converted"` = derivado automático .md. */
-  kind?: string; origin?: string; contentSha256?: string; derivedFromAttachmentId?: string | null;
+  kind?: string | null; origin?: string | null; contentSha256?: string | null; derivedFromAttachmentId?: string | null;
 }
 
 export interface CardEvent {
@@ -76,36 +77,77 @@ export interface CardEvent {
 }
 
 export interface CardActions {
-  edit: boolean; refine: boolean; ready: boolean; promote: boolean; revalidate: boolean; reject: boolean; resume: boolean; delete: boolean;
+  edit: boolean; refine: boolean; ready: boolean; promote: boolean; revalidate: boolean; reopen: boolean; reject: boolean; resume: boolean; delete: boolean;
 }
 
 export interface CardDetail extends CardSummary {
   body: string;
   attachments: CardAttachment[];
+  /** Mais recente primeiro (o backend ordena por data decrescente, no máximo 50). */
   events: CardEvent[];
-  base: { headProjectId: string; headVersion: number; validatedAt: string | null } | null;
+  /** `null` quando o card não tem rascunho. `validatedAt` só existe depois de "Validar". */
+  base: { headProjectId: string | null; headVersion: number | null; validatedAt: string | null } | null;
   actions: CardActions;
-  /** ASSUMIDO (K1): trava da spec (`CARD_SPEC_LOCKED`). Ausente ⇒ o portal deriva de `state === "ready"`. */
-  specLocked?: boolean;
 }
 
 export interface BaseSpecFile {
-  path: string; relDir: string; filename: string; isPrimary: boolean; sizeBytes: number; contentSha256: string; content: string; truncated: boolean;
+  path: string; relDir: string; filename: string; isPrimary: boolean; sizeBytes: number; contentSha256: string;
+  /** `null` quando o arquivo passou do teto de leitura (`truncated: true`). */
+  content: string | null; truncated: boolean;
 }
 export interface BaseSpec {
   readOnly: true; headProjectId: string; headVersion: number; title: string; specHash: string | null;
   baseHeadProjectId: string | null; stale: boolean; files: BaseSpecFile[];
 }
 
-/** ASSUMIDO (K1): `GET /api/products/:id/cards/capabilities` pode trazer limites de anexo e saldo. */
-export interface CardCapabilities {
-  cardsBancada: boolean;
-  attachments?: { allowedExtensions: string[]; maxFiles?: number; maxTotalBytes?: number; maxFileBytes?: number };
-  budget?: { freeUsd: number | null; minFreeUsd: number | null };
+/** `GET /api/products/:id/cards/capabilities` devolve SÓ a flag (limites de anexo e saldo são conferidos pelo servidor). */
+export interface CardCapabilities { cardsBancada: boolean }
+
+export type JourneyStageKey = "draft" | "refining" | "ready" | "promoted" | "in_factory" | "delivered";
+export type JourneyStageState = "done" | "current" | "todo" | "blocked";
+export type JourneyPhase = "editing" | "ready" | "running" | "blocked" | "delivered" | "rejected";
+export type JourneySeverity = "success" | "info" | "warning" | "error";
+export interface JourneyStep { key: JourneyStageKey; label: string; state: JourneyStageState }
+export interface JourneyBlocker { code: string; message: string; userMessage: string | null; details?: unknown }
+export interface JourneyAction { key: string; label: string; method: "GET" | "POST" | "PUT" | null; path: string | null; enabled: boolean }
+/** `GET /api/cards/:id/journey`: o SERVIDOR decide etapa, bloqueios, ação sugerida e trava; a tela só renderiza. */
+export interface CardJourney {
+  cardId: string; code: string; state: CardState | null; kind: CardKind; phase: JourneyPhase;
+  steps: JourneyStep[]; current: JourneyStageKey | null; next: JourneyStageKey | null;
+  blockers: JourneyBlocker[]; action: JourneyAction | null;
+  headline: string; detail: string | null; severity: JourneySeverity;
+  blocked: { reason: string | null; kind: "budget" | "child" | "materialization" | "other"; resumable: boolean } | null;
+  spec: { locked: boolean; canReopen: boolean };
+  base: { headProjectId: string | null; headVersion: number | null; currentHeadProjectId: string | null; currentHeadVersion: number | null; stale: boolean } | null;
+  execution: { childProjectId: string; status: string; title: string | null; prUrl: string | null } | null;
 }
 
-/** ASSUMIDO (K1): `GET /api/cards/:id/journey`. */
-export interface JourneyStep { key: string; label: string; state: "done" | "current" | "todo" | "blocked"; at?: string | null }
-export interface CardJourney { cardId: string; state: CardState; steps: JourneyStep[]; nextAction?: { code?: string; label: string } | null }
+export type ConversionState = "not_applicable" | "disabled" | "queued" | "pending" | "running" | "done" | "empty" | "failed";
+/** `GET /api/cards/:id/attachments`: anexos com o estado da conversão pdf/doc/docx → md. */
+export interface CardAttachmentItem {
+  id: string; filename: string; mimeType: string; sizeBytes: number;
+  kind: string | null; origin: string | null; derivedFromAttachmentId: string | null; contentSha256: string | null; downloadUrl: string; createdAt: string;
+  conversion: { state: ConversionState; attempts: number; errorCode: string | null; errorMessage: string | null; warnings: unknown[]; derivedAttachmentId: string | null; updatedAt: string | null };
+}
+export interface CardAttachmentsResponse { items: CardAttachmentItem[]; strict: boolean; conversionEnabled: boolean; summary: Record<string, number> }
+
+export type RevalidateVerdict = "ok" | "stale" | "conflict";
+export interface RevalidateReason { code: string; severity: "conflict" | "warning" | "info"; message: string; details?: Record<string, unknown> }
+/** `POST /api/cards/:id/revalidate`. `ok:false` só no `conflict`; `next` é uma instrução em texto para humanos. */
+export interface RevalidateResponse {
+  ok: boolean; result: RevalidateVerdict; reasons: RevalidateReason[]; rebased: boolean; reopened: boolean; card: CardSummary;
+  base: { headProjectId: string; headVersion: number; previousHeadProjectId: string | null };
+  checks: { globs: unknown[]; repo: unknown; specDiff: unknown };
+  next: string | null; message: string;
+}
+
+export interface CardActionResponse { ok: boolean; replayed: boolean; card: CardSummary; message?: string }
+export interface ReadyResponse extends CardActionResponse { gate?: { rfcs: number; scope: string[]; compat: string; kind: string } }
+export interface ResumeResponse { ok: boolean; replayed?: boolean; card: CardSummary; childRestartRequired?: boolean; next?: string; message?: string }
+/** `POST /api/cards/:id/promote`: 201 (criou) ou 200 (`replayed`/`resumed`). Os campos do filho vêm do /evolve. */
+export interface PromoteResponse {
+  ok: boolean; childProjectId: string; versionNumber: number; cardId: string; cardState: CardState; cardStatus: string; draftProjectId: string | null;
+  parentProjectId?: string | null; title?: string; status?: string; message?: string; replayed?: boolean; resumed?: boolean;
+}
 
 export const DEFAULT_ATTACHMENT_EXTENSIONS = ["pdf", "txt", "md", "doc", "docx"];
