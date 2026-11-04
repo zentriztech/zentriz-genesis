@@ -41,9 +41,11 @@ describePg("Fase 2 / 2.4 — cardState (Postgres real)", () => {
   /** Ticket já dentro da máquina no estado `st`, com o status legado coerente (e motivo quando o estado exige). */
   async function cardIn(st: CardState): Promise<string> {
     const t = await seedTicket(pool, s);
+    const child = ["promoted", "in_factory", "blocked"].includes(st) ? await mkChild("accepted") : null; // filho PRÓPRIO (blocked → rejected arquiva o filho)
     await pool.query(
-      `UPDATE tickets SET card_state = $2, status = $3, blocked_reason = $4, child_project_id = NULL, card_contract_version = 1 WHERE id = $1`,
-      [t.id, st, legacyStatusFor(st), st === "blocked" ? "seed" : null],
+      `UPDATE tickets SET card_state = $2, status = $3, blocked_reason = $4, child_project_id = $5, card_contract_version = 1 WHERE id = $1`,
+      // S-09: os estados com filho vinculado ganham um filho vivo e aceito do MESMO tenant/produto (pré-condições da máquina).
+      [t.id, st, legacyStatusFor(st), st === "blocked" ? "seed" : null, child],
     );
     return t.id;
   }
@@ -55,7 +57,7 @@ describePg("Fase 2 / 2.4 — cardState (Postgres real)", () => {
     for (const from of CARD_STATES) for (const to of CARD_STATES) for (const actor of ACTORS) {
       const id = await cardIn(from);
       const r = await transitionCard(pool, {
-        ticketId: id, to, actorKind: actor, reason: to === "blocked" ? "t" : null,
+        ticketId: id, to, actorKind: actor, reason: to === "blocked" ? (from === "blocked" ? "seed" : "t") : null, // blocked→blocked com o MESMO motivo = noop (S-13)
         childProjectId: from === "ready" && to === "promoted" ? s.parentId : null,
       });
       const want = from === to ? "noop" : (EDGES[`${from}>${to}`] ?? []).includes(actor) ? "applied" : "invalid";
@@ -226,5 +228,106 @@ describePg("Fase 2 / 2.4 — cardState (Postgres real)", () => {
     } finally { c.release(); }
     expect((await row(id)).card_state).toBe("draft");
     expect(await events(id)).toHaveLength(0);
+  });
+
+  // ── Lote B (S-09, S-13) ───────────────────────────────────────────────────────────────────────
+  const mkChild = async (status: string, scope: Seed = s): Promise<string> =>
+    (await pool.query(
+      `INSERT INTO projects (tenant_id, created_by, title, status, product_id, version_number) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+      [scope.tenantId, scope.userId, `filho-${status}`, status, scope.productId, status === "card_draft" ? 0 : 1],
+    )).rows[0].id as string;
+  const link = (id: string, child: string | null) => pool.query("UPDATE tickets SET child_project_id = $2 WHERE id = $1", [id, child]);
+
+  it("S-09 ready → promoted: o filho precisa existir, ser do mesmo tenant/produto e estar vivo", async () => {
+    const other = await seedAcceptedProduct(pool, { budgetUsd: 50 });
+    seeds.push(other);
+    const id = await cardIn("ready");
+    const go = (child: string) => transitionCard(pool, { ticketId: id, to: "promoted", actorKind: "user", childProjectId: child });
+    expect(await go(newUuid())).toEqual({ kind: "precondition_failed", code: "child_not_found" });
+    expect(await go(other.parentId)).toEqual({ kind: "precondition_failed", code: "child_wrong_scope" });   // outro tenant/produto
+    expect(await go(await mkChild("card_draft"))).toEqual({ kind: "precondition_failed", code: "child_wrong_scope" }); // rascunho não é filho
+    expect(await go(await mkChild("failed"))).toEqual({ kind: "precondition_failed", code: "child_dead" });
+    expect(await go(await mkChild("archived"))).toEqual({ kind: "precondition_failed", code: "child_dead" });
+    expect(await row(id)).toMatchObject({ card_state: "ready", status: "open", child_project_id: null });
+    expect(await events(id)).toHaveLength(0);
+    expect((await go(await mkChild("materializing"))).kind).toBe("applied");
+    ev("S-09-promoted", { ok: true });
+  });
+
+  it("S-09 blocked → in_factory exige filho vivo; in_factory → delivered exige filho accepted e prova de merge quando há repositório", async () => {
+    const b = await cardIn("blocked");
+    await link(b, null);
+    expect(await transitionCard(pool, { ticketId: b, to: "in_factory", actorKind: "user" })).toEqual({ kind: "precondition_failed", code: "child_not_found" });
+    await link(b, await mkChild("failed"));
+    expect(await transitionCard(pool, { ticketId: b, to: "in_factory", actorKind: "user" })).toEqual({ kind: "precondition_failed", code: "child_dead" });
+    await link(b, await mkChild("running"));
+    expect((await transitionCard(pool, { ticketId: b, to: "in_factory", actorKind: "user" })).kind).toBe("applied");
+
+    const d = await cardIn("in_factory");
+    await link(d, await mkChild("running"));
+    expect(await transitionCard(pool, { ticketId: d, to: "delivered", actorKind: "system" })).toEqual({ kind: "precondition_failed", code: "child_not_accepted" });
+    const acc = await mkChild("accepted");
+    await link(d, acc);
+    await pool.query("INSERT INTO project_github_repos (project_id, repo_name, repo_full_name, repo_url, clone_url) VALUES ($1,'r','o/r','https://x/r','https://x/r.git')", [acc]);
+    expect(await transitionCard(pool, { ticketId: d, to: "delivered", actorKind: "system" })).toEqual({ kind: "precondition_failed", code: "merge_unverified" });
+    expect(await transitionCard(pool, { ticketId: d, to: "delivered", actorKind: "system", mergeCheck: async () => false })).toEqual({ kind: "precondition_failed", code: "merge_unverified" });
+    expect((await row(d)).card_state).toBe("in_factory");
+    expect((await transitionCard(pool, { ticketId: d, to: "delivered", actorKind: "system", mergeCheck: async (_q, cid) => cid === acc })).kind).toBe("applied");
+    expect(await row(d)).toMatchObject({ card_state: "delivered", status: "delivered" });
+    // sem repositório: basta o filho accepted
+    const e = await cardIn("in_factory");
+    await link(e, await mkChild("accepted"));
+    expect((await transitionCard(pool, { ticketId: e, to: "delivered", actorKind: "system" })).kind).toBe("applied");
+  });
+
+  it("S-09 blocked → rejected: filho parado é arquivado e auditado; filho em execução recusa; filho morto fica intacto", async () => {
+    const act = await cardIn("blocked");
+    await link(act, await mkChild("materializing"));
+    expect(await transitionCard(pool, { ticketId: act, to: "rejected", actorKind: "user" })).toEqual({ kind: "precondition_failed", code: "child_active" });
+    expect((await row(act)).card_state).toBe("blocked");
+
+    const stopped = await cardIn("blocked");
+    const ch = await mkChild("stopped");
+    await link(stopped, ch);
+    expect((await transitionCard(pool, { ticketId: stopped, to: "rejected", actorKind: "user", actorId: s.userId })).kind).toBe("applied");
+    const p = (await pool.query("SELECT status, extra FROM projects WHERE id = $1", [ch])).rows[0];
+    expect(p.status).toBe("archived");
+    expect(p.extra.card_rejected).toMatchObject({ ticket_id: stopped, previous_status: "stopped" });
+    const evs = (await pool.query("SELECT child_project_id FROM ticket_card_events WHERE ticket_id = $1 AND to_state = 'rejected'", [stopped])).rows;
+    expect(evs).toEqual([{ child_project_id: ch }]);
+
+    const dead = await cardIn("blocked");
+    const dch = await mkChild("failed");
+    await link(dead, dch);
+    expect((await transitionCard(pool, { ticketId: dead, to: "rejected", actorKind: "user" })).kind).toBe("applied");
+    expect((await pool.query("SELECT status FROM projects WHERE id = $1", [dch])).rows[0].status).toBe("failed");
+  });
+
+  it("S-09 decisão: não existe aresta ready → blocked (orçamento negado mantém ready; H §4.1 vale sobre H §6)", async () => {
+    const id = await cardIn("ready");
+    for (const actor of ACTORS) {
+      expect(await transitionCard(pool, { ticketId: id, to: "blocked", actorKind: actor, reason: "budget:BUDGET_INSUFFICIENT" })).toMatchObject({ kind: "invalid", from: "ready", to: "blocked" });
+    }
+    expect((await row(id)).card_state).toBe("ready");
+  });
+
+  it("S-13 cliente do chamador SEM transação é denunciado (nada escrito); blocked → blocked com outro motivo atualiza blocked_reason", async () => {
+    const id = await cardIn("promoted");
+    const c = await pool.connect();
+    try {
+      await expect(transitionCard(c, { ticketId: id, to: "in_factory", actorKind: "system" })).rejects.toThrow(/SAVEPOINT|transaction/i);
+    } finally { c.release(); }
+    expect((await row(id)).card_state).toBe("promoted");
+    expect(await events(id)).toHaveLength(0);
+
+    expect((await transitionCard(pool, { ticketId: id, to: "blocked", actorKind: "system", reason: "child_failed" })).kind).toBe("applied");
+    expect(await transitionCard(pool, { ticketId: id, to: "blocked", actorKind: "system", reason: "child_failed" })).toMatchObject({ kind: "noop", why: "already_in_state" });
+    expect(await transitionCard(pool, { ticketId: id, to: "blocked", actorKind: "user", reason: "outro" })).toMatchObject({ kind: "noop", why: "already_in_state" });
+    expect((await row(id)).blocked_reason).toBe("child_failed");
+    expect((await transitionCard(pool, { ticketId: id, to: "blocked", actorKind: "guard", reason: "budget:BUDGET_INSUFFICIENT" })).kind).toBe("applied");
+    expect(await row(id)).toMatchObject({ card_state: "blocked", status: "promoted", blocked_reason: "budget:BUDGET_INSUFFICIENT" });
+    expect((await events(id)).map((e) => `${e.from_state}>${e.to_state}:${e.reason}`)).toEqual([
+      "promoted>blocked:child_failed", "blocked>blocked:budget:BUDGET_INSUFFICIENT",
+    ]);
   });
 });
