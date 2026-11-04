@@ -549,6 +549,11 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
                           cwd=str(_apps_root), capture_output=True, text=True, timeout=600, env=_env)
             ctx["build_rc"] = _bd.returncode
             ctx["build_output"] = (_bd.stdout + _bd.stderr)[-4000:]
+            # D-2 (4.5c): install falho ou ferramenta ausente ("nest: not found") NÃO é build aprovado.
+            if ctx["build_rc"] == 0 and (_inst.returncode != 0 or _TOOL_MISSING_RE.search(ctx["build_output"])):
+                ctx["build_rc"] = _inst.returncode or 127
+                ctx["build_output"] = (f"[BUILD NÃO EXECUTOU: install_rc={_inst.returncode} ou ferramenta ausente]\n"
+                                       + ctx["build_output"])[-4000:]
             logger.info("[Cyborg V3] build local: install_rc=%s tsc_rc=%s build_rc=%s",
                         _inst.returncode, _tc.returncode, _bd.returncode)
             # Achado #35: muitas ferramentas de build (ex.: Style Dictionary) ESCONDEM o
@@ -707,6 +712,71 @@ def _parse_analysis(name: str, raw: str) -> AnalysisResult:
     )
 
 
+ANALYSIS_NAMES = ("a1_coerencia_estrutural", "a2_fidelidade_spec", "a3_build_runtime",
+                  "a4_ux_completude", "a5_dominio")
+
+
+def analysis_is_valid(ar: "AnalysisResult | None") -> bool:
+    """Uma análise VÁLIDA é a que efetivamente executou e devolveu um veredito parseável.
+
+    Erro de transporte (402 do Guard, timeout, 5xx), resposta vazia ou JSON ilegível ⇒ INVÁLIDA: ela NÃO
+    é "zero achados" e não pode contar a favor do aceite (rodada real 4.5c, D-1: 4 de 5 análises morreram
+    com 402 `REPEAT_PAYLOAD` e o aceite contou "0 BLOCKER"). `ok=False` com `error=None` é um veredito
+    legítimo (reprovou, com achados) e é válido."""
+    if ar is None or getattr(ar, "error", None):
+        return False
+    if (not (ar.raw or "").strip()) and ar.score == 0 and not ar.ok and not ar.findings:
+        return False  # resposta vazia: nada foi dito
+    return True
+
+
+def min_valid_analyses() -> int:
+    """Mínimo de análises VÁLIDAS (das 5) para o aceite por auditoria. `CYBORG_AUDIT_MIN_VALID`, padrão 4
+    (tolera UMA falha transitória; menos que isso ⇒ `needs_human`). Piso 1."""
+    try:
+        return max(1, int(os.environ.get("CYBORG_AUDIT_MIN_VALID", "4")))
+    except ValueError:
+        return 4
+
+
+def audit_validity(audit: dict) -> dict:
+    """`{valid, total, required, sufficient, invalid: {nome: erro}}` de uma auditoria.
+
+    `total` = as 5 análises padrão (a ausente conta como inválida); um dicionário com chaves fora do
+    padrão (fixtures/legado) usa o próprio tamanho. `required = min(min_valid_analyses(), total)`."""
+    audit = audit or {}
+    expected = list(ANALYSIS_NAMES) if any(k in ANALYSIS_NAMES for k in audit) else list(audit)
+    invalid: dict[str, str] = {}
+    valid = 0
+    for n in expected:
+        ar = audit.get(n)
+        if analysis_is_valid(ar):
+            valid += 1
+        else:
+            invalid[n] = (getattr(ar, "error", None) or "ausente/vazia")[:160] if ar is not None else "ausente"
+    total = len(expected)
+    required = min(min_valid_analyses(), total) if total else min_valid_analyses()
+    return {"valid": valid, "total": total, "required": required,
+            "sufficient": valid >= required and valid > 0, "invalid": invalid}
+
+
+# Cache de veredito por (projeto, análise, modelo, prompt, contexto): reauditar uma árvore IDÊNTICA
+# (ex.: depois de reverter uma rodada de correção, ou rodada que não mudou nada) reenviava o MESMO
+# payload; o Guard (`repeat_max_per_6h`) nega o 5º igual com 402 `REPEAT_PAYLOAD`. Reaproveitar o
+# veredito VÁLIDO já obtido para a MESMA pergunta evita o reenvio idêntico sem tocar no Guard (que segue
+# soberano: um 402 continua sendo 402 e a análise continua INVÁLIDA). Só vereditos válidos são guardados.
+_AUDIT_CACHE: "dict[str, AnalysisResult]" = {}
+_AUDIT_CACHE_MAX = 64
+_AUDIT_CACHE_LOCK = __import__("threading").Lock()
+
+
+def _audit_cache_key(project_id: str, name: str, model_id: str, prompt: str, ctx: dict) -> str:
+    import hashlib
+    blob = json.dumps({"p": project_id, "n": name, "m": model_id, "pr": prompt, "c": ctx},
+                      sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()
+
+
 def run_prior_audit(project_id: str, prod_id: str | None, model_id: str) -> dict[str, AnalysisResult]:
     """Executa 5 análises Bedrock em paralelo (~30s). Gera briefing para o Cyborg V3."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -720,11 +790,25 @@ def run_prior_audit(project_id: str, prod_id: str | None, model_id: str) -> dict
     results: dict[str, AnalysisResult] = {}
 
     def _one(name: str):
+        import copy as _copy
         t0 = time.time()
         try:
             prompt = _load_prompt(name)
-            raw = _call_bedrock(prompt, ctx, model_id)
-            ar = _parse_analysis(name, raw)
+            _ck = _audit_cache_key(project_id, name, model_id, prompt, ctx)
+            with _AUDIT_CACHE_LOCK:
+                _hit = _AUDIT_CACHE.get(_ck)
+            if _hit is not None:
+                logger.info("[Cyborg V3] %s: mesmo prompt+contexto já auditado — veredito válido reaproveitado "
+                            "(sem reenviar payload idêntico ao Guard)", name)
+                ar = _copy.deepcopy(_hit)
+            else:
+                raw = _call_bedrock(prompt, ctx, model_id)
+                ar = _parse_analysis(name, raw)
+                if analysis_is_valid(ar):
+                    with _AUDIT_CACHE_LOCK:
+                        _AUDIT_CACHE[_ck] = _copy.deepcopy(ar)
+                        while len(_AUDIT_CACHE) > _AUDIT_CACHE_MAX:
+                            _AUDIT_CACHE.pop(next(iter(_AUDIT_CACHE)))
         except Exception as e:
             ar = AnalysisResult(name=name, ok=False, score=0, error=str(e))
         ar.duration_ms = int((time.time() - t0) * 1000)
@@ -837,6 +921,8 @@ def run_prior_audit(project_id: str, prod_id: str | None, model_id: str) -> dict
             }
             for name, ar in results.items()
         }
+        # Validade da auditoria: quantas análises realmente rodaram (análise que não executou NÃO é "0 achados").
+        audit_data["validity"] = audit_validity(results)
         # Adicionar contexto build
         audit_data["build"] = {
             "rc": ctx.get("build_rc", -1),
@@ -1269,6 +1355,127 @@ def _persist_cyborg_violations(project_id: str, prod_id: str | None, violations:
         logger.warning("[Cyborg scope] violações não persistidas: %s", e)
 
 
+# ── Gate de INTEGRIDADE por rodada de correção (rodada real 4.5c, D-5) ────────────────────────────────
+# Rodadas de correção do Cyborg reescreveram o construtor do `CircuitBreaker` (TS2554) sem NENHUM gate que
+# visse a quebra: o build só era olhado depois da re-auditoria (cara) e, sem node_modules, nem enxergava.
+# Agora, ANTES de aceitar a alteração de cada rodada: (1) gate de árvore/escopo (artefato de build,
+# lockfile gerado, arquivo fora do escopo do RFC) e (2) build + `tsc --noEmit` comparados com o estado
+# anterior. Piorou, ou não foi possível verificar ⇒ a rodada é REVERTIDA (fail-closed) e registrada.
+# `CYBORG_ROUND_GATE=off` desliga. Substitui, quando ligado, a "janela de recuperação de build" (#53) e o
+# acúmulo transitório do modo feature: uma rodada que quebra o build/tipos nunca é mantida.
+import re as _re_gate
+
+_TS_ERR_RE = _re_gate.compile(r"error\s+TS\d+")
+_TOOL_MISSING_RE = _re_gate.compile(
+    r"(command not found|: not found|could not determine executable|is not recognized as|"
+    r"cannot find module 'typescript'|npm err! missing script|npx canceled|enoent)", _re_gate.I)
+
+
+def round_gate_enabled() -> bool:
+    return os.environ.get("CYBORG_ROUND_GATE", "on").strip().lower() not in ("0", "off", "false", "no")
+
+
+def _revert_snapshot(snapshot: list) -> int:
+    """Desfaz as escritas de uma rodada: `snapshot = [(abs_path, conteúdo_anterior | None se novo)]`."""
+    n = 0
+    for _abs, _prev in snapshot:
+        if _abs is None:
+            continue
+        try:
+            if _prev is None:
+                if _abs.exists():
+                    _abs.unlink()
+            else:
+                _abs.write_text(_prev, encoding="utf-8")
+            n += 1
+        except Exception as e:
+            logger.warning("[Cyborg rework] rollback falhou p/ %s: %s", _abs, e)
+    return n
+
+
+def run_build_check(project_id: str, prod_id: str | None) -> dict:
+    """Roda build + `tsc --noEmit` pelo executor (`/cyborg-build`). Levanta se o executor não respondeu."""
+    proj_dir = _resolve_proj_dir(project_id, prod_id)
+    status, text = executor_bridge.dispatch(
+        "/cyborg-build", {"project_id": project_id, "prod_id": prod_id or "", "timeout": 300},
+        project_id, prod_id, proj_dir, timeout=360)
+    if status != 200:
+        raise RuntimeError(f"/cyborg-build HTTP {status}: {str(text)[:200]}")
+    return json.loads(text)
+
+
+def _first_ts_error(text: str) -> str:
+    for ln in (text or "").splitlines():
+        if _TS_ERR_RE.search(ln):
+            return ln.strip()[:200]
+    return ""
+
+
+def summarize_build_check(res: dict | None, *, ts_project: bool) -> dict:
+    """Normaliza a resposta do `/cyborg-build`: `{ok, verified, ts_errors, reason}`.
+
+    `verified=False` ⇒ não deu para medir (executor caiu, build com rc -1, `tsc` ausente em projeto TS,
+    ferramenta "not found"). `ok` só é True quando build_rc==0 e (sem tsconfig, ou tsc rc==0)."""
+    if not res:
+        return {"ok": False, "verified": False, "ts_errors": 0, "reason": "executor não respondeu"}
+    b_rc, t_rc = res.get("build_rc", -1), res.get("type_check_rc", -1)
+    b_out, t_out = str(res.get("build_output") or ""), str(res.get("type_check_output") or "")
+    ts_errors = len(_TS_ERR_RE.findall(t_out)) + (len(_TS_ERR_RE.findall(b_out)) if t_rc in (-1, None) else 0)
+    if b_rc in (-1, None):
+        return {"ok": False, "verified": False, "ts_errors": ts_errors,
+                "reason": f"build não executou (build_rc={b_rc}): {b_out[-160:]}"}
+    if b_rc == 0 and _TOOL_MISSING_RE.search(b_out):
+        return {"ok": False, "verified": False, "ts_errors": ts_errors,
+                "reason": f"build 'passou' mas a saída indica ferramenta ausente: {b_out[-160:]}"}
+    if ts_project and (t_rc in (-1, None, 126, 127) or (t_rc != 0 and not ts_errors and _TOOL_MISSING_RE.search(t_out))):
+        return {"ok": False, "verified": False, "ts_errors": ts_errors,
+                "reason": f"tsc indisponível/não executou (type_check_rc={t_rc}): {t_out[-160:]} — "
+                          "tipos NÃO verificados (falha fechada)"}
+    ok = b_rc == 0 and (not ts_project or t_rc == 0)
+    return {"ok": ok, "verified": True, "ts_errors": ts_errors,
+            "reason": "" if ok else (f"build_rc={b_rc} type_check_rc={t_rc} ts_errors={ts_errors}"
+                                     + (f" — {_first_ts_error(t_out + chr(10) + b_out)}" if ts_errors else ""))}
+
+
+def evaluate_round_gate(baseline: dict | None, new: dict) -> tuple[bool, str]:
+    """Compara o build/tipos DESTA rodada com o estado anterior. `(aceita, motivo)`.
+
+    - não verificável ⇒ REJEITA (fail-closed);
+    - antes ok e agora não ⇒ REJEITA; mais erros TS que antes ⇒ REJEITA;
+    - antes já quebrado e não piorou ⇒ aceita (a rodada não regrediu)."""
+    if not new.get("verified"):
+        return False, f"build/tipos não verificáveis: {new.get('reason')}"
+    base = baseline or {}
+    if base.get("verified") and base.get("ok") and not new.get("ok"):
+        return False, f"rodada QUEBROU o build/tipos (antes ok): {new.get('reason')}"
+    if new.get("ts_errors", 0) > (base.get("ts_errors", 0) if base.get("verified") else 0) and not new.get("ok"):
+        return False, (f"rodada AUMENTOU erros TS ({base.get('ts_errors', 0) if base.get('verified') else 0}"
+                       f"→{new.get('ts_errors')}): {new.get('reason')}")
+    if not base.get("verified") and not new.get("ok"):
+        return False, f"build/tipos quebrados e sem baseline verificado: {new.get('reason')}"
+    return True, ""
+
+
+def round_integrity_gate(project_id: str, prod_id: str | None, apps_dir: Path, tree_before: dict,
+                         scope: list[str] | None, baseline: dict | None, *,
+                         check=None) -> tuple[bool, str, dict | None]:
+    """Gate de uma rodada: árvore/escopo + build/tipos. `(aceita, motivo, resumo_do_build)`.
+    Projeto sem `apps/package.json` ⇒ nada a construir (aceita, `resumo=None`)."""
+    pending, _fixed = audit_apps_tree_changes(apps_dir, tree_before, scope)
+    if pending:
+        return False, "gate de árvore: " + "; ".join(pending[:3]), None
+    if not (Path(apps_dir) / "package.json").is_file():
+        return True, "", None
+    ts_project = (Path(apps_dir) / "tsconfig.json").is_file()
+    try:
+        res = (check or run_build_check)(project_id, prod_id)
+    except Exception as e:
+        return False, f"build/tipos não verificáveis: {type(e).__name__}: {str(e)[:160]}", None
+    summ = summarize_build_check(res, ts_project=ts_project)
+    ok, why = evaluate_round_gate(baseline, summ)
+    return ok, why, summ
+
+
 def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_id: str,
                       max_rounds: int = 2, mode: str = "surgical") -> dict:
     """Correção AUTÔNOMA via /invoke/dev quando o engineer-bridge (Claude CLI) está ausente.
@@ -1420,6 +1627,20 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
     # teto permanece = max_rounds, comportamento validado inalterado.
     _regen_rounds = int(os.environ.get("CYBORG_DOMAIN_REGEN_ROUNDS", "5"))
     _round_cap = max_rounds
+    # D-5 (4.5c): gate de integridade por rodada (árvore/escopo + build/tipos) — baseline medido UMA vez
+    # aqui; depois cada rodada ACEITA passa a ser a nova baseline. Falha ao medir ⇒ baseline não verificada
+    # (a rodada só passa se o build/tipos dela forem verificáveis e ok).
+    _gate_on = round_gate_enabled()
+    _gate_apps = proj_dir / "apps"
+    _gate_baseline: dict | None = None
+    _gate_notes: list[str] = []      # rodadas revertidas pelo gate (vão ao prompt da próxima rodada)
+    _gate_reverts: list[str] = []
+    if _gate_on and (_gate_apps / "package.json").is_file():
+        try:
+            _gate_baseline = summarize_build_check(run_build_check(project_id, prod_id),
+                                                   ts_project=(_gate_apps / "tsconfig.json").is_file())
+        except Exception as _ge:
+            logger.warning("[Cyborg gate] baseline de build/tipos indisponível (%s: %s)", type(_ge).__name__, _ge)
     rnd = 0
     while rnd < _round_cap:
         rnd += 1
@@ -1663,7 +1884,9 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
             f"## Árvore atual\n{ctx.get('apps_tree','')[:_tree_budget]}\n"
             f"{_build_block}\n"
             f"{_scope_block}"
-            f"## Problemas a corrigir ({len(findings)}) — priorize BLOCKERs, no máx {_max_files} arquivos nesta rodada\n"
+            + ("## Rodadas anteriores REVERTIDAS por quebrar build/tipos (não repita a mesma alteração)\n"
+               + "\n".join(f"- {x}" for x in _gate_notes[-3:]) + "\n\n" if _gate_notes else "")
+            + f"## Problemas a corrigir ({len(findings)}) — priorize BLOCKERs, no máx {_max_files} arquivos nesta rodada\n"
             + "\n".join(f"- {x}" for x in findings[:20])
         )
         # Achado #30 (2026-08-10): uma resposta LLM vazia (200 com response="") NÃO pode
@@ -1758,6 +1981,7 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
                 f"⛔ Cyborg — {len(_rnd_viol)} escrita(s) rejeitada(s) pelo gate de escopo do RFC "
                 f"(não gravadas): " + "; ".join(_rnd_viol[:3]) + ("…" if len(_rnd_viol) > 3 else ""))
         written = 0
+        _tree_before = snapshot_apps_tree(_gate_apps) if _gate_on else {}
         # Achado #33: snapshot dos arquivos que ESTA rodada vai sobrescrever, p/ permitir
         # rollback se ela regredir. Guarda (abs_path, conteúdo_anterior | None se novo).
         _snapshot: list[tuple] = []
@@ -1788,8 +2012,32 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
         logger.info("[Cyborg rework] rodada %d: %d findings → %d artefatos gravados", rnd, len(findings), written)
         if written == 0:
             break
+        # D-5: gate de integridade ANTES de aceitar a alteração (e antes de pagar a re-auditoria).
+        if _gate_on:
+            _g_ok, _g_why, _g_summ = round_integrity_gate(
+                project_id, prod_id, _gate_apps, _tree_before, _evo_scope, _gate_baseline)
+            if not _g_ok:
+                _n_rev = _revert_snapshot(_snapshot)
+                _msg = f"rodada {rnd} REVERTIDA pelo gate de integridade ({_n_rev} arquivo(s)): {_g_why}"
+                _gate_reverts.append(_msg); _gate_notes.append(_g_why)
+                logger.warning("[Cyborg gate] %s", _msg)
+                _post_dialogue(project_id, f"↩️ Cyborg — {_msg}")
+                continue
+            if _g_summ is not None:
+                _gate_baseline = _g_summ
         # Re-auditar com o código corrigido.
         _new_audit = run_prior_audit(project_id, prod_id, model_id)
+        # D-1: re-auditoria que NÃO rodou (402/erro) não é "0 achados" — não dá para aceitar a rodada.
+        _new_val = audit_validity(_new_audit)
+        if not _new_val["sufficient"]:
+            _n_rev = _revert_snapshot(_snapshot)
+            _msg = (f"rodada {rnd} REVERTIDA: re-auditoria insuficiente ({_new_val['valid']}/{_new_val['total']} "
+                    f"válidas, mínimo {_new_val['required']}; falhas: "
+                    + "; ".join(f"{k}={v[:60]}" for k, v in _new_val["invalid"].items()) + ")")
+            _gate_reverts.append(_msg)
+            logger.warning("[Cyborg rework] %s — %d arquivo(s) revertido(s)", _msg, _n_rev)
+            _post_dialogue(project_id, f"↩️ Cyborg — {_msg}")
+            continue
         _new_blk = _count_blk(_new_audit)
         _new_bok = _bok(_cur_build_rc(project_id, prod_id))
         # GATE DE NÃO-REGRESSÃO (#33 + #52): compara por chave COMPOSTA (build_ok primário, MENOS
@@ -1869,19 +2117,7 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
         else:
             # Regressão comum (build seguiu verde mas BLOCKERs subiram, ou sem árvore preservada) →
             # reverte apenas os arquivos que ESTA rodada escreveu (gate #33), mantendo o melhor.
-            _reverted = 0
-            for _abs, _prev in _snapshot:
-                if _abs is None:
-                    continue
-                try:
-                    if _prev is None:
-                        if _abs.exists():
-                            _abs.unlink()  # arquivo novo introduzido pela rodada ruim → remove
-                    else:
-                        _abs.write_text(_prev, encoding="utf-8")  # restaura conteúdo anterior
-                    _reverted += 1
-                except Exception as _re_ex:
-                    logger.warning("[Cyborg rework] rollback falhou p/ %s: %s", _abs, _re_ex)
+            _reverted = _revert_snapshot(_snapshot)
             logger.warning("[Cyborg rework] rodada %d REGREDIU (blk %d→%d, build_ok %s→%s) — revertidos %d "
                            "arquivo(s), mantendo melhor estado (%d BLOCKERs, build_ok=%s)",
                            rnd, _best_blk, _new_blk, _best_build_ok, _new_bok, _reverted, _best_blk, _best_build_ok)
@@ -1933,8 +2169,9 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
                 pass
 
     total_blk = _count_blk(cur_audit)
-    return {"ok": total_blk == 0, "rounds": rnd, "final_audit": cur_audit, "delivered": total_blk == 0,
-            "scope_violations": _scope_violations}
+    _sufficient = audit_validity(cur_audit)["sufficient"]
+    return {"ok": total_blk == 0 and _sufficient, "rounds": rnd, "final_audit": cur_audit,
+            "delivered": total_blk == 0 and _sufficient, "scope_violations": _scope_violations, "gate_reverts": _gate_reverts}
 
 
 # ── Fase 3: Parse resultado do Claude Code ────────────────────────────────────
@@ -2100,6 +2337,38 @@ def run_cyborg_v3(project_id: str, tenant_id: str | None, prod_id: str | None) -
     return run
 
 
+def evaluate_audit_acceptance(_audit: dict, _build_rc: int) -> dict:
+    """Decisão de aceite por auditoria (achados #21/#38) com FALHA FECHADA para análises que não rodaram.
+
+    Só análises VÁLIDAS (`analysis_is_valid`) entram na média e na contagem de BLOCKER; uma análise que
+    não executou (402/erro/vazio) NÃO conta como "zero achados". Se o número de análises válidas ficar
+    abaixo de `min_valid_analyses()` (`CYBORG_AUDIT_MIN_VALID`, padrão 4 de 5), o aceite é recusado
+    (`ideal=weighted=False`, `insufficient=True`) ⇒ o chamador termina em `needs_human`."""
+    _val = audit_validity(_audit)
+    _valid_audit = {k: ar for k, ar in _audit.items() if analysis_is_valid(ar)}
+    _scores = [ar.score for ar in _valid_audit.values()]
+    _avg = (sum(_scores) / len(_scores)) if _scores else 0
+    _min_avg = float(os.environ.get("CYBORG_AUDIT_MIN_AVG", "7"))
+    # Critério ponderado de aceite (achado #21): aceita quando (a) 0 BLOCKER + média >= limiar, OU
+    # (b) build passa (rc=0) E média alta E poucos blockers residuais, NENHUM em a3 (build).
+    _strong_avg = float(os.environ.get("CYBORG_AUDIT_STRONG_AVG", "8"))
+    _max_resid = int(os.environ.get("CYBORG_AUDIT_MAX_RESIDUAL_BLK", "3"))
+    _blk = sum(sum(1 for f in getattr(ar, "findings", []) or [] if f.severity == "BLOCKER")
+               for ar in _valid_audit.values())
+    _build_blk = sum(1 for f in getattr(_valid_audit.get("a3_build_runtime"), "findings", []) or []
+                     if f.severity == "BLOCKER")
+    # ACHADO #38: build_rc>0 (falhou) NUNCA aceita, em NENHUM caminho. rc==-1 (build não rodou p/ este
+    # tipo) permanece permissivo (comportamento prévio).
+    _build_failed = _build_rc not in (0, -1)
+    _sufficient = bool(_val["sufficient"])
+    _accept_ideal = (_sufficient and _blk == 0 and _avg >= _min_avg and not _build_failed)
+    _accept_weighted = (_sufficient and _build_rc == 0 and _avg >= _strong_avg
+                        and _blk <= _max_resid and _build_blk == 0)
+    return {"blk": _blk, "avg": _avg, "build_rc": _build_rc, "build_blk": _build_blk,
+            "build_failed": _build_failed, "ideal": _accept_ideal, "weighted": _accept_weighted,
+            "insufficient": not _sufficient, "validity": _val}
+
+
 def _run_cyborg_v3_impl(project_id: str, tenant_id: str | None, prod_id: str | None) -> CyborgV3Run:
     # ⚖️ LEI 2026-09-10 — o Cyborg passa a nascer do SLOT do tenant (provider + modelo +
     # credencial), como a Bancada e a Fábrica. Antes ele era o único plano 100% env: modelo literal
@@ -2168,31 +2437,7 @@ def _run_cyborg_v3_impl(project_id: str, tenant_id: str | None, prod_id: str | N
             # métricas + flags de aceite. Extraída p/ poder ser reexecutada após uma escalação
             # de conclusão de feature (achado #50). Mantém INTACTOS os gates duros (#21/#38).
             def _evaluate(_audit: dict) -> dict:
-                _scores = [ar.score for ar in _audit.values() if ar.ok or ar.score > 0]
-                _avg = (sum(_scores) / len(_scores)) if _scores else 0
-                _min_avg = float(os.environ.get("CYBORG_AUDIT_MIN_AVG", "7"))
-                # GATE DE BUILD (inviolável): o build TEM que passar (rc=0). Separa "código que
-                # compila mas não cobre 100% da spec" de "código quebrado".
-                _build_rc = _cur_build_rc(project_id, prod_id)
-                # Critério ponderado de aceite (achado #21): specs exigentes deixam resíduo de
-                # fidelidade (FRs opcionais/edge) que não impede USO. Aceita quando:
-                #  (a) 0 BLOCKER + média ≥ limiar (ideal), OU
-                #  (b) build passa (rc=0) E média alta (≥ CYBORG_AUDIT_STRONG_AVG) E poucos
-                #      blockers residuais (≤ CYBORG_AUDIT_MAX_RESIDUAL_BLK), NENHUM em a3 (build).
-                _strong_avg = float(os.environ.get("CYBORG_AUDIT_STRONG_AVG", "8"))
-                _max_resid = int(os.environ.get("CYBORG_AUDIT_MAX_RESIDUAL_BLK", "3"))
-                _blk = sum(sum(1 for f in getattr(ar, "findings", []) or [] if f.severity == "BLOCKER")
-                           for ar in _audit.values())
-                _build_blk = sum(1 for f in getattr(_audit.get("a3_build_runtime"), "findings", []) or []
-                                 if f.severity == "BLOCKER")
-                # ACHADO #38: build_rc>0 (falhou) NUNCA aceita, em NENHUM caminho. rc==-1
-                # (build não rodou p/ este tipo) permanece permissivo (comportamento prévio).
-                _build_failed = _build_rc not in (0, -1)
-                _accept_ideal = (_blk == 0 and _avg >= _min_avg and not _build_failed)
-                _accept_weighted = (_build_rc == 0 and _avg >= _strong_avg
-                                    and _blk <= _max_resid and _build_blk == 0)
-                return {"blk": _blk, "avg": _avg, "build_rc": _build_rc, "build_blk": _build_blk,
-                        "build_failed": _build_failed, "ideal": _accept_ideal, "weighted": _accept_weighted}
+                return evaluate_audit_acceptance(_audit, _cur_build_rc(project_id, prod_id))
 
             _ev = _evaluate(audit)
 
@@ -2222,7 +2467,8 @@ def _run_cyborg_v3_impl(project_id: str, tenant_id: str | None, prod_id: str | N
             if _accept_ideal or _accept_weighted:
                 run.final_status = "delivered"
                 run.reason = (f"aceito por auditoria: {total_blk} BLOCKER, média {_avg:.1f}/10, "
-                              f"build_rc={_build_rc} ({'ideal' if _accept_ideal else 'ponderado'})")
+                              f"build_rc={_build_rc} ({'ideal' if _accept_ideal else 'ponderado'}), "
+                              f"análises válidas {_ev['validity']['valid']}/{_ev['validity']['total']}")
                 _post_dialogue(project_id,
                     f"═══════════════════════════════════════\n"
                     f"✅ Cyborg V3 — aceito por auditoria autônoma\n"
@@ -2232,8 +2478,16 @@ def _run_cyborg_v3_impl(project_id: str, tenant_id: str | None, prod_id: str | N
                 return run
             run.final_status = "needs_human"
             _build_note = " — BUILD FALHOU (gate inviolável #38)" if _build_failed else ""
+            _vl = _ev["validity"]
+            _insuf_note = ""
+            if _ev["insufficient"]:
+                _insuf_note = (f" — AUDITORIA INSUFICIENTE: só {_vl['valid']}/{_vl['total']} análise(s) válida(s) "
+                               f"(mínimo {_vl['required']}); não executaram: "
+                               + "; ".join(f"{k} ({v})" for k, v in _vl["invalid"].items())
+                               + ". Análise que não rodou NÃO conta como zero achados.")
             run.reason = (f"auditoria reprovou: {total_blk} BLOCKER (build={_build_blk}), "
-                          f"média {_avg:.1f}/10, build_rc={_build_rc}{_build_note}. "
+                          f"média {_avg:.1f}/10, build_rc={_build_rc}{_build_note}, "
+                          f"análises válidas {_vl['valid']}/{_vl['total']}{_insuf_note}. "
                           f"Ver docs/cyborg/audit.json.")
             _post_dialogue(project_id,
                 f"═══════════════════════════════════════\n"

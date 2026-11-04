@@ -794,12 +794,14 @@ def _jest_zero_tests_error(parsed: dict, rc) -> str | None:
 def _pick_node_pm(apps_dir: Path) -> tuple[str, str, str]:
     """N-3 (4.5b) — gerenciador pelo LOCKFILE EXISTENTE (antes: sempre pnpm, que gerou `pnpm-lock.yaml`
     +5.486 linhas num projeto npm). Devolve `(nome, install_cmd, build_cmd)`. Sem lockfile → pnpm (legado),
-    mas o chamador remove o lockfile gerado."""
+    mas o chamador remove o lockfile gerado. Os comandos NÃO levam `| tail`: o pipe mascarava o exit code do
+    install/build (rc do `tail` = 0 ⇒ "nest: not found" virava build_rc=0, rodada real 4.5c D-2); o recorte da
+    saída é feito em Python."""
     if (apps_dir / "package-lock.json").is_file() or (apps_dir / "npm-shrinkwrap.json").is_file():
-        return "npm", "npm install --no-audit --no-fund --prefer-offline 2>&1 | tail -50", "npm run build 2>&1 | tail -80"
+        return "npm", "npm install --no-audit --no-fund --prefer-offline", "npm run build"
     if (apps_dir / "yarn.lock").is_file():
-        return "yarn", "yarn install 2>&1 | tail -50", "yarn build 2>&1 | tail -80"
-    return "pnpm", "pnpm install --prefer-offline --no-frozen-lockfile 2>&1 | tail -50", "pnpm build 2>&1 | tail -80"
+        return "yarn", "yarn install", "yarn build"
+    return "pnpm", "pnpm install --prefer-offline --no-frozen-lockfile", "pnpm build"
 
 
 def _lockfiles_present(apps_dir: Path) -> set[str]:
@@ -817,6 +819,141 @@ def _remove_generated_lockfiles(apps_dir: Path, before: set[str]) -> list[str]:
         except OSError as e:
             log.warning(f"[cyborg-build] não consegui remover {n} gerado: {e}")
     return removed
+
+
+# ── 4.5c D-2/D-3/D-4 — build honesto, veredito estruturado e cópia gravável do full-test (helpers puros) ─────
+_TOOL_MISSING_RE = _re.compile(
+    r"(command not found|: not found|could not determine executable|is not recognized as|"
+    r"cannot find module 'typescript'|npx canceled|\bENOENT\b)", _re.I)
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "0").strip().lower() in ("1", "true", "on", "yes")
+
+
+def _cyborg_build_core(apps_dir: Path, build_env: dict, timeout: int = 300) -> dict:
+    """D-2 (4.5c) — install + build + `tsc --noEmit` com exit codes HONESTOS.
+
+    Regras: (1) roda numa CÓPIA gravável (como o /run-tests, N-2) — o diretório do runner é de root e não
+    recebe node_modules/lockfile; `FTS_BUILD_INPLACE=1` volta ao antigo; (2) install falho/timeout ⇒ o build
+    NÃO roda e `build_rc` é o rc do install (≠0; nunca 0 nem -1); (3) comando "not found" na saída com rc 0
+    ⇒ `build_rc=127`; install "ok" sem node_modules em projeto com dependências ⇒ `build_rc=127`;
+    (4) sem pipe no shell (o `| tail` devolvia o exit code do tail). `-1` só = "não aplicável" (sem tsconfig)."""
+    inplace = _env_flag("FTS_BUILD_INPLACE")
+    install_to = max(60, int(os.environ.get("FTS_BUILD_INSTALL_TIMEOUT", "600") or 600))
+    workroot = None
+    work = Path(apps_dir)
+    out = {"build_rc": 1, "build_output": "", "install_rc": -1, "install_output": "", "type_check_rc": -1,
+           "type_check_output": "", "package_manager": None, "generated_lockfiles_removed": [],
+           "workdir": "inplace" if inplace else "copy"}
+
+    def _sh(cmd, tmo, shell):
+        try:
+            r = subprocess.run(cmd, cwd=str(work), shell=shell, capture_output=True, text=True, timeout=tmo, env=build_env)
+            return r.returncode, (r.stdout or "") + (r.stderr or "")
+        except subprocess.TimeoutExpired:
+            return 124, f"TIMEOUT after {tmo}s"
+        except FileNotFoundError as e:
+            return 127, f"binário ausente: {e}"
+
+    try:
+        if not inplace:
+            try:
+                workroot = Path(tempfile.mkdtemp(prefix="genesis-cyborg-build-"))
+                work = _copy_project_for_tests(Path(apps_dir), workroot / "apps")
+            except Exception as e:
+                out.update(build_rc=125, build_output=f"BUILD NÃO EXECUTOU: cópia gravável falhou: {type(e).__name__}: {str(e)[:300]}")
+                return out
+        pm, install_cmd, build_cmd = _pick_node_pm(work)
+        out["package_manager"] = pm
+        locks_before = _lockfiles_present(work)
+        log.info(f"[cyborg-build] {pm} install em {work} ({out['workdir']})")
+        irc, iout = _sh(install_cmd, install_to, True)
+        out["install_rc"], out["install_output"] = irc, iout[-1500:]
+        if irc != 0:
+            out.update(build_rc=irc if irc not in (0, -1) else 1,
+                       build_output=f"BUILD NÃO EXECUTOU: install falhou (rc={irc}): {iout[-600:]}",
+                       type_check_output="não executado: install falhou")
+            return out
+        try:
+            pj = json.loads((work / "package.json").read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            pj = {}
+        has_deps = bool((pj.get("dependencies") or {}) or (pj.get("devDependencies") or {}))
+        if has_deps and not (work / "node_modules").is_dir():
+            out.update(build_rc=127, build_output="BUILD NÃO EXECUTOU: install terminou sem criar node_modules "
+                                                  "(binários do projeto indisponíveis)")
+            return out
+        brc, bout = _sh(build_cmd, timeout, True)
+        if brc == 0 and _TOOL_MISSING_RE.search(bout):
+            brc, bout = 127, "BUILD NÃO EXECUTOU: ferramenta ausente na saída apesar de rc=0\n" + bout
+        out["build_rc"], out["build_output"] = brc, bout[-3500:]
+        if (work / "tsconfig.json").is_file():
+            trc, tout = _sh(["npx", "--no-install", "tsc", "--noEmit"], 180, False)
+            if trc != 0 and _TOOL_MISSING_RE.search(tout) and not _re.search(r"error\s+TS\d+", tout):
+                trc = 127
+            out["type_check_rc"], out["type_check_output"] = trc, tout[-2000:]
+        else:
+            out["type_check_output"] = "sem tsconfig.json — type-check não aplicável"
+        out["generated_lockfiles_removed"] = _remove_generated_lockfiles(work, locks_before)
+        return out
+    finally:
+        if workroot is not None:
+            shutil.rmtree(workroot, ignore_errors=True)
+
+
+_VERDICT_LINE_RE = _re.compile(r"^[\s>*_`#\-]*FULL_TEST_VERDICT\s*:\s*(APPROVED|REJECTED)\s*[*_`.]*\s*$", _re.I)
+
+
+def parse_full_test_verdict(output: str, returncode: int | None = 0) -> tuple[bool, str]:
+    """D-3 (4.5c) — aprovação do TSK-FULL-TEST SÓ por linha de contrato explícita.
+
+    Contrato: uma linha inteira `FULL_TEST_VERDICT: APPROVED` ou `FULL_TEST_VERDICT: REJECTED` (a ÚLTIMA vale;
+    markdown leve ao redor tolerado). Qualquer outra coisa — "aprovado", "ALL CHECKS", "PASSED", "approved:
+    false", "não aprovado", relatório bloqueado — NÃO aprova (antes: substring em todo o texto ⇒ aprovava
+    relatório "bloqueado"). Sem linha de contrato, ou rc≠0, ⇒ `approved=False`. Devolve `(approved, motivo)`."""
+    verdict = None
+    for line in (output or "").splitlines():
+        m = _VERDICT_LINE_RE.match(line)
+        if m:
+            verdict = m.group(1).upper()
+    if verdict is None:
+        return False, "sem linha de contrato FULL_TEST_VERDICT"
+    if verdict == "REJECTED":
+        return False, "FULL_TEST_VERDICT: REJECTED"
+    if returncode not in (0, None):
+        return False, f"FULL_TEST_VERDICT: APPROVED mas o CLI saiu com rc={returncode}"
+    return True, "FULL_TEST_VERDICT: APPROVED"
+
+
+def _prepare_full_test_workdir(project_path: Path) -> tuple[Path, Path, Path]:
+    """D-4 (4.5c) — cópia gravável do projeto para o /run-full-test (como o /run-tests, N-2): o CLI roda como
+    `ubuntu` e o diretório do projeto é de root (EACCES no install / ao gravar). Devolve
+    `(workroot, projeto_copiado, apps_copiado)`; o chamador apaga `workroot`. Não polui o original."""
+    workroot = Path(tempfile.mkdtemp(prefix="genesis-full-test-"))
+    try:
+        proj = _copy_project_for_tests(Path(project_path), workroot / "project")
+    except Exception:
+        shutil.rmtree(workroot, ignore_errors=True)
+        raise
+    return workroot, proj, (proj / "apps" if (proj / "apps").is_dir() else proj)
+
+
+def _changed_files_vs_original(orig: Path, copy: Path) -> list[str]:
+    """Arquivos novos/alterados na cópia em relação ao original (relatório do que o CLI mexeu)."""
+    changed: list[str] = []
+    for root, dirs, files in os.walk(copy):
+        dirs[:] = [d for d in dirs if d not in _COPY_IGNORE]
+        for fn in files:
+            cp = Path(root) / fn
+            rel = cp.relative_to(copy)
+            op = Path(orig) / rel
+            try:
+                if not op.is_file() or op.read_bytes() != cp.read_bytes():
+                    changed.append(str(rel))
+            except OSError:
+                changed.append(str(rel))
+    return sorted(changed)[:200]
 
 
 # ── Evoluir bloco 3 F3a — parsers PUROS dos reporters (testáveis com fixtures; sem I/O de processo) ─────────
@@ -1215,54 +1352,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # chaves AWS, JWT_SECRET, Foundry). Um postinstall malicioso não acha nada nosso.
         build_env = _sanitized_base_env()
 
-        # 1. install (gerenciador pelo LOCKFILE EXISTENTE — N-3: antes sempre pnpm, que criou pnpm-lock.yaml
-        #    (+5.486 linhas) num projeto npm e o arquivo foi parar no PR).
-        _pm, _install_cmd, _build_cmd = _pick_node_pm(apps_dir)
-        _locks_before = _lockfiles_present(apps_dir)
-        log.info(f"[cyborg-build] {project_id[:8]}: {_pm} install em {apps_dir}")
-        install_rc = -1; install_out = ""
-        try:
-            r = subprocess.run(
-                _install_cmd,
-                cwd=str(apps_dir), shell=True, capture_output=True, text=True, timeout=180,
-                env=build_env,
-            )
-            install_rc = r.returncode
-            install_out = (r.stdout or "")[-1500:]
-        except subprocess.TimeoutExpired:
-            install_out = "TIMEOUT after 180s"
-
-        # 2. pnpm build
-        log.info(f"[cyborg-build] {project_id[:8]}: {_pm} build")
-        build_rc = -1; build_out = ""
-        try:
-            r = subprocess.run(
-                _build_cmd,
-                cwd=str(apps_dir), shell=True, capture_output=True, text=True, timeout=timeout,
-                env=build_env,
-            )
-            build_rc = r.returncode
-            build_out = (r.stdout or "")[-3500:]
-        except subprocess.TimeoutExpired:
-            build_out = f"TIMEOUT after {timeout}s"
-
-        # 3. tsc --noEmit (rápido, se disponível)
-        tc_rc = -1; tc_out = ""
-        try:
-            r = subprocess.run(
-                "npx --no-install tsc --noEmit 2>&1 | tail -30",
-                cwd=str(apps_dir), shell=True, capture_output=True, text=True, timeout=60,
-                env=build_env,
-            )
-            tc_rc = r.returncode
-            tc_out = (r.stdout or "")[-2000:]
-        except Exception:
-            pass
-
-        # N-3: o build é VERIFICAÇÃO — não pode deixar lockfile novo no produto (seria publicado no PR).
-        _removed_locks = _remove_generated_lockfiles(apps_dir, _locks_before)
-        if _removed_locks:
-            log.warning(f"[cyborg-build] {project_id[:8]}: lockfile(s) gerado(s) pelo build removido(s): {_removed_locks}")
+        # D-2 (4.5c): install + build + tsc numa cópia gravável, com exit codes honestos (ver _cyborg_build_core).
+        _core = _cyborg_build_core(apps_dir, build_env, timeout)
+        _pm = _core["package_manager"]
+        build_rc, build_out = _core["build_rc"], _core["build_output"]
+        install_rc, install_out = _core["install_rc"], _core["install_output"]
+        tc_rc, tc_out = _core["type_check_rc"], _core["type_check_output"]
+        _removed_locks = _core["generated_lockfiles_removed"]
+        log.info(f"[cyborg-build] {project_id[:8]}: install_rc={install_rc} build_rc={build_rc} tsc_rc={tc_rc} ({_core['workdir']})")
 
         # T-09 sub-fase 2f: fingerprint check (grep semântico contra type_policy)
         # Só roda se payload trouxer project_type e o módulo type_fingerprint estiver disponível.
@@ -1303,6 +1400,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "generated_lockfiles_removed": _removed_locks,
             "install_rc": install_rc,
             "install_output": install_out,
+            "workdir": _core["workdir"],
             "type_check_rc": tc_rc,
             "type_check_output": tc_out,
             # T-09: sub-fase 2f (Type Compliance) — pode ser None se policy indisponível
@@ -1751,8 +1849,24 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
         if not apps_path.exists():
             apps_path = Path(project_path)
 
+        # D-4 (4.5c): o diretório do projeto é do runner (root) e o CLI roda como `ubuntu` ⇒ EACCES. Mesma
+        # estratégia do /run-tests (N-2): rodar numa CÓPIA gravável, sem poluir o projeto original.
+        # `FTS_TESTS_INPLACE=1` volta ao comportamento antigo (roda no diretório do projeto).
+        orig_project_path = project_path
+        workroot = None
+        if not _env_flag("FTS_TESTS_INPLACE"):
+            try:
+                workroot, _proj_copy, apps_path = _prepare_full_test_workdir(Path(project_path))
+                project_path = str(_proj_copy)
+            except Exception as e:
+                self._json(500, {"status": "error", "approved": False,
+                                 "output": f"cópia do projeto para o diretório do full-test falhou: {type(e).__name__}: {str(e)[:300]}"})
+                return
+
         if prompt_path and Path(prompt_path).exists():
             prompt = Path(prompt_path).read_text(encoding="utf-8")
+            if workroot is not None:
+                prompt = prompt.replace(orig_project_path, project_path)
         else:
             prompt = (
                 f"# TASK-FULL-TEST — Validação E2E e Correção Final\n\n"
@@ -1818,7 +1932,11 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
             )
 
         log.info("TASK-FULL-TEST iniciada: project=%s", project_id)
-        wrapper_prompt = f"Você está em: {apps_path}\nDiretório de projeto: {project_path}\n\n{prompt}"
+        wrapper_prompt = (f"Você está em: {apps_path}\nDiretório de projeto: {project_path}\n\n{prompt}\n\n"
+                          "## CONTRATO DE VEREDITO (obrigatório)\n"
+                          "Como ÚLTIMA linha da sua resposta imprima EXATAMENTE uma destas, sozinha na linha:\n"
+                          "FULL_TEST_VERDICT: APPROVED\nFULL_TEST_VERDICT: REJECTED\n"
+                          "APPROVED só se todas as fases passaram com evidência real; qualquer bloqueio/falha ⇒ REJECTED.")
 
         # Lei 8 (Fase 2): SANDBOX por-job — env mínimo, SEM segredos do FTS. Este path
         # (full-test interno) não usa wrappers/token Genesis.
@@ -1859,14 +1977,31 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
                 )
                 output   = _scrub_cli_secrets((result.stdout or "") + (result.stderr or ""),
                                               subprocess_env)
-                approved = any(w in output.upper() for w in
-                               ["APROVADO", "ALL CHECKS", "QA_PASS", "PASSED", "ALL PASS",
-                                "STATUS FINAL: APROVADO", "✅ APROVADO", "APPROVED"])
-                log.info("Concluída: approved=%s rc=%d len=%d slot=%s", approved,
+                # D-3 (4.5c): aprovação SÓ por linha de contrato explícita (não por substring do texto).
+                approved, verdict_why = parse_full_test_verdict(output, result.returncode)
+                log.info("Concluída: approved=%s (%s) rc=%d len=%d slot=%s", approved, verdict_why,
                          result.returncode, len(output), slot_label or "host (legado)")
                 out_excerpt = output[:8000] + "\n...\n" + output[-4000:] if len(output) > 12000 else output
+                extra: dict = {}
+                if workroot is not None:
+                    extra["workdir"] = "copy"
+                    try:
+                        extra["changed_files"] = _changed_files_vs_original(Path(orig_project_path), Path(project_path))
+                        _qa = Path(project_path) / "docs" / "qa" / "QA_REPORT_TSK-FULL-TEST.md"
+                        if _qa.is_file():
+                            _dst = Path(orig_project_path) / "docs" / "qa" / _qa.name
+                            try:
+                                _dst.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.copyfile(_qa, _dst)
+                                extra["qa_report"] = str(_dst)
+                            except OSError as _qe:
+                                extra["qa_report_error"] = f"{type(_qe).__name__}: {_qe}"
+                                extra["qa_report_text"] = _qa.read_text(encoding="utf-8", errors="replace")[:20000]
+                    except Exception as _ce:
+                        log.warning("[full-test] pós-processamento da cópia falhou: %s", _ce)
                 self._json(200, {"status": "ok", "output": out_excerpt, "llm_slot": slot_label,
-                                 "approved": approved, "returncode": result.returncode})
+                                 "approved": approved, "verdict": verdict_why,
+                                 "returncode": result.returncode, **extra})
             except subprocess.TimeoutExpired:
                 self._json(200, {"status": "timeout", "output": "Timeout após 3600s", "approved": False})
             except FileNotFoundError:
@@ -1876,6 +2011,8 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
                 self._json(500, {"status": "error", "output": str(e), "approved": False})
         finally:
             shutil.rmtree(creds_dir, ignore_errors=True)
+            if workroot is not None:
+                shutil.rmtree(workroot, ignore_errors=True)
 
     # ── /launch-cyborg (validação externa autônoma) ────────────────────────────
 
