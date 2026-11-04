@@ -75,6 +75,27 @@ export async function resolveLineageHead(db: Db, rootId: string): Promise<Lineag
 }
 
 /**
+ * Próximo número de versão da linhagem INTEIRA (M-02): `max(version_number)` das versões vivas (não `failed`/`archived`)
+ * entre a raiz e todos os descendentes (profundidade ≤ 64) + 1. Substitui a contagem de dois níveis do
+ * `createProjectFromSpec`, que errava em v1←v2←v3 e dava 409 determinístico (sem corrida) contra o índice
+ * `uq_projects_parent_version_live`. Um número de tentativa `failed`/`archived` é reaproveitado (como no claim do /evolve).
+ */
+export async function nextLineageVersion(db: Db, rootId: string): Promise<number> {
+  const res = await db.query(
+    `WITH RECURSIVE lin AS (
+       SELECT id, status, version_number, 0 AS depth FROM projects WHERE id = $1
+       UNION ALL
+       SELECT p.id, p.status, p.version_number, l.depth + 1
+         FROM projects p JOIN lin l ON p.parent_project_id = l.id
+        WHERE l.depth < 64
+     )
+     SELECT COALESCE(MAX(version_number) FILTER (WHERE status NOT IN ('failed', 'archived')), 0)::int AS max_version FROM lin`,
+    [rootId],
+  );
+  return Number(res.rows[0]?.max_version ?? 0) + 1;
+}
+
+/**
  * Entradas de identidade para `deriveSystemService`: título e id da RAIZ (mesmo serviceId em todas
  * as versões). Para raiz sem pai devolve o próprio projeto — comportamento idêntico ao anterior.
  */

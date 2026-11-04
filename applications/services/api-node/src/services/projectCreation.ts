@@ -19,6 +19,7 @@ import { normalizeProductId, resolveInboxProductId, assertProductOwnership } fro
 import { recomputeProductLifecycle } from "./productLifecycle.js";
 import { computeSpecTreeHash, sha256Hex } from "../lib/specTreeHash.js";
 import { isVersionConflict } from "./evolutionUniqueness.js";
+import { resolveLineageRoot, nextLineageVersion } from "./lineage.js";
 
 /** Duas criações de versão da mesma linhagem correram e a segunda perdeu no índice (rotas mapeiam para 409). */
 export class VersionConflictError extends Error {
@@ -119,7 +120,11 @@ export async function createProjectFromSpec(
       ? await resolveInboxProductId(client, tenantId, createdBy)
       : (await assertProductOwnership(client, requestedProductId, tenantId)).id;
 
-  // version_number por linhagem (idêntico à rota /api/specs)
+  // version_number pela linhagem INTEIRA (M-02): max(version viva)+1 a partir da RAIZ, em qualquer profundidade.
+  // (Antes: contagem de dois níveis a partir de `parent.parent_project_id` ⇒ em v1←v2←v3 dava 3 e colidia com o v3
+  // existente no índice uq_projects_parent_version_live: 409 determinístico, sem corrida nenhuma.) O pai gravado segue a
+  // regra histórica (pai do pai, quando existe); como a versão é maior que TODAS as vivas da linhagem, só uma corrida
+  // verdadeira ainda bate no índice e vira VersionConflictError (409 na rota).
   let versionNumber = 1;
   let rootParentId: string | null = parentProjectId;
   if (parentProjectId) {
@@ -129,13 +134,8 @@ export async function createProjectFromSpec(
     );
     const parent = parentRow.rows[0];
     if (parent?.parent_project_id) rootParentId = parent.parent_project_id as string;
-    const countRes = await client.query(
-      `SELECT COUNT(*) FROM projects
-         WHERE id = $1 OR parent_project_id = $1 OR
-               parent_project_id IN (SELECT id FROM projects WHERE parent_project_id = $1)`,
-      [rootParentId ?? parentProjectId],
-    );
-    versionNumber = parseInt(countRes.rows[0].count as string, 10) + 1;
+    const lineageRoot = await resolveLineageRoot(client, parentProjectId);
+    versionNumber = await nextLineageVersion(client, lineageRoot?.id ?? parentProjectId);
   }
 
   // RFC-0004 T1.2/T1.3: nomes PREPARADOS antes de tudo — basename (neutraliza '/'
@@ -227,7 +227,7 @@ export async function createProjectFromSpec(
        rootParentId, versionNumber, extraJson, resolvedProductId, specFingerprint],
     );
   } catch (e) {
-    // Fase 1' (1.2): a numeração por CONTAGEM da árvore (acima) corre; o índice parcial
+    // Fase 1' (1.2): a numeração por max(versão viva) da linhagem (acima) corre; o índice parcial
     // uq_projects_parent_version_live transforma a duplicata silenciosa em conflito explícito (409 na rota).
     if (isVersionConflict(e)) {
       throw new VersionConflictError(`Já existe a versão ${versionNumber} desta linhagem (criada ao mesmo tempo). Repita a operação.`);

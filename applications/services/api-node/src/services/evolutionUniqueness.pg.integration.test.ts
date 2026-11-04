@@ -29,6 +29,7 @@ vi.mock("../db/client.js", () => dbClientMock());
 vi.mock("../middleware/auth.js", () => authMock());
 
 import { projectRoutes } from "../routes/projects.js";
+import { specRoutes } from "../routes/specs.js";
 import {
   ensureEvolutionUniqueness, UNIQUENESS_INDEXES, getUniquenessCounters, resetUniquenessCountersForTest,
 } from "./evolutionUniqueness.js";
@@ -49,7 +50,7 @@ describePg("Fase 1' / 1.2 — unicidade parcial (banco descartável)", () => {
     pool = scratch.pool;
     const { initDb } = await import("../db/init.js");
     await initDb();
-    app = await buildApp([projectRoutes]);
+    app = await buildApp([projectRoutes, specRoutes]);
   }, 120_000);
   afterAll(async () => {
     await app?.close();
@@ -204,9 +205,9 @@ describePg("Fase 1' / 1.2 — unicidade parcial (banco descartável)", () => {
     }
   });
 
-  it("POST /api/specs com parentProjectId (createProjectFromSpec, numeração por contagem): corrida ⇒ uma cria, a outra recebe VersionConflictError (rota ⇒ 409)", async () => {
+  it("POST /api/specs com parentProjectId (createProjectFromSpec, numeração por max(versão viva) da linhagem): corrida ⇒ uma cria, a outra recebe VersionConflictError (rota ⇒ 409)", async () => {
     const s = await seed();
-    const gate = queryGate(pool, /SELECT COUNT\(\*\) FROM projects/, { mode: "barrier", arrivals: 2 });
+    const gate = queryGate(pool, /MAX\(version_number\)/, { mode: "barrier", arrivals: 2 });
     const make = async (i: number) => {
       const client = await pool.connect();
       try {
@@ -228,5 +229,93 @@ describePg("Fase 1' / 1.2 — unicidade parcial (banco descartável)", () => {
     expect((bad[0].reason as VersionConflictError).code).toBe("VERSION_CONFLICT");
     const versions = (await pool.query("SELECT version_number FROM projects WHERE parent_project_id = $1", [s.parentId])).rows.map((r) => r.version_number);
     expect(versions).toEqual([2]);
+  });
+
+  it("M-09: transação longa segurando a tabela ⇒ o DDL desiste em ~3 s (lock_timeout), loga evolution_uniqueness_lock_timeout e o boot segue", async () => {
+    await dropAll();
+    resetUniquenessCountersForTest();
+    const holder = await pool.connect();
+    const lines: string[] = [];
+    try {
+      await holder.query("BEGIN");
+      await holder.query("LOCK TABLE projects IN ROW EXCLUSIVE MODE"); // conflita com o SHARE do CREATE UNIQUE INDEX
+      const t0 = Date.now();
+      const r = await ensureEvolutionUniqueness(pool, { error: (l) => lines.push(l), info: (l) => lines.push(l) });
+      const ms = Date.now() - t0;
+      const lt = lines.filter((l) => l.includes("evolution_uniqueness_lock_timeout"));
+      ev("ddl-lock-timeout", { ms, criados: r.created, erros: r.errors.length, lockTimeouts: getUniquenessCounters().lockTimeouts });
+      expect(lt.length).toBeGreaterThan(0);
+      expect(getUniquenessCounters().lockTimeouts).toBeGreaterThan(0);
+      expect(r.errors.length).toBeGreaterThan(0);
+      // 4 índices em projects × ~3 s; o ponto é: termina (não pendura) e a sessão volta limpa ao pool
+      expect(ms).toBeLessThan(25_000);
+    } finally {
+      await holder.query("ROLLBACK");
+      holder.release();
+    }
+    // liberada a tabela, a próxima execução cria tudo (o timeout não deixa a sessão do pool com lock_timeout preso)
+    const again = await ensureEvolutionUniqueness(pool, logger);
+    expect(again.errors).toHaveLength(0);
+    expect(await indexNames()).toEqual(UNIQUENESS_INDEXES.map((d) => d.name).sort());
+    const lt = (await pool.query("SHOW lock_timeout")).rows[0].lock_timeout;
+    expect(lt).toBe("0");
+  }, 60_000);
+
+  // ── M-02-a / M-12: POST /api/specs numera pela linhagem INTEIRA e o 409 só ocorre em corrida real ──────────────────
+  const multipart = (fields: Record<string, string>, fileName: string, fileBody: string) => {
+    const b = "----g1boundary";
+    const parts: string[] = [];
+    for (const [k, v] of Object.entries(fields)) parts.push(`--${b}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`);
+    parts.push(`--${b}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: text/markdown\r\n\r\n${fileBody}\r\n`);
+    parts.push(`--${b}--\r\n`);
+    return { payload: parts.join(""), headers: { "content-type": `multipart/form-data; boundary=${b}` } };
+  };
+  const postSpec = (s: Seed, parentProjectId: string, tag: string) => {
+    const mp = multipart({
+      title: `Evolucao via specs ${tag}`, projectType: "backend_api", intakeMode: "attachments", budgetUsd: "10", budgetAlertStepPct: "20",
+      productId: s.productId, parentProjectId,
+    }, "spec.md", `# Spec ${tag}\n\nO aplicativo lista entregas e permite exportar os dados em formato CSV para o cliente final.\n`);
+    return app.inject({ method: "POST", url: "/api/specs", payload: mp.payload, headers: mp.headers });
+  };
+  const lineageDepth3 = async (s: Seed) => {
+    // v1 (seed) ← v2 ← v3, como o /evolve histórico cria (cada filho aponta para o HEAD anterior)
+    const v2 = (await mkChild(s, { parent: s.parentId, version: 2, status: "accepted" })).rows[0].id as string;
+    const v3 = (await mkChild(s, { parent: v2, version: 3, status: "accepted" })).rows[0].id as string;
+    return { v2, v3 };
+  };
+
+  it("M-02-a: linhagem v1←v2←v3 + POST /api/specs com parentProjectId de QUALQUER versão ⇒ v4, sem 409 (antes: 409 determinístico)", async () => {
+    await ensureEvolutionUniqueness(pool, logger);
+    const s = await seed();
+    const { v2, v3 } = await lineageDepth3(s);
+    const out: Record<string, unknown> = {};
+    let expected = 4;
+    for (const [label, pid] of [["v3", v3], ["v2", v2], ["v1", s.parentId]] as const) {
+      const r = await postSpec(s, pid, label);
+      const id = r.json().projectId ?? r.json().id;
+      const row = id ? (await pool.query("SELECT version_number, parent_project_id FROM projects WHERE id = $1", [id])).rows[0] : null;
+      out[label] = { status: r.statusCode, code: r.json().code ?? null, version: row?.version_number ?? null };
+      expect(r.statusCode, `${label}: ${r.body}`).toBeLessThan(300);
+      expect(row?.version_number).toBe(expected);
+      expected++;
+    }
+    ev("specs-profundidade-3", out);
+  });
+
+  it("M-12: POST /api/specs, corrida real na mesma linhagem ⇒ uma cria e a outra recebe 409 VERSION_CONFLICT pela ROTA", async () => {
+    await ensureEvolutionUniqueness(pool, logger);
+    const s = await seed();
+    const { v3 } = await lineageDepth3(s);
+    const gate = queryGate(pool, /MAX\(version_number\)/, { mode: "barrier", arrivals: 2 });
+    const rs = await raceN(2, (i) => postSpec(s, v3, `corrida-${i}`));
+    gate.uninstall();
+    const codes = rs.map((r) => r.statusCode).sort();
+    const conflict = rs.find((r) => r.statusCode === 409);
+    ev("specs-rota-409", { codes, code: conflict?.json().code ?? null });
+    expect(codes.filter((c) => c < 300)).toHaveLength(1);
+    expect(conflict?.json().code).toBe("VERSION_CONFLICT");
+    const versions = (await pool.query(
+      "SELECT version_number FROM projects WHERE parent_project_id = $1 AND status NOT IN ('failed','archived') ORDER BY version_number", [(await pool.query("SELECT parent_project_id FROM projects WHERE id = $1", [v3])).rows[0].parent_project_id])).rows.map((r) => r.version_number);
+    expect(versions).toEqual([3, 4]);
   });
 });

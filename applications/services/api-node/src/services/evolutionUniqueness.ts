@@ -12,6 +12,13 @@
  * Idempotente: segunda execução é no-op. Rollback: `DROP INDEX IF EXISTS <nome>` (ver `UNIQUENESS_INDEXES`).
  */
 type Queryable = { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> };
+type Session = Queryable & { release: () => void };
+/** Pool: o DDL roda numa sessão dedicada, com teto de espera pelo lock (M-09). Um `Queryable` simples (teste) roda direto. */
+type QueryableOrPool = Queryable & { connect?: () => Promise<Session> };
+
+/** M-09: teto de espera pelo lock SHARE do `CREATE UNIQUE INDEX` e de duração do build — o boot nunca pendura. */
+export const DDL_LOCK_TIMEOUT = "3s";
+export const DDL_STATEMENT_TIMEOUT = "60s";
 
 export interface UniquenessIndexDef {
   name: string;
@@ -92,20 +99,46 @@ export interface UniquenessReport {
 }
 
 /** Contadores do processo (sem lib de métricas no api-node): lidos por `getUniquenessCounters()` e pelos testes. */
-const counters = { runs: 0, created: 0, dirty: 0, invalid: 0, errors: 0 };
+const counters = { runs: 0, created: 0, dirty: 0, invalid: 0, errors: 0, lockTimeouts: 0 };
 export function getUniquenessCounters(): Readonly<typeof counters> {
   return { ...counters };
 }
 export function resetUniquenessCountersForTest(): void {
-  counters.runs = counters.created = counters.dirty = counters.invalid = counters.errors = 0;
+  counters.runs = counters.created = counters.dirty = counters.invalid = counters.errors = counters.lockTimeouts = 0;
 }
 
 type LogFn = (line: string) => void;
 
 export async function ensureEvolutionUniqueness(
-  db: Queryable,
+  pool: QueryableOrPool,
   logger: { error: LogFn; info: LogFn } = { error: (l) => console.error(l), info: (l) => console.log(l) },
 ): Promise<UniquenessReport> {
+  // M-09: sessão dedicada com lock_timeout/statement_timeout (um SET num Pool valeria só para uma conexão qualquer).
+  let session: Session | null = null;
+  if (typeof pool.connect === "function") {
+    try {
+      session = await pool.connect();
+      await session.query(`SET lock_timeout = '${DDL_LOCK_TIMEOUT}'`);
+      await session.query(`SET statement_timeout = '${DDL_STATEMENT_TIMEOUT}'`);
+    } catch (e) {
+      try { session?.release(); } catch { /* noop */ }
+      session = null;
+      logger.error(JSON.stringify({ level: "error", event: "evolution_uniqueness_error", index: "*", error: e instanceof Error ? e.message : String(e) }));
+      return { created: [], existing: [], dirty: [], invalid: [], errors: [{ index: "*", error: "sessão do DDL indisponível" }] };
+    }
+  }
+  try {
+    return await runEnsure(session ?? pool, logger);
+  } finally {
+    if (session) {
+      await session.query("RESET lock_timeout").catch(() => undefined);
+      await session.query("RESET statement_timeout").catch(() => undefined);
+      session.release();
+    }
+  }
+}
+
+async function runEnsure(db: Queryable, logger: { error: LogFn; info: LogFn }): Promise<UniquenessReport> {
   counters.runs++;
   const report: UniquenessReport = { created: [], existing: [], dirty: [], invalid: [], errors: [] };
   for (const def of UNIQUENESS_INDEXES) {
@@ -145,6 +178,13 @@ export async function ensureEvolutionUniqueness(
       logger.info(JSON.stringify({ level: "info", event: "evolution_uniqueness_index_created", index: def.name }));
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
+      const code = (e as { code?: string } | null)?.code;
+      if (code === "55P03" || code === "57014") {
+        // M-09: transação longa segurando a tabela — não espera sem teto. Segue; o Q5 do reconciliador acusa o índice ausente.
+        counters.lockTimeouts++;
+        logger.error(JSON.stringify({ level: "error", event: "evolution_uniqueness_lock_timeout", index: def.name, code,
+          msg: "lock_timeout/statement_timeout ao criar o índice: boot segue sem ele; reiniciar a api fora do pico para recriar." }));
+      }
       report.errors.push({ index: def.name, error });
       counters.errors++;
       logger.error(JSON.stringify({ level: "error", event: "evolution_uniqueness_error", index: def.name, error }));
