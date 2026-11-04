@@ -501,6 +501,24 @@ def _exported_symbols(code: str) -> set[str]:
     return syms
 
 
+_EVO_TEST_PATH_RX = re.compile(r"(?:\.(?:spec|test)\.[A-Za-z0-9]+$|(?:^|/)(?:tests?|__tests__)/|(?:^|/)test_[^/]*\.py$|_test\.(?:go|py)$)")
+_EVO_TEST_CASE_RX = re.compile(
+    r"^\s*(?:it|test)(?:\.(?:each|only|concurrent|skip))?\s*(?:\(|`|\[)"   # jest/vitest/mocha
+    r"|^\s*(?:async\s+)?def\s+test_\w+"                                       # pytest
+    r"|^\s*func\s+Test\w+",                                                    # go
+    re.M)
+
+
+def _is_test_path(rel_path: str) -> bool:
+    return bool(_EVO_TEST_PATH_RX.search(rel_path.replace("\\", "/")))
+
+
+def _count_test_cases(code: str) -> int:
+    """Nº de casos de teste declarados (it/test/def test_/func Test), sem executar nada — base da regra
+    "testes existentes não encolhem" (D-1/AQ)."""
+    return len(_EVO_TEST_CASE_RX.findall(code or ""))
+
+
 def _evolution_scope_check(pipeline_ctx, dev_artifacts: list, apps_root: Path) -> tuple[list, list[str]]:
     """Evoluir E4 — gate DETERMINÍSTICO pós-Dev (v1, whole-file):
     1) `path ⊆ evolution_scope ∪ tests/** ∪ docs/**` — fora do escopo é DESCARTADO (não gravado);
@@ -531,6 +549,14 @@ def _evolution_scope_check(pipeline_ctx, dev_artifacts: list, apps_root: Path) -
         if original.exists() and original.is_file() and original.suffix.lower() in _EVO_CODE_EXTS:
             try:
                 before_code = original.read_text(encoding="utf-8", errors="replace")
+                # D-1 (AQ): spec/teste existente NÃO pode perder casos. Os globs de teste são sempre
+                # permitidos (_EVO_ALWAYS_ALLOWED) e arquivos de teste não exportam símbolos — então nem o
+                # escopo nem a regra de símbolos viam um spec reduzido (PR #1 do TK-0001: −304/−96/−85/−26).
+                if _is_test_path(rel):
+                    _tb, _ta = _count_test_cases(before_code), _count_test_cases(str(art.get("content") or ""))
+                    if _ta < _tb:
+                        violations.append(f"TESTES REDUZIDOS em apps/{rel}: {_tb} → {_ta} caso(s) — testes existentes não podem ser removidos (entregue o arquivo completo preservando-os).")
+                        continue
                 # H5: re-export OPACO (export * / module.exports = require()) no original ou no novo → não dá para
                 # afirmar remoção; pular a checagem deste arquivo (falso-negativo aceitável, falso-positivo não).
                 if _exports_opaque(before_code) or _exports_opaque(str(art.get("content") or "")):
@@ -668,6 +694,26 @@ def _evo_regressions(baseline: dict | None, final: dict | None) -> list[str]:
         return sorted(str(i) for i in b_ids if i not in f_passed)
     bp, fp = int(baseline.get("passed") or 0), int(final.get("passed") or 0)
     return [f"contagem: {fp} passando agora < {bp} na baseline"] if fp < bp else []
+
+
+def _evo_p2p_unmeasured_reason(pipeline_ctx) -> str | None:
+    """D-4 (AQ) — o gate de NÃO-REGRESSÃO (P2P) ficou sem baseline numa EVOLUÇÃO com código?
+
+    Devolve o motivo legível (baseline com `status=error`, p.ex. `/run-tests` com Connection refused) ou
+    None quando há baseline medida, a versão anterior não tem suíte (`no_tests`: nada a comparar) ou o
+    P2P está desligado de propósito (`EVOLUTION_P2P_MODE=off`). Antes a ausência virava só um passo
+    "não-regressão desativada nesta run" e a task `TSK-FULL-TEST` seguia para `DONE`: degradação em
+    silêncio. Agora o chamador reprova ALTO, salvo `EVOLUTION_P2P_REQUIRED=0` (opt-out explícito)."""
+    if pipeline_ctx is None or os.environ.get("EVOLUTION_P2P_MODE", "final").lower() == "off":
+        return None
+    if os.environ.get("EVOLUTION_P2P_REQUIRED", "1").strip().lower() in ("0", "off", "false", "no"):
+        return None
+    bl = getattr(pipeline_ctx, "evolution_baseline", None)
+    if not isinstance(bl, dict) or bl.get("no_tests"):
+        return None
+    if bl.get("status") == "error":
+        return f"baseline da suíte NÃO medida ({str(bl.get('error') or 'erro desconhecido')[:160]})"
+    return None
 
 
 def _evo_path_is_infra(rel_path: str) -> bool:
@@ -3311,8 +3357,69 @@ def _validate_response_quality(agent: str, response: dict) -> tuple[bool, list[s
         return True, []
 
 
+FULL_TEST_NOT_RUN_STATUS = "CANCELLED"   # único status terminal "não executada" aceito pelo schema (project_tasks_status_check)
+
+
+def _declare_full_test_not_run(project_id: str | None, request_id: str, reason: str, host_cmd: str,
+                               proj_container_dir: "Path | None", task_state=None) -> str:
+    """D-3 (AQ) — `TSK-FULL-TEST` que NÃO executou nada não pode terminar `DONE`/aprovada.
+
+    Antes: só um passo "Execute manualmente…" e a task ficava `ASSIGNED`; o aceite do projeto
+    (`projects.ts`: `UPDATE … SET status='DONE' WHERE status NOT IN ('DONE','QA_PASS','CANCELLED')`)
+    então a promovia a `DONE` — o card era entregue com "TSK-FULL-TEST executada" sem execução nenhuma.
+    Agora: status `CANCELLED` (terminal, sobrevive ao fechamento do aceite e é excluído da lista de tasks
+    "executadas" do card, `cardDelivery.ts`), relatório `NOT_RUN` em disco e passo de aviso explícito.
+    Devolve o status gravado."""
+    _post_step(
+        "⚠️ TASK-FULL-TEST NÃO EXECUTADA (NOT_RUN): " + reason + " — a validação e2e NÃO ocorreu; "
+        "a task fica CANCELLED (não aprovada). Para executar manualmente:\n" + host_cmd,
+        request_id,
+    )
+    if proj_container_dir:
+        try:
+            rep = Path(proj_container_dir) / "docs" / "qa" / "QA_REPORT_TSK-FULL-TEST.md"
+            rep.parent.mkdir(parents=True, exist_ok=True)
+            rep.write_text(
+                "# TASK-FULL-TEST — NOT_RUN\n\n"
+                "**Veredito: NOT_RUN (não executada). NÃO é aprovação.**\n\n"
+                f"Motivo: {reason}\n\n"
+                f"Comando manual:\n\n```\n{host_cmd}\n```\n",
+                encoding="utf-8",
+            )
+        except Exception as _e:
+            logger.warning("[TASK-FULL-TEST] relatório NOT_RUN não gravado: %s", _e)
+    _update_task(project_id, "TSK-FULL-TEST", status=FULL_TEST_NOT_RUN_STATUS)
+    if task_state:
+        try:
+            task_state.set_status("TSK-FULL-TEST", FULL_TEST_NOT_RUN_STATUS)
+            task_state.save()
+        except Exception as _e:
+            logger.warning("[TASK-FULL-TEST] task_state não atualizado: %s", _e)
+    return FULL_TEST_NOT_RUN_STATUS
+
+
+_QA_NO_VERDICT_STATUSES = frozenset({"blocked", "fail", "needs_info", "error"})
+
+
+def _qa_produced_verdict(qa_response: dict) -> bool:
+    """D-2/D-13 (AQ) — o QA devolveu um VEREDITO utilizável? Resposta recusada/vazia, envelope que não passou
+    no validador (`validator_pass is False`) ou status de falha de transporte (BLOCKED/FAIL) NÃO é revisão
+    feita: não pode contar como `QA_FAIL` de mérito (aciona rework inútil do Dev) nem como "QA rodou"."""
+    if not isinstance(qa_response, dict):
+        return False
+    if qa_response.get("_refusal") or qa_response.get("_empty_response"):
+        return False
+    if qa_response.get("validator_pass") is False:
+        return False
+    return (qa_response.get("status") or "").strip().lower() not in _QA_NO_VERDICT_STATUSES
+
+
 def _is_qa_pass(qa_response: dict) -> bool:
-    """Considera QA como aprovado se status ou summary indicarem sucesso (evita QA_FAIL infinito por variação do LLM)."""
+    """Considera QA como aprovado se status ou summary indicarem sucesso (evita QA_FAIL infinito por variação do LLM).
+    Sem veredito válido (`_qa_produced_verdict` falso) NUNCA aprova — a busca de "ok" no summary casava
+    "token", "book" etc. e podia aprovar um envelope BLOCKED."""
+    if not _qa_produced_verdict(qa_response):
+        return False
     status = (qa_response.get("status") or "").strip().lower()
     summary = (qa_response.get("summary") or "").lower()
     if any(k in status for k in ("pass", "qa_pass", "ok", "aprovado", "success", "done")):
@@ -4461,6 +4568,10 @@ def _run_monitor_loop(
     # Reconstruir qa_fail_count do BD para sobreviver a restarts do runner.
     # Conta chamadas QA com status=QA_FAIL por task_id — representa reworks acumulados.
     qa_fail_count: dict[str, int] = {}
+    # D-2 (AQ): QA que NÃO produziu veredito válido (recusa/vazio/envelope inválido). Contador à parte de
+    # `qa_fail_count`: não é reprovação de mérito e não deve acionar rework do Dev.
+    qa_no_verdict_count: dict[str, int] = {}
+    max_qa_no_verdict = max(1, int(os.environ.get("MAX_QA_NO_VERDICT", "2")))
     try:
         _qfc_base = os.environ.get("API_BASE_URL", "").strip()
         _qfc_token = os.environ.get("GENESIS_API_TOKEN", "").strip()
@@ -4730,6 +4841,33 @@ def _run_monitor_loop(
                     except Exception as _fp_err:
                         logger.warning("[T-08 fingerprint] falha ao rodar: %s", _fp_err)
 
+                    if not _qa_produced_verdict(qa_response):
+                        # D-2/D-13 (AQ): sem veredito ≠ reprovação ≠ "QA rodou". Nada de relatório de QA,
+                        # nada de rework do Dev; reaciona o QA e, esgotado, BLOQUEIA a task declarando
+                        # que a entrega NÃO foi validada (nunca `DONE`).
+                        with (_state_lock or _NullLock()):
+                            _nv = qa_no_verdict_count.get(tid, 0) + 1
+                            qa_no_verdict_count[tid] = _nv
+                        _why_nv = (qa_response.get("summary") or "sem detalhe")[:200]
+                        if _nv >= max_qa_no_verdict:
+                            _update_task(project_id, tid, status="BLOCKED")
+                            if _task_state:
+                                _task_state.mark_qa_fail(tid)
+                                _task_state.save()
+                            with (_state_lock or _NullLock()):
+                                tasks_done_after_qa_fail.add(tid)
+                            _post_step(
+                                f"⛔ QA NÃO VALIDOU a task {tid}: sem veredito válido após {_nv} tentativa(s) ({_why_nv}). "
+                                f"Task marcada BLOCKED — a entrega NÃO foi revisada.", request_id)
+                            _post_escalation_event(
+                                project_id, tid,
+                                f"QA não produziu veredito válido em {_nv} tentativa(s) — entrega NÃO validada, revisão humana obrigatória.",
+                                request_id)
+                        else:
+                            _post_step(
+                                f"⚠️ QA sem veredito válido na task {tid} ({_why_nv}) — tentativa {_nv}/{max_qa_no_verdict}; "
+                                f"não conta como revisão. Reacionando o QA.", request_id)
+                        return
                     _post_dialogue(
                         "dev", "qa", "qa.review",
                         _get_summary_human("qa.review", "qa", "monitor", _qa_summary[:200]),
@@ -5719,7 +5857,8 @@ Execute agora sem pedir confirmação.
                         _oracle_sig = _oracle_signal_from_final(_final, _p2p_regressions)
                         if _oracle_sig:
                             _skill_feedback_signal(project_id, None, _oracle_sig)
-                        _ft_final_status = "DONE" if (_approved and not _p2p_regressions and not _medida_falhou) else "QA_FAIL"
+                        _p2p_unmeasured = _evo_p2p_unmeasured_reason(pipeline_ctx)
+                        _ft_final_status = "DONE" if (_approved and not _p2p_regressions and not _medida_falhou and not _p2p_unmeasured) else "QA_FAIL"
                         logger.info("[TASK-FULL-TEST] veredicto=%s (aprovado=%s por %s; regressões=%d; falha medida=%s)",
                                     _ft_final_status, _approved, _approved_why, len(_p2p_regressions), _medida_falhou)
                         _update_task(project_id, "TSK-FULL-TEST", status=_ft_final_status)
@@ -5733,6 +5872,8 @@ Execute agora sem pedir confirmação.
                         _ft_motivos = []
                         if not _approved:
                             _ft_motivos.append(_approved_why)
+                        if _p2p_unmeasured:
+                            _ft_motivos.append("gate P2P sem medição: " + _p2p_unmeasured)
                         if _p2p_regressions:
                             _ft_motivos.append(f"{len(_p2p_regressions)} regressão(ões) medida(s)")
                         if _medida_falhou:
@@ -5746,11 +5887,12 @@ Execute agora sem pedir confirmação.
                     else:
                         # Claude Code não disponível — instruir execução manual
                         _host_cmd = f"claude --print --dangerously-skip-permissions --cwd '{_proj_host_dir}/apps' \"Execute as instruções em: {Path(_host_root or '') / (project_id or '') / 'project' / 'full-test-prompt.md'}\""
-                        _post_step(
-                            f"🔍 TASK-FULL-TEST: Execute manualmente o Claude Code Agent para validação e2e:\n{_host_cmd}",
-                            request_id,
+                        _declare_full_test_not_run(
+                            project_id, request_id,
+                            "full-test-server indisponível ou sem resultado (FULL_TEST_SERVER_URL="
+                            f"{os.environ.get('FULL_TEST_SERVER_URL', '?')})",
+                            _host_cmd, _proj_container_dir, _task_state,
                         )
-                        _update_task(project_id, "TSK-FULL-TEST", status="ASSIGNED")
 
                     # Mover o stepper do portal para "Pronto" — postar agent_working do devops
                     # para que o portal não fique preso em "Dev/QA" (último agent_working foi do QA da FULL-TEST)
@@ -6316,6 +6458,11 @@ def main() -> int:
             try:
                 # Baseline é síncrona antes do CTO → teto PRÓPRIO menor (adversarial D); o final usa EVOLUTION_P2P_TIMEOUT.
                 _bl = _evo_run_tests(project_id, Path(_files_root_evo) / project_id, timeout=int(os.environ.get("EVOLUTION_P2P_BASELINE_TIMEOUT", "300")))
+                if _bl is None:
+                    # Executor indisponível: antes não gravava NADA (nem passo, nem estado). Agora é um erro de
+                    # baseline declarado — o gate P2P é reprovado ALTO adiante (`_evo_p2p_unmeasured_reason`).
+                    _bl = {"status": "error", "error": "executor /run-tests indisponível (sem resposta)",
+                           "no_tests": False, "passed": 0, "failed": 0, "tests": []}
                 if _bl is not None:
                     pipeline_ctx.evolution_baseline = {**_bl, "kind": "baseline"}
                     if _bl.get("tests_reliable") is False:
@@ -6323,7 +6470,16 @@ def main() -> int:
                     if _bl.get("no_tests"):
                         _post_step("Evolução: a versão anterior não tem suíte de testes executável — sem baseline de não-regressão.", request_id)
                     elif _bl.get("status") == "error":
-                        _post_step(f"Evolução: baseline da suíte não pôde ser medida ({str(_bl.get('error') or '')[:120]}) — não-regressão desativada nesta run.", request_id)
+                        _post_step(
+                            f"🔴 Evolução: baseline da suíte NÃO MEDIDA ({str(_bl.get('error') or '')[:120]}) — o gate de "
+                            "não-regressão (P2P) NÃO pode ser verificado nesta run e o TSK-FULL-TEST será REPROVADO "
+                            "(EVOLUTION_P2P_REQUIRED=0 desliga a exigência). Verifique o executor (FULL_TEST_SERVER_URL).",
+                            request_id)
+                        try:
+                            _post_escalation_event(project_id, "P2P-BASELINE",
+                                                  "baseline de não-regressão não medida — executor de testes inacessível", request_id)
+                        except Exception:
+                            pass
                     else:
                         _post_step(f"Evolução: baseline da suíte legada — {_bl.get('passed', 0)} passando, {_bl.get('failed', 0)} falhando ({_bl.get('stack', '?')}).", request_id)
                     pipeline_ctx.save_checkpoint(STATE_DIR)
