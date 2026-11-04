@@ -7,25 +7,23 @@
  *             repetição idempotente, `reopenTicketsOfChild` só reabre `promoted` e cada transição grava
  *             uma linha em `ticket_events` (ator, de→para, motivo; migration 144).
  *
- * Resolução da flag (a mais específica vence), no mesmo molde de `evolveFlags.ts`:
- *   1. env `TICKET_TRANSITIONS` = on|off (também 1|0, true|false);
- *   2. `genesis_runtime_config.TICKET_TRANSITIONS` (0|1) lido por `readRuntimeNumber` — override do TENANT vence o global;
- *   3. ausente / inválido / erro de banco ⇒ `off`.
+ * Resolução da flag (M-03; featureFlags.ts): tenant explícito > padrão global em `genesis_runtime_config` > env
+ * `TICKET_TRANSITIONS` como DEFAULT de plataforma (nunca sobrepõe o tenant) > `off`.
  *
  * Escopo desta fase: só `tickets.status` (open|promoted|delivered|rejected). `card_state` (Fase 2) NÃO existe ainda.
  */
-import { readRuntimeNumber, type RuntimeConfigDb } from "./runtimeTunables.js";
+import type { RuntimeConfigDb } from "./runtimeTunables.js";
+import { flagEnabled, parseEnvFlag, tenantOfProject } from "./featureFlags.js";
 
 export const TICKET_TRANSITIONS_KEY = "TICKET_TRANSITIONS";
 
 export type TicketStatus = "open" | "promoted" | "delivered" | "rejected";
 export type TicketActorKind = "user" | "system";
 
-export function ticketTransitionsEnvOverride(): boolean | null {
-  const raw = (process.env.TICKET_TRANSITIONS ?? "").trim().toLowerCase();
-  if (["on", "1", "true"].includes(raw)) return true;
-  if (["off", "0", "false"].includes(raw)) return false;
-  return null;
+/** Default de PLATAFORMA vindo do ambiente (`null` = ausente). Não sobrepõe o tenant. */
+export function ticketTransitionsEnvDefault(): boolean | null {
+  const n = parseEnvFlag(process.env.TICKET_TRANSITIONS, "bool");
+  return n === null ? null : n === 1;
 }
 
 /** A flag está ligada? `tenantId` do recurso (ticket) primeiro; `projectId` resolve o tenant de um projeto. */
@@ -33,20 +31,10 @@ export async function ticketTransitionsEnabled(
   db: RuntimeConfigDb,
   opts: { tenantId?: string | null; projectId?: string | null; userTenantId?: string | null } = {},
 ): Promise<boolean> {
-  const env = ticketTransitionsEnvOverride();
-  if (env !== null) return env;
   let tenantId: string | null = opts.tenantId ?? null;
-  if (!tenantId && opts.projectId) {
-    try {
-      const r = await db.query("SELECT tenant_id FROM projects WHERE id = $1", [opts.projectId]);
-      const t = r.rows[0]?.tenant_id;
-      tenantId = t ? String(t) : null;
-    } catch {
-      tenantId = null;
-    }
-  }
+  if (!tenantId) tenantId = await tenantOfProject(db, opts.projectId);
   tenantId = tenantId ?? opts.userTenantId ?? null;
-  return (await readRuntimeNumber(db, TICKET_TRANSITIONS_KEY, tenantId, { min: 0, max: 1 })) === 1;
+  return flagEnabled(db, "TICKET_TRANSITIONS", tenantId);
 }
 
 /**

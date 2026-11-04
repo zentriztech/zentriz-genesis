@@ -8,7 +8,8 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { hashId } from "../services/anomalyDetectors.js";
-import { listFindings, reconcilerMode } from "../services/evolveReconciler.js";
+import { listFindings } from "../services/evolveReconciler.js";
+import { resolveReconcilerMode } from "../services/featureFlags.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -21,6 +22,9 @@ export async function evolveReconcilerRoutes(app: FastifyInstance): Promise<void
     async (request, reply) => {
       const u = getUser(request);
       if (!(u?.role === "zentriz_admin" && !u?.svc)) return reply.status(403).send({ code: "FORBIDDEN" });
+      // M-19: com o reconciliador `off` a rota nova não existe (a autorização acima segue valendo e vem primeiro).
+      const mode = await resolveReconcilerMode(pool);
+      if (mode === "off") return reply.status(404).send({ code: "NOT_FOUND", message: "Reconciliador desligado" });
       const q = request.query ?? {};
       const findings = await listFindings(pool, {
         kind: q.kind || undefined,
@@ -29,7 +33,7 @@ export async function evolveReconcilerRoutes(app: FastifyInstance): Promise<void
         open: q.open === "true" ? true : q.open === "false" ? false : undefined,
         limit: Number(q.limit) || 100,
       });
-      return reply.send({ mode: reconcilerMode(), findings });
+      return reply.send({ mode, findings });
     },
   );
 }

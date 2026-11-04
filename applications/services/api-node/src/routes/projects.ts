@@ -1,4 +1,4 @@
-import { attachmentsStrict, classifyAttachment } from "../services/ticketAttachments.js";
+import { attachmentsStrictEnabled, classifyAttachment } from "../services/ticketAttachments.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readFile, writeFile, readdir, stat } from "fs/promises";
 import path from "path";
@@ -3252,7 +3252,7 @@ export async function projectRoutes(app: FastifyInstance) {
         // Tarefa 1.5 (ATTACHMENTS_STRICT=on): anexos de card não-texto (pdf/doc/docx/png/…) NÃO são arquivos de spec.
         // Linhas legadas em `tickets/TK-*/anexos` com extensão fora de txt/md saem desta lista; os anexos do card
         // têm listagem própria (GET /api/projects/:id/ticket-attachments).
-        if (attachmentsStrict()) {
+        if (await attachmentsStrictEnabled(client, (row as { tenant_id?: string | null }).tenant_id ?? null)) {
           return reply.send((rows as Array<{ filename: string; relDir: string | null }>).filter((r) =>
             !/^tickets\/[^/]+\/anexos$/.test(r.relDir ?? "") || classifyAttachment(r.filename) === "spec_text"));
         }

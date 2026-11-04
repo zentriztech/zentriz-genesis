@@ -3,7 +3,7 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  attachmentsStrict, classifyAttachment, contentMismatch, validateAttachments, loadAttachmentLimits,
+  attachmentsStrictEnvDefault, classifyAttachment, contentMismatch, validateAttachments, loadAttachmentLimits,
   ATTACHMENT_LIMIT_DEFAULTS, type AttachmentLimits,
 } from "./ticketAttachments.js";
 import {
@@ -18,11 +18,11 @@ const XLSX = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from("
 const L: AttachmentLimits = { maxFiles: 3, maxTotalBytes: 1000, maxFileBytes: 600 };
 
 describe("ATTACHMENTS_STRICT", () => {
-  it("padrão off; só 'on' liga", () => {
-    expect(attachmentsStrict({} as NodeJS.ProcessEnv)).toBe(false);
-    expect(attachmentsStrict({ ATTACHMENTS_STRICT: "off" } as NodeJS.ProcessEnv)).toBe(false);
-    expect(attachmentsStrict({ ATTACHMENTS_STRICT: "talvez" } as NodeJS.ProcessEnv)).toBe(false);
-    expect(attachmentsStrict({ ATTACHMENTS_STRICT: " ON " } as NodeJS.ProcessEnv)).toBe(true);
+  it("default de plataforma do env: padrão off; 'on'/'1'/'true' ligam (a decisão por tenant está em featureFlags)", () => {
+    expect(attachmentsStrictEnvDefault({} as NodeJS.ProcessEnv)).toBe(false);
+    expect(attachmentsStrictEnvDefault({ ATTACHMENTS_STRICT: "off" } as NodeJS.ProcessEnv)).toBe(false);
+    expect(attachmentsStrictEnvDefault({ ATTACHMENTS_STRICT: "talvez" } as NodeJS.ProcessEnv)).toBe(false);
+    expect(attachmentsStrictEnvDefault({ ATTACHMENTS_STRICT: " ON " } as NodeJS.ProcessEnv)).toBe(true);
   });
 });
 

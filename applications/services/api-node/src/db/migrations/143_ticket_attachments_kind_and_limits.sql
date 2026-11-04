@@ -1,4 +1,4 @@
--- 141 — Tarefa 1.5 (EVOLUIR-PROJETO-BANCADA, Fase 1'): anexos do card tipados + limites parametrizados.
+-- 143 — Tarefa 1.5 (EVOLUIR-PROJETO-BANCADA, Fase 1'): anexos do card tipados + limites parametrizados.
 -- Aditiva e idempotente. Comportamento so muda com ATTACHMENTS_STRICT=on (padrao off).
 --
 --   * kind: 'legacy' (linha anterior a esta migration ou criada com a flag off), 'spec_text' (txt/md que segue

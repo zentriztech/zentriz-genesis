@@ -14,13 +14,16 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { resolveScopedTenantId } from "../lib/tenantScope.js";
+import { FLAG_DEFS, FLAG_NAMES, isRolloutFlagKey } from "../services/featureFlags.js";
+import { MULTIPART_MAX_FILES, MULTIPART_MAX_FILE_BYTES, MULTIPART_MAX_TOTAL_BYTES } from "../services/ticketAttachments.js";
 
 function getUser(r: FastifyRequest): AuthUser {
   return (r as unknown as { user: AuthUser }).user;
 }
 
 // Chaves permitidas e seus metadados de exibição
-const CONFIG_KEYS: Record<string, { label: string; group: string; unit: string; min: number; max: number }> = {
+// `adminOnly`: só zentriz_admin grava/remove (flags de rollout — M-03/R2). tenant_admin enxerga, mas não altera.
+const CONFIG_KEYS: Record<string, { label: string; group: string; unit: string; min: number; max: number; adminOnly?: boolean }> = {
   AGENT_TIMEOUT_ENGINEER: { label: "Timeout Engineer",  group: "timeouts", unit: "s", min: 60,  max: 3600 },
   AGENT_TIMEOUT_CTO:      { label: "Timeout CTO",       group: "timeouts", unit: "s", min: 60,  max: 3600 },
   AGENT_TIMEOUT_PM:       { label: "Timeout PM",        group: "timeouts", unit: "s", min: 60,  max: 3600 },
@@ -43,9 +46,15 @@ const CONFIG_KEYS: Record<string, { label: string; group: string; unit: string; 
   // Faixa = SPEC_CHAT_MAX_TOKENS_BOUNDS (piso histórico da fórmula, teto seguro do SDK).
   SPEC_CHAT_MAX_TOKENS:   { label: "Max tokens Chat da Bancada (arquivo)", group: "tokens", unit: "tk", min: 8000, max: 32000 },
   // Tarefa 1.5 (anexos do card): tetos por card, valendo só com ATTACHMENTS_STRICT=on. calibrado=falso.
-  ATTACHMENT_MAX_FILES:       { label: "Anexos: máx. arquivos por card", group: "limits", unit: "", min: 1, max: 50 },
-  ATTACHMENT_MAX_TOTAL_BYTES: { label: "Anexos: máx. bytes somados por card", group: "limits", unit: "B", min: 1024, max: 209715200 },
-  ATTACHMENT_MAX_FILE_BYTES:  { label: "Anexos: máx. bytes por arquivo", group: "limits", unit: "B", min: 1024, max: 52428800 },
+  // M-17: as faixas param no teto do multipart de app.ts (acima disso o upload é cortado antes da validação).
+  ATTACHMENT_MAX_FILES:       { label: "Anexos: máx. arquivos por card", group: "limits", unit: "", min: 1, max: MULTIPART_MAX_FILES },
+  ATTACHMENT_MAX_TOTAL_BYTES: { label: "Anexos: máx. bytes somados por card", group: "limits", unit: "B", min: 1024, max: MULTIPART_MAX_TOTAL_BYTES },
+  ATTACHMENT_MAX_FILE_BYTES:  { label: "Anexos: máx. bytes por arquivo", group: "limits", unit: "B", min: 1024, max: MULTIPART_MAX_FILE_BYTES },
+  // M-03 — flags de rollout da Fase 1' (services/featureFlags.ts). Precedência: tenant explícito > global > env (default) > off.
+  // adminOnly: ligar/desligar rollout é decisão da plataforma, nunca do tenant_admin.
+  ...Object.fromEntries(FLAG_NAMES.map((k) => [k, {
+    label: FLAG_DEFS[k].label, group: "flags", unit: "", min: 0, max: FLAG_DEFS[k].kind === "tri" ? 2 : 1, adminOnly: true,
+  }])),
 };
 
 export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
@@ -118,6 +127,7 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
         unit:        meta.unit,
         min:         meta.min,
         max:         meta.max,
+        adminOnly:   !!meta.adminOnly,
         globalValue: data.global ?? null,
         tenantValue: data.override ?? null,
         effectiveValue: data.override ?? data.global ?? null,
@@ -149,6 +159,9 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const meta = CONFIG_KEYS[key];
+      if (meta.adminOnly && user.role !== "zentriz_admin") {
+        return reply.status(403).send({ code: "ADMIN_ONLY_KEY", message: `A chave '${key}' só pode ser alterada pelo administrador da plataforma` });
+      }
       const numVal = Number(value);
       if (isNaN(numVal) || numVal < meta.min || numVal > meta.max) {
         return reply.status(400).send({
@@ -196,6 +209,11 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
 
       if (user.role !== "zentriz_admin" && user.role !== "tenant_admin") {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+      }
+
+      // M-03/R2: flags de rollout só o zentriz_admin remove (remover o override do tenant também muda a flag efetiva).
+      if (isRolloutFlagKey(key) && user.role !== "zentriz_admin") {
+        return reply.status(403).send({ code: "ADMIN_ONLY_KEY", message: `A chave '${key}' só pode ser alterada pelo administrador da plataforma` });
       }
 
       // zentriz_admin → ?tenantId= se UUID-válido (senão null = global);
