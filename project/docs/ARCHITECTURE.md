@@ -22,6 +22,12 @@ Referência completa: [ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITI
 ## Visão geral de componentes
 - Componentes técnicos por squad (Backend, Web, Mobile). Infra (IaC, CI/CD) é responsabilidade do DevOps em cada squad.
 
+## Evolução de produto por cards (Bancada)
+- **O que é:** o caminho de "Evoluir projeto" por **cards** (Evolução, Correção, Recurso novo) sobre um produto já fabricado e aceito. Um card é um **ticket com `card_state`** (`draft → refining → ready → promoted → in_factory → delivered`, mais `blocked` e `rejected`); a execução é um **projeto filho** criado só na promoção. Desenho: [RFC-0009](rfc/RFC-0009-EVOLUCAO-POR-TICKET.md); plano: [EVOLUIR-PROJETO-BANCADA-plano.md](plans/EVOLUIR-PROJETO-BANCADA-plano.md).
+- **Componentes (api-node):** máquina de estados e auditoria (`services/cardState.ts`, tabela `ticket_card_events`); rascunho, validação e revalidação (`cardService.ts`); promoção (`cardPromote.ts` sobre o claim em duas etapas de `evolveClaim.ts`); entrega por aceite + PR mergeado (`cardDelivery.ts`); reconciliador periódico que detecta e notifica (`evolveReconciler.ts`, flag `EVOLVE_RECONCILER`); rotas `/api/cards/*` e `/api/products/:id/cards*` (`routes/cards.ts`). Portal: `components/cards/*`. Runner: leitura de `ticket_kind`/`spec_origin` e `card_id` nas tasks.
+- **Regras de arquitetura preservadas:** migrações *expand* (aditivas); flag `CARDS_BANCADA` **por tenant**; claim transacional curto + passos idempotentes fora da transação; Guard de custo soberano (negativa ⇒ `blocked`, nunca `failed`); PR-first e aprovação humana; LLM só por slot do tenant.
+- **Operação e uso:** [runbook](runbooks/CARDS-BANCADA-RUNBOOK.md) e [guia do usuário](guides/GUIA-CARDS-BANCADA.md).
+
 ## Backend/API
 - Linguagem/framework
 - Persistência

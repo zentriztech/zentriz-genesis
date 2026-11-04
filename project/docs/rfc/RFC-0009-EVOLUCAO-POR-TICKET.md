@@ -4,7 +4,7 @@
 
 ## Status
 
-Aceito/Implementado (decisão do Jean em 2026-11-04; implementado na migration 128 e nas rotas de tickets). Evolução prevista: cards na Bancada — ver `project/docs/plans/EVOLUIR-PROJETO-BANCADA-plano.md`.
+Aceito/Implementado (decisão do Jean em 2026-11-04; implementado na migration 128 e nas rotas de tickets). Evolução prevista: cards na Bancada — ver `project/docs/plans/EVOLUIR-PROJETO-BANCADA-plano.md`. **Atualização 2026-11-04 (tarefa 6.4):** a evolução por cards está implementada na `dev` (migrations 141–161, sem deploy nem rollout em produção registrados nesta atualização) e descrita na seção [Evolução: cards da Bancada](#evolução-cards-da-bancada); operação em [CARDS-BANCADA-RUNBOOK](../runbooks/CARDS-BANCADA-RUNBOOK.md), uso em [GUIA-CARDS-BANCADA](../guides/GUIA-CARDS-BANCADA.md).
 
 ## Data
 
@@ -350,8 +350,35 @@ em voo) antes de recriar api/agents.
 
 **Passo 8 — memória e e-mail.** Persistir o aprendido (LEI 0) e reportar.
 
+## Evolução: cards da Bancada
+
+> Acrescentada em 2026-11-04 (tarefa 6.4 do plano EVOLUIR-PROJETO-BANCADA). O texto acima é o desenho original (F1–F3) e permanece válido; esta seção registra o que foi construído sobre ele, sem alterar o que foi decidido antes. Fatos conferidos no código de `evo/f6`; caminhos relativos a `applications/services/api-node/src/`.
+
+**Princípio mantido: o Ticket continua sendo a entidade.** Um **card é um ticket com `card_state` não nulo** (`services/cardState.ts:1-3`); `card_state NULL` é ticket legado, fora da nova máquina. Não há tabela paralela nem segunda porta de promoção de ticket legado: o `/evolve` com `ticketId` de um card responde `409 USE_CARD_PROMOTE` e, com a flag do tenant ligada, o `/evolve` sem ticket (ou com ticket legado ainda não promovido) responde `409 USE_CARDS` (`routes/projects.ts:3551` e seguintes). A promoção do card tem rota própria (`POST /api/cards/:id/promote`), que reutiliza o **mesmo claim em duas etapas** do `/evolve` (`services/evolveClaim.ts`, parâmetro `card`).
+
+**O que muda em relação às premissas do RFC:**
+
+| Tema | Desenho original (F1–F3) | Cards da Bancada |
+|---|---|---|
+| Estado do pedido | `tickets.status`: `open/promoted/delivered/rejected` ("o `status` nunca é o da execução") | `tickets.card_state` com 8 estados (`draft, refining, ready, promoted, in_factory, delivered, blocked, rejected`). O `status` legado passa a ser **derivado** do `card_state` e escrito no mesmo `UPDATE`, então os leitores antigos seguem corretos (`cardState.ts:57-73`). A execução é acompanhada pela máquina (`syncCardWithChild`, `deliverCardsOfChild`) |
+| Quando nasce o filho | Na promoção (`/evolve`) | Idem, mas o card nasce com um **rascunho** (`projects.status='card_draft'`, sem versão nem clone); versão `vN`, cópia da árvore, clone e branch só na promoção, contra o HEAD corrente (decisão D-E1, "A'") |
+| Tipo | `change_kind` declarado (`evolution/fix/feature`) | Mantido; agora com **ritos por tipo** além do gate de RFC invariante: Correção exige `FAIL_TO_PASS` de reprodução e compatibilidade ≤ patch; Recurso novo exige `Non-goals` (D-E3) |
+| Anexos | Allowlist e limites do multipart | **pdf, txt, md, doc, docx** (D-E4): `txt/md` dentro da spec; `pdf/doc/docx` guardados no card e convertidos automaticamente para `.md` com a origem registrada; exige `ATTACHMENTS_STRICT` (e `ATTACHMENT_CONVERSION` para a conversão) |
+| Fila | Pedido sobrevive à execução presa | Mantido (o pedido continua válido se o filho morre); `EVOLUTION_IN_FLIGHT` continua valendo por linhagem |
+| Tasks e specs | Carimbo no git (`TK-NNNN`) | Além do carimbo: `project_tasks.card_id` em toda task não herdada, `project_spec_files.spec_origin` (`initial` ou `card:TK-NNNN`) e `executed_in_project`/`executed_at` marcados na **entrega** (migrations 149–150). O regex de ID de task do runner **não** foi tocado |
+| Entrega | (não definida) | `delivered` = filho aceito **e** PR mergeado quando a linhagem tem repositório; sem prova, o card fica `in_factory` (nunca entrega falso). Detalhes em `services/cardDelivery.ts` |
+| Orçamento | (não definido) | O card compartilha o orçamento do **dono da versão** (D-E10). Negativa do Guard ⇒ card `blocked` por orçamento (`budget:*`), nunca `failed`. Teto do Advisor aplicado pelo Guard a partir de `cost_policies` (C3'/C4') |
+| Flag | (não havia) | `CARDS_BANCADA` **por tenant** em `genesis_runtime_config`, `configOnly` (o ambiente é ignorado); ligar roda o backfill de `card_state` e `spec_origin` na mesma transação, com reversão se houver divergência |
+
+**Compatibilidade e rollback.** Migrações 148–150 são *expand* (aditivas, idempotentes; `tickets.status` intacto). Com a flag desligada para o tenant, o fluxo anterior segue idêntico (suíte de regressão `cardsOff`). Desligar a flag não desfaz dados: cards existentes permanecem e as transições dos que já estão na máquina continuam valendo; as rotas de card respondem 404 e cards ainda não promovidos ficam em limbo até a flag voltar (detalhes e cautelas no runbook, §6).
+
+**Ligação com o plano.** Tarefas do plano que materializam esta seção: 1.1 (claim), 1.8 (reconciliador), 2.1–2.6 (modelo de dados, máquina, flag, API), 3.1–3.6 (UI, spec do card, promoção), 4.1–4.4 (runner, tasks do card, marcação de executado, PR por card), C3'/C4' (política de custo). Decisões D-E1..D-E10 e assunções do orquestrador: runbook, §12. Fora do escopo atual por decisão do Jean: Deadpool/Auto Care → card (D-E6, tarefa 5.3 cancelada) e produto externo (D-E5, tarefa 5.4 adiada). Ficam como no RFC original: F4 (normalizador) e F5 (completude assistida).
+
+**Operação e uso.** Sintomas, causas, ações seguras, ordem de deploy (API antes de `agents`), pré-condições para ligar em tenant real e consultas de diagnóstico: [CARDS-BANCADA-RUNBOOK](../runbooks/CARDS-BANCADA-RUNBOOK.md). Guia do usuário: [GUIA-CARDS-BANCADA](../guides/GUIA-CARDS-BANCADA.md).
+
 ## Referências
 
+- [Plano EVOLUIR-PROJETO-BANCADA](../plans/EVOLUIR-PROJETO-BANCADA-plano.md) · [Runbook dos cards](../runbooks/CARDS-BANCADA-RUNBOOK.md) · [Guia do usuário dos cards](../guides/GUIA-CARDS-BANCADA.md)
 - [Estudo — Evolução por Ticket](../analysis/ESTUDO-EVOLUCAO-POR-TICKET-2026-09-11.md) (fontes e medições)
 - [RFC-0008 — ADR/RFC: donos e hierarquia de produto](RFC-0008-ADR-RFC-DONOS-E-HIERARQUIA-DE-PRODUTO.md)
 - [RFC-0008 emenda 01 — Normalizar antes de promover](RFC-0008-EMENDA-01-NORMALIZAR-ANTES-DE-PROMOVER.md)
