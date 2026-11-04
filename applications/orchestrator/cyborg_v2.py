@@ -32,6 +32,10 @@ CONFIGURAÇÃO
 from __future__ import annotations
 
 import json
+try:  # N-1: sem node_modules/dist no contexto (import resiliente aos dois modos de carga)
+    from orchestrator.context_files import rglob_filtered as _ctx_rglob
+except ImportError:  # pragma: no cover
+    from context_files import rglob_filtered as _ctx_rglob
 import logging
 import os
 import subprocess
@@ -266,7 +270,7 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
     def _read_glob(pattern: str, max_files: int = 15, max_chars: int = 30000) -> str:
         if not src_root.exists():
             return ""
-        files = sorted(src_root.rglob(pattern))[:max_files]
+        files = sorted(_ctx_rglob(src_root, pattern))[:max_files]
         parts = []
         total = 0
         for f in files:
@@ -287,7 +291,7 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
                                     or _read(proj_dir / "docs" / "pm_backlog.md"),
         "apps_tree":               "\n".join(sorted(
             str(p.relative_to(proj_dir))
-            for p in src_root.rglob("*.tsx")
+            for p in _ctx_rglob(src_root, "*.tsx")
         ))[:8000] if src_root.exists() else "",
         # Fase estruturais (o essencial)
         "root_page":               _read(proj_dir / "apps" / "src" / "app" / "page.tsx"),

@@ -31,6 +31,10 @@ from __future__ import annotations
 
 import contextvars
 import json
+try:  # N-1: sem node_modules/dist no contexto (import resiliente aos dois modos de carga)
+    from orchestrator.context_files import rglob_filtered as _ctx_rglob
+except ImportError:  # pragma: no cover
+    from context_files import rglob_filtered as _ctx_rglob
 import logging
 import os
 import time
@@ -391,7 +395,7 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
     def _read_glob(pattern: str, max_files: int = 10, max_chars: int = 20000) -> str:
         if not src_root.exists():
             return ""
-        files = sorted(src_root.rglob(pattern))[:max_files]
+        files = sorted(_ctx_rglob(src_root, pattern))[:max_files]
         parts = []
         total = 0
         for f in files:
@@ -411,7 +415,7 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
     _all_src: list = []
     if _src_exists:
         for _pat in ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs"):
-            _all_src.extend(src_root.rglob(_pat))
+            _all_src.extend(_ctx_rglob(src_root, _pat))
     # INCLUIR os arquivos de config na RAIZ de apps/ (package.json, tsconfig, tsup.config,
     # Dockerfile, vitest.config) — antes o apps_tree só listava apps/src/** e o Cyborg
     # concluía "sem package.json/tsconfig" (BLOCKER falso). (achado #11)
@@ -456,7 +460,7 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
             return ""
         found: list = []
         for pat in patterns:
-            found.extend(sorted(src_root.rglob(pat)))
+            found.extend(sorted(_ctx_rglob(src_root, pat)))
         seen, parts, total = set(), [], 0
         for f in found:
             if f in seen:
@@ -1065,7 +1069,7 @@ def _stitch_export_context(project_id: str, prod_id: str | None, ctx: dict) -> s
         _src = apps_root / "src"
         for _n, typ in sorted(pairs):
             try:
-                for f in _src.rglob("*.ts"):
+                for f in _ctx_rglob(_src, "*.ts"):
                     if _re.search(r"\b(?:class|interface|type|abstract class)\s+" + _re.escape(typ) + r"\b",
                                   f.read_text(encoding="utf-8", errors="replace")):
                         included.add(f); break

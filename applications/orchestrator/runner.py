@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from orchestrator.agents import llm_guard as _llm_guard
 from orchestrator.agents import llm_roles as _llm_roles
 from orchestrator import guard_denial as _guard_denial  # C1': negativa do Guard ≠ falha do pipeline
+from orchestrator import context_files as _context_files  # N-1: contexto de LLM sem node_modules/dist + teto
 
 # T01: sanitiza AWS_PROFILE="" (string vazia) — boto3 procura profile literal ""
 # e falha com ProfileNotFound. `unset` no compose vira "" via ${VAR:-}, então
@@ -2841,9 +2842,8 @@ def _call_autonomous_monitor(project_id: str, task: dict, request_id: str) -> di
     _file_tree = ""
     try:
         _tree_lines = []
-        for _p in sorted(_proj_root.rglob("*"))[:60]:
-            if _p.is_file() and "node_modules" not in str(_p) and ".next" not in str(_p):
-                _tree_lines.append(str(_p.relative_to(_proj_root.parent.parent)))
+        for _p in list(_context_files.iter_context_files(_proj_root))[:60]:
+            _tree_lines.append(str(_p.relative_to(_proj_root.parent.parent)))
         _file_tree = "\n".join(_tree_lines)
     except Exception:
         pass
@@ -5058,10 +5058,10 @@ def _run_monitor_loop(
                     try:
                         _apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
                         if _apps_root.exists():
-                            for _f in sorted(_apps_root.rglob("*")):
-                                if _f.is_file() and _f.stat().st_size < 50_000:
-                                    _rel = str(_f.relative_to(_apps_root.parent.parent))
-                                    _disk_artifacts.append({"path": _rel, "content": _f.read_text(encoding="utf-8", errors="replace")})
+                            # N-1: poda node_modules/dist/.next/lockfiles e aplica teto defensivo (falha ALTO).
+                            _disk_artifacts = _context_files.collect_context_artifacts(_apps_root, _apps_root.parent.parent)
+                    except _context_files.ContextTooLargeError:
+                        raise  # cai no `except Exception` do Dev: task BLOCKED + erro claro, sem chamada paga
                     except Exception:
                         pass
                     # No rework (QA_FAIL), usar artefatos capturados desta task — evita
@@ -5370,10 +5370,8 @@ def _run_monitor_loop(
                         try:
                             _apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
                             if _apps_root.exists():
-                                for _f in sorted(_apps_root.rglob("*")):
-                                    if _f.is_file() and _f.stat().st_size < 30_000 and not any(p in str(_f) for p in ("node_modules", ".next", ".git")):
-                                        _rel = str(_f.relative_to(_apps_root.parent))
-                                        _all_dev_artifacts.append({"path": _rel, "content": _f.read_text(encoding="utf-8", errors="replace")})
+                                _all_dev_artifacts = _context_files.collect_context_artifacts(
+                                    _apps_root, _apps_root.parent, max_file_bytes=30_000)
                         except Exception as _de:
                             logger.warning("[Monitor Loop] Erro ao coletar dev artifacts para DevOps: %s", _de)
                     _combined_artifacts = _all_dev_artifacts or last_dev_artifacts

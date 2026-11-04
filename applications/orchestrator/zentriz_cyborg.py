@@ -22,6 +22,10 @@ Diretivas absolutas:
 """
 
 import os
+try:  # N-1: sem node_modules/dist no contexto (import resiliente aos dois modos de carga)
+    from orchestrator.context_files import rglob_filtered as _ctx_rglob
+except ImportError:  # pragma: no cover
+    from context_files import rglob_filtered as _ctx_rglob
 import sys
 import time
 import json
@@ -430,7 +434,7 @@ def check_consumer_integration(consumer_project_id: str, backend_project_id: str
             search_dir = consumer_dir / "apps" / lib_dir
             if not search_dir.exists():
                 continue
-            for f in search_dir.rglob(f"*.{ext}"):
+            for f in _ctx_rglob(search_dir, f"*.{ext}"):
                 try:
                     text = f.read_text(encoding="utf-8", errors="replace")
                     # Capturar paths de API: '/api/...', "/api/..."
