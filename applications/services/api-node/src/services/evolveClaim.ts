@@ -275,10 +275,12 @@ type ClaimOutcome =
   | { kind: "existing"; child: ExistingChild }
   | { kind: "reject"; result: EvolveResult };
 
-interface InFlightRow { id: string; status: string; version_number: number }
+type InFlightRow = ExistingChild;
 async function liveChildOf(db: Pick<Pool | PoolClient, "query">, headId: string): Promise<InFlightRow | undefined> {
   return (await db.query(
-    `SELECT id, status, version_number FROM projects
+    `SELECT id, status, version_number, parent_project_id, title, product_id, extra,
+            COALESCE((extra->'materialization'->>'lease_until')::timestamptz > now(), false) AS lease_valid
+       FROM projects
       WHERE parent_project_id = $1 AND status NOT IN ('accepted', 'archived', 'failed')
       ORDER BY created_at DESC LIMIT 1`,
     [headId],
@@ -348,7 +350,15 @@ async function claim(pool: Pool, a: {
 
     // (d) um filho vivo por serviço
     const inFlight = await liveChildOf(client, head.id);
-    if (inFlight) { await client.query("ROLLBACK"); return { kind: "reject", result: inFlightResult(inFlight) }; }
+    if (inFlight) {
+      await client.query("ROLLBACK");
+      // Pedido idêntico (mesmo pai, texto e modo) cujo claim VENCEU (crash/falha): é a mesma intenção — retoma em vez de
+      // exigir DELETE. Vale também sem ticket e sem Idempotency-Key. Lease vigente ou pedido diferente ⇒ 409 histórico.
+      if (inFlight.status === "materializing" && !inFlight.lease_valid && inFlight.extra?.evolve_request_sha === a.reqSha) {
+        return { kind: "existing", child: inFlight };
+      }
+      return { kind: "reject", result: inFlightResult(inFlight) };
+    }
 
     // (e) versão contra o HEAD; título como no caminho histórico
     const nextVersion = head.version_number + 1;
@@ -374,7 +384,8 @@ async function claim(pool: Pool, a: {
       evolution_parent_id: head.id,
       evolution_root_id: a.rootId,
       evolution_branch: `evolution/v${nextVersion}`,
-      ...(a.key ? { evolve_idempotency_key: a.key, evolve_request_sha: a.reqSha } : {}),
+      evolve_request_sha: a.reqSha,
+      ...(a.key ? { evolve_idempotency_key: a.key } : {}),
       materialization: { claim_id: claimId, lease_owner: claimId, attempt: 1, head_project_id: head.id, steps: {} },
     };
 

@@ -13,7 +13,9 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import type pg from "pg";
 import type { FastifyInstance } from "fastify";
-import { rmSync } from "fs";
+import { rmSync, mkdirSync, writeFileSync, existsSync, mkdtempSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import {
   describePg, openPg, dbClientMock, authMock, seedAcceptedProduct, seedTicket, buildApp,
   raceN, queryGate, childrenOf, ticketRow, type Seed,
@@ -301,6 +303,41 @@ describePg("Fase 1' / 1.1+1.3 — /evolve com claim (EVOLVE_CLAIM=on), Postgres 
       expect(again.statusCode).toBe(200);
       expect(again.json().resumed).toBe(true);
       expect(await liveKids(s.parentId)).toHaveLength(1);
+    });
+  });
+
+  // ── passo `code` (cópia do apps/ da versão corrente, sem repositório GitHub) ──────────────
+  describe("passo code (fallback disk-copy) é reexecutável enquanto 'materializing'", () => {
+    it("crash depois do trabalho e ANTES do marcador: a retomada refaz a cópia do zero (descarta resíduo parcial) e registra disk-copy", async () => {
+      const root = mkdtempSync(join(tmpdir(), "genesis-files-root-"));
+      try {
+        const s = await seed();
+        vi.stubEnv("PROJECT_FILES_ROOT", root); // depois do seed (ele zera o env)
+        mkdirSync(join(root, s.parentId, "apps", "src"), { recursive: true });
+        writeFileSync(join(root, s.parentId, "apps", "src", "index.js"), "console.log('v1')\n");
+        let fired = false;
+        evolveTestHooks.fault = (p) => { if (p === "after_work:code" && !fired) { fired = true; throw new SimulatedCrash(p); } };
+        const crashed = await evolve(s.parentId, { request: "Adicionar exportação CSV" });
+        evolveTestHooks.fault = undefined;
+        expect(crashed.statusCode).toBe(500);
+        const child = (await childrenOf(pool, s.parentId))[0];
+        const childApps = join(root, child.id, "apps");
+        expect(existsSync(join(childApps, "src", "index.js"))).toBe(true);
+        writeFileSync(join(childApps, "residuo-parcial.tmp"), "lixo de uma cópia interrompida");
+        await expireLease(child.id);
+        const resumed = await evolve(s.parentId, { request: "Adicionar exportação CSV" });
+        const after = (await childrenOf(pool, s.parentId))[0];
+        ev("code-disk-copy", { resumed: resumed.statusCode, codigo: (after.extra.materialization as { steps: { code: { source: string } } }).steps.code.source, residuoRemovido: !existsSync(join(childApps, "residuo-parcial.tmp")) });
+        expect(resumed.statusCode).toBe(200);
+        expect(existsSync(join(childApps, "residuo-parcial.tmp"))).toBe(false);
+        expect(existsSync(join(childApps, "src", "index.js"))).toBe(true);
+        expect(after.extra.evolution_source).toBe("disk-copy");
+        expect(await childrenOf(pool, s.parentId)).toHaveLength(1);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv("EVOLVE_CLAIM", "on");
+        rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 
