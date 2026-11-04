@@ -4,6 +4,11 @@
   "description": "API Voucher — produto de exemplo Zentriz Genesis",
   "type": "module",
   "main": "dist/index.js",
+  "//dependencias-de-conversao": [
+    "pdfjs-dist fixado em ~5.5.207: FORA da faixa do GHSA-hq66-cqwq-w95j (>= 5.6.83, < 6.2.108; corrigido em 6.2.108). O ~ impede subir para 5.6.x; qualquer atualização futura só para >= 6.2.108.",
+    "word-extractor sem publicação desde 2022-06-29 (1.0.4 = latest): lê OLE2 não confiável em JS; o risco só é contido porque a conversão roda em processo filho com limite de memória (S-04).",
+    "@napi-rs/canvas é opcional (optionalDependencies do pdfjs-dist) e NÃO é carregado na conversão (attachmentConversionChild.ts o bloqueia e usa stubs); relatório T, S-15."
+  ],
   "scripts": {
     "prebuild": "command -v python3 >/dev/null 2>&1 && (python3 ../../../scripts/generate_policies_json.py --check || python3 ../../../scripts/generate_policies_json.py) || echo '[prebuild] python3 ausente (Docker) — usando src/generated/policies.json existente'",
     "build": "tsc && cp src/db/schema.sql dist/db/schema.sql",

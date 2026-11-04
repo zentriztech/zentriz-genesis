@@ -20,9 +20,10 @@ import { projectRoutes } from "../routes/projects.js";
 import { ticketRoutes } from "../routes/tickets.js";
 import { pipelineRoutes } from "../routes/pipeline.js";
 import { productRoutes } from "../routes/products.js";
-import { materializeTicketIntoSpecTree, loadTicket } from "./tickets.js";
+import { materializeTicketIntoSpecTree, loadTicket, runAttachmentConversions } from "./tickets.js";
+import { registerAttachmentConverter, resetAttachmentConverters } from "./attachmentConversion.js";
 import {
-  attachmentConversionEnabled, enqueueTicketConversions, runConversionTick, drainTicketConversions, BUILTIN_CONVERTER_ID,
+  attachmentConversionEnabled, enqueueTicketConversions, runConversionTick, drainTicketConversions, BUILTIN_CONVERTER_ID, inlineDrainLimitsFromEnv,
 } from "./attachmentConversionQueue.js";
 import { makeDocx, makePdf, makePdfNoText, makeDoc } from "../testing/attachmentFixtures.js";
 import { isRolloutFlagKey } from "./featureFlags.js";
@@ -49,7 +50,11 @@ describePg("Tarefa Q — conversão automática de anexos (Postgres real)", () =
     app = await buildApp([projectRoutes, ticketRoutes, pipelineRoutes, productRoutes]);
   });
   afterAll(async () => { await app?.close(); for (const s of seeds) s.cleanup(); await pool?.end(); });
-  afterEach(() => { delete process.env.ATTACHMENTS_STRICT; delete process.env.ATTACHMENT_CONVERSION; });
+  afterEach(() => {
+    delete process.env.ATTACHMENTS_STRICT; delete process.env.ATTACHMENT_CONVERSION;
+    delete process.env.ATTACHMENT_CONVERSION_INLINE_MAX; delete process.env.ATTACHMENT_CONVERSION_INLINE_BUDGET_MS;
+    resetAttachmentConverters();
+  });
 
   const on = () => { process.env.ATTACHMENTS_STRICT = "on"; process.env.ATTACHMENT_CONVERSION = "on"; };
   const seed = async () => { const s = await seedAcceptedProduct(pool); seeds.push(s); return s; };
@@ -265,5 +270,49 @@ describePg("Tarefa Q — conversão automática de anexos (Postgres real)", () =
     expect((await materialize(t.id, child)).ok).toBe(true);
     const names = (await specFiles(child)).map((f) => f.filename).sort();
     expect(names).toEqual(["contrato.docx.md", "request.md"]);
+  });
+
+  // ── S-10: a drenagem inline não pode segurar a requisição/claim por minutos ─────────────────────────────
+  const threeDocx = () => [1, 2, 3, 4].map((i) => ({ filename: `d${i}.docx`, content: makeDocx({ paragraphs: [`Doc ${i}`] }), mime: "x" }));
+  const statuses = async (ticketId: string) => (await convs(ticketId)).map((c) => c.status as string);
+
+  it("S-10: padrão = no máximo 2 conversões inline; o resto segue pending para o worker", async () => {
+    expect(inlineDrainLimitsFromEnv({} as NodeJS.ProcessEnv)).toEqual({ maxConversions: 2, budgetMs: 20_000 });
+    on();
+    const s = await seed();
+    const t = await seedTicket(pool, s, { attachments: threeDocx() });
+    await drainTicketConversions(pool, t.id);
+    const st = await statuses(t.id);
+    expect(st.filter((x) => x === "done")).toHaveLength(2);
+    expect(st.filter((x) => x === "pending")).toHaveLength(2);
+    // o worker (tick normal) termina o resto
+    await runConversionTick(pool, { ticketId: t.id, limit: 10 });
+    expect((await statuses(t.id)).every((x) => x === "done")).toBe(true);
+  });
+
+  it("S-10: orçamento de tempo — estourado o orçamento, nenhuma outra conversão é iniciada", async () => {
+    on();
+    process.env.ATTACHMENT_CONVERSION_INLINE_MAX = "20";
+    process.env.ATTACHMENT_CONVERSION_INLINE_BUDGET_MS = "100"; // uma conversão (processo filho) leva bem mais que isso
+    const s = await seed();
+    const t = await seedTicket(pool, s, { attachments: threeDocx() });
+    await drainTicketConversions(pool, t.id);
+    const st = await statuses(t.id);
+    expect(st.filter((x) => x === "done").length).toBeGreaterThanOrEqual(1);
+    expect(st.filter((x) => x === "pending").length).toBeGreaterThanOrEqual(1);
+  });
+
+  // ── S-14: o caminho antigo usa ON CONFLICT (sem corrida) ─────────────────────────────────────────────────
+  it("S-14: runAttachmentConversions concorrente com conversor registrado ⇒ 1 derivado, sem erro de índice único", async () => {
+    process.env.ATTACHMENTS_STRICT = "on";
+    registerAttachmentConverter({ id: "fake-s14", accepts: (e) => e === ".pdf", convert: async (i) => ({ filename: `${i.filename}.md`, markdown: "# fake\n" }) });
+    const s = await seed();
+    const t = await seedTicket(pool, s, { attachments: [{ filename: "x.pdf", content: makePdf(), mime: "application/pdf" }] });
+    const rs = await Promise.allSettled([1, 2, 3, 4, 5, 6].map(() => runAttachmentConversions(pool, t.id)));
+    expect(rs.every((r) => r.status === "fulfilled")).toBe(true);
+    expect((await atts(t.id)).filter((a) => a.derived_from_attachment_id)).toHaveLength(1);
+    const dup = await pool.query(`SELECT derived_from_attachment_id, filename, count(*) FROM ticket_attachments
+       WHERE derived_from_attachment_id IS NOT NULL GROUP BY 1,2 HAVING count(*) > 1`);
+    expect(dup.rows).toHaveLength(0);
   });
 });

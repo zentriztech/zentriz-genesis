@@ -180,7 +180,7 @@ export function renderTicketRequestMd(args: {
  * Ponto de extensão da conversão pdf/doc/docx → .md (tarefa posterior). Para cada anexo `card_only` consulta o
  * conversor registrado para a extensão; o conversor NULO (único hoje) devolve `null` e nada é criado. Se um conversor
  * real produzir markdown, grava a linha DERIVADA (`origin = converted:<id>`, `derived_from_attachment_id`,
- * `kind = spec_text`) — idempotente por (origem, nome) — e ela segue o caminho normal dos txt/md.
+ * `kind = spec_text`) — idempotente por (origem, nome) via `ON CONFLICT` no índice único parcial `uq_ticket_attachments_derived_name` (S-14: o antigo `WHERE NOT EXISTS` tinha corrida) — e ela segue o caminho normal dos txt/md.
  */
 export async function runAttachmentConversions(db: Db, ticketId: string): Promise<number> {
   const rows = await loadTicketAttachments(db, ticketId, { extended: true });
@@ -204,8 +204,8 @@ export async function runAttachmentConversions(db: Db, ticketId: string): Promis
     writeFileSync(dest, bytes);
     const r = await db.query(
       `INSERT INTO ticket_attachments (ticket_id, filename, file_path, mime_type, size_bytes, content_sha256, kind, origin, derived_from_attachment_id)
-       SELECT $1, $2, $3, 'text/markdown', $4, $5, 'spec_text', $6, $7
-        WHERE NOT EXISTS (SELECT 1 FROM ticket_attachments WHERE derived_from_attachment_id = $7 AND filename = $2)`,
+       VALUES ($1, $2, $3, 'text/markdown', $4, $5, 'spec_text', $6, $7)
+       ON CONFLICT (derived_from_attachment_id, filename) WHERE derived_from_attachment_id IS NOT NULL DO NOTHING`,
       [ticketId, out.filename, dest, bytes.length, sha256Hex(bytes), conversionOrigin(conv.id), a.id],
     );
     created += r.rowCount ?? 0;

@@ -126,4 +126,14 @@ describePg("Fase 2 — migrations expand 148/149/150 (Postgres real)", () => {
     expect(py).toContain(String.raw`r'^\s*(?:#{2,4}\s+|\|\s*|\-\s+|\*\s+)(?:\**)?(TSK-[A-Z]+-\d+|TSK-\d+)\b'`);
     expect(py).not.toMatch(/TSK-EVO-\\d|card_id/); // o runner ainda não conhece o card (Fase 4)
   });
+
+  // S-08: a reserva da migration 146 foi ABANDONADA; o esquema final, depois de TODAS as migrations, é o que as fases seguintes esperam.
+  it("contrato (S-08): depois de todas as migrations, projects_status_check contém card_draft e materializing", async () => {
+    const def = (await pool.query(
+      "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'projects_status_check' AND conrelid = 'projects'::regclass")).rows[0]?.def as string;
+    expect(def).toBeTruthy();
+    for (const st of ["card_draft", "materializing"]) expect(def, st).toContain(`'${st}'`);
+    // não existe migration 146 (nem reserva): numeração das novas frentes >= 161
+    expect(readdirSync(MIG).filter((f) => f.startsWith("146_"))).toEqual([]);
+  });
 });

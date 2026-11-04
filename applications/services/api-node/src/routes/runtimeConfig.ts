@@ -15,7 +15,7 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { resolveScopedTenantId } from "../lib/tenantScope.js";
 import { FLAG_DEFS, FLAG_NAMES, isRolloutFlagKey } from "../services/featureFlags.js";
-import { runCardsFlagBackfill, type CardsBackfillOutcome } from "../services/cardsBackfill.js";
+import { runCardsFlagBackfill, startCardsBackfillJob, getCardsBackfillJob, listCardsBackfillJobs, type CardsBackfillOutcome } from "../services/cardsBackfill.js";
 import { MULTIPART_MAX_FILES, MULTIPART_MAX_FILE_BYTES, MULTIPART_MAX_TOTAL_BYTES } from "../services/ticketAttachments.js";
 
 function getUser(r: FastifyRequest): AuthUser {
@@ -70,6 +70,11 @@ const CONFIG_KEYS: Record<string, { label: string; group: string; unit: string; 
 async function cardsFlagBackfillFor(key: string, tenantId: string | null): Promise<CardsBackfillOutcome[] | undefined> {
   if (key !== "CARDS_BANCADA") return undefined;
   try {
+    // S-11: padrão GLOBAL percorre todos os tenants ⇒ roda em segundo plano (job com relatório); por tenant segue síncrono (com statement_timeout)
+    if (tenantId === null) {
+      const job = startCardsBackfillJob(pool as unknown as Parameters<typeof startCardsBackfillJob>[0], null);
+      return [{ tenantId: "*", mode: "async", jobId: job.id, status: "started" }];
+    }
     return await runCardsFlagBackfill(pool as unknown as Parameters<typeof runCardsFlagBackfill>[0], tenantId);
   } catch (e) {
     return [{ tenantId: tenantId ?? "*", error: e instanceof Error ? e.message : String(e) }];
@@ -79,6 +84,16 @@ async function cardsFlagBackfillFor(key: string, tenantId: string | null): Promi
 export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
   // Todas as rotas exigem autenticação JWT (Bearer) — inclusive o runner usa Bearer
   app.addHook("preHandler", authMiddleware);
+
+  // ── GET /api/admin/runtime-config/cards-backfill[/:jobId] ─────────────────
+  // Relatório do backfill assíncrono disparado pelo padrão GLOBAL de CARDS_BANCADA (S-11). Só zentriz_admin.
+  app.get<{ Params: { jobId?: string } }>("/api/admin/runtime-config/cards-backfill/:jobId?", async (request, reply) => {
+    if (getUser(request).role !== "zentriz_admin") return reply.status(403).send({ code: "FORBIDDEN", message: "Somente administrador da plataforma" });
+    const { jobId } = request.params;
+    if (!jobId) return reply.send({ jobs: listCardsBackfillJobs() });
+    const job = getCardsBackfillJob(jobId);
+    return job ? reply.send(job) : reply.status(404).send({ code: "NOT_FOUND", message: "Job de backfill não encontrado (só os 20 mais recentes, em memória)" });
+  });
 
   // ── GET /api/admin/runtime-config/resolved ─────────────────────────────────
   // Valores efetivos: global sobrescrito pelo override do tenant.

@@ -16,7 +16,7 @@ vi.mock("../middleware/auth.js", () => authMock());
 
 import { runtimeConfigRoutes } from "../routes/runtimeConfig.js";
 import { projectRoutes } from "../routes/projects.js";
-import { backfillCardState, backfillSpecOrigin, runCardsFlagBackfill } from "./cardsBackfill.js";
+import { backfillCardState, backfillSpecOrigin, runCardsFlagBackfill, awaitCardsBackfillJob, BACKFILL_DEFAULTS } from "./cardsBackfill.js";
 
 const ev = (tag: string, data: unknown) => console.log(`[F2-${tag}] EVIDÊNCIA ${JSON.stringify(data)}`);
 
@@ -224,13 +224,86 @@ describePg("Fase 2 / 2.5 — CARDS_BANCADA por tenant + backfill (Postgres real)
     try {
       const r = await put("CARDS_BANCADA", 1); // global
       expect(r.statusCode).toBe(200);
-      const bf = r.json().cardsBackfill as Array<{ tenantId: string }>;
+      // S-11: o modo global NÃO roda dentro do PUT — responde na hora com o job, e o relatório vem por consulta
+      const started = r.json().cardsBackfill as Array<{ tenantId: string; mode?: string; jobId?: string; status?: string }>;
+      expect(started).toEqual([{ tenantId: "*", mode: "async", jobId: expect.any(String), status: "started" }]);
+      const job = (await awaitCardsBackfillJob(started[0].jobId!))!;
+      expect(job.status).toBe("done");
+      const bf = job.outcomes!;
       expect(bf.map((x) => x.tenantId)).toContain(A.tenantId);
       expect(bf.map((x) => x.tenantId)).not.toContain(B.tenantId);
+      const rep = await app.inject({ method: "GET", url: `/api/admin/runtime-config/cards-backfill/${job.id}` });
+      expect(rep.statusCode).toBe(200);
+      expect(rep.json()).toMatchObject({ id: job.id, status: "done", tenantId: null });
+      expect((await app.inject({ method: "GET", url: "/api/admin/runtime-config/cards-backfill" })).json().jobs.length).toBeGreaterThan(0);
+      expect((await app.inject({ method: "GET", url: "/api/admin/runtime-config/cards-backfill/cbf_inexistente" })).statusCode).toBe(404);
+      tenantAdmin();
+      expect((await app.inject({ method: "GET", url: `/api/admin/runtime-config/cards-backfill/${job.id}` })).statusCode).toBe(403);
+      admin();
       for (const id of bTickets) expect((await cardRow(id)).card_state).toBeNull();
     } finally {
       await pool.query("DELETE FROM genesis_runtime_config WHERE key = 'CARDS_BANCADA' AND tenant_id IS NULL");
       await pool.query("DELETE FROM genesis_runtime_config WHERE key = 'CARDS_BANCADA' AND tenant_id = $1", [B.tenantId]);
     }
+  });
+
+  // ── S-11: lotes, statement_timeout e corrida do snapshot ─────────────────────────────────────────────────
+  it("S-11 — lotes: 5 tickets com batchSize 2 são todos preenchidos (3 comandos), idempotente depois", async () => {
+    expect(BACKFILL_DEFAULTS.batchSize).toBe(500);
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) ids.push((await seedTicket(pool, A)).id);
+    const rep = await backfillCardState(pool, A.tenantId, { batchSize: 2 });
+    expect(rep).toMatchObject({ total: 5, byState: { draft: 5 } });
+    for (const id of ids) expect((await cardRow(id)).card_state).toBe("draft");
+    expect((await backfillCardState(pool, A.tenantId, { batchSize: 2 })).total).toBe(0);
+  });
+
+  it("S-11 — cada transação do backfill aplica SET LOCAL statement_timeout (padrão 120000 ms)", async () => {
+    await pool.query("INSERT INTO genesis_runtime_config (key, value, tenant_id) VALUES ('CARDS_BANCADA','1',$1)", [A.tenantId]);
+    try {
+      const log: string[] = [];
+      const spy = {
+        query: pool.query.bind(pool),
+        connect: async () => { const c = await pool.connect(); return { query: (sql: string, p?: unknown[]) => { log.push(sql); return c.query(sql, p); }, release: () => c.release() }; },
+      };
+      const out = await runCardsFlagBackfill(spy as never, A.tenantId);
+      expect(out[0].error).toBeUndefined();
+      expect(log.some((q) => /^SET LOCAL statement_timeout = 120000$/.test(q))).toBe(true);
+      expect(log.indexOf("BEGIN")).toBeLessThan(log.findIndex((q) => q.startsWith("SET LOCAL statement_timeout")));
+    } finally { await pool.query("DELETE FROM genesis_runtime_config WHERE key = 'CARDS_BANCADA' AND tenant_id = $1", [A.tenantId]); }
+  });
+
+  it("S-11 — corrida: PATCH concorrente open→rejected no meio do backfill NÃO deixa [rejected, draft]", async () => {
+    const race = (await seedTicket(pool, A)).id;
+    const holder = await pool.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("UPDATE tickets SET status = 'rejected' WHERE id = $1", [race]); // escritor legado, ainda não commitado
+      const running = backfillCardState(pool, A.tenantId); // lê o snapshot com status 'open' e tenta travar a linha
+      await new Promise((r) => setTimeout(r, 400));
+      const waiting = await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%card_state%'");
+      expect(waiting.rows[0].n).toBeGreaterThan(0); // o backfill está de fato esperando o escritor
+      await holder.query("COMMIT");
+      await running;
+    } finally { await holder.query("ROLLBACK").catch(() => undefined); holder.release(); }
+    const row = await cardRow(race);
+    ev("backfill-corrida", { status: row.status, card_state: row.card_state });
+    expect({ status: row.status, card_state: row.card_state }).toEqual({ status: "rejected", card_state: "rejected" });
+  });
+
+  // ── S-12: filho de evolução antigo (sem evolution_inherited_spec) ────────────────────────────────────────
+  it("S-12 — sem lista de herdados: tickets/TK-NNNN/request.md ⇒ card:legacy (não 'initial'); demais não primários seguem herdados", async () => {
+    const p4 = (await pool.query(
+      `INSERT INTO projects (tenant_id, created_by, title, status, product_id, parent_project_id, version_number, extra)
+       VALUES ($1,$2,'v4 antigo','accepted',$3,$4,4,$5::jsonb) RETURNING id`,
+      [A.tenantId, A.userId, A.productId, T.p3, JSON.stringify({ evolution: true })],
+    )).rows[0].id as string;
+    const add = (relDir: string, filename: string, primary = false) =>
+      pool.query(`INSERT INTO project_spec_files (project_id, filename, file_path, rel_dir, is_primary) VALUES ($1,$2,$3,$4,$5)`, [p4, filename, `/tmp/x/${p4}/${relDir}/${filename}`, relDir, primary]);
+    await add("", "spec-evolution-v4.md", true); await add("docs", "a.md"); await add("tickets/TK-0042", "request.md");
+    await backfillSpecOrigin(pool, A.tenantId);
+    const o = Object.fromEntries((await pool.query(
+      `SELECT CASE WHEN rel_dir = '' THEN filename ELSE rel_dir || '/' || filename END AS p, spec_origin FROM project_spec_files WHERE project_id = $1`, [p4])).rows.map((r) => [r.p, r.spec_origin]));
+    expect(o).toEqual({ "spec-evolution-v4.md": "card:legacy", "docs/a.md": "initial", "tickets/TK-0042/request.md": "card:legacy" });
   });
 });

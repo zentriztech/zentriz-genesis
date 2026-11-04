@@ -1,7 +1,7 @@
 /**
  * attachmentConverters.ts — extração DETERMINÍSTICA de texto de pdf/docx/doc para Markdown (Tarefa 3.x / Q).
  *
- * Este módulo roda DENTRO de uma worker thread (attachmentConversionWorker.ts) — nunca no event loop principal.
+ * Este módulo roda DENTRO de um processo filho com limites do SO (attachmentConversionChild.ts) — nunca no processo da api.
  * Sem LLM, sem visão, sem OCR: só a camada de texto que o próprio arquivo carrega. Um PDF escaneado (só imagem)
  * devolve resultado vazio com o aviso `NO_TEXT_LAYER`; nada de texto inventado.
  *
@@ -9,7 +9,7 @@
  * word-extractor (MIT, doc legado). Nenhuma executa macros/JS: mammoth só lê o XML do pacote, o pdf.js roda com
  * `isEvalSupported:false` e sem scripting (API de texto, sem viewer), word-extractor só lê streams OLE.
  *
- * Defesas deste módulo (além do que a worker/limites de memória e o timeout do chamador impõem):
+ * Defesas deste módulo (além do que o processo filho/limites de memória e o timeout do chamador impõem):
  *   • docx = zip: teto de entradas, tamanho declarado por entrada/total, razão de compressão E verificação REAL por
  *     descompressão com `maxOutputLength` (tamanho declarado no zip pode mentir) — zip bomb ⇒ `ZIP_BOMB`;
  *   • macro/conteúdo ativo (M-16): reaproveita `activeContentProblem` do upload e recusa também `.doc` com projeto VBA;
@@ -43,10 +43,18 @@ export interface ConversionLimits {
   maxZipTotalBytes: number;
   /** docx: razão descomprimido/comprimido aceita (entradas acima de 1 MiB e o total) */
   maxZipRatio: number;
-  /** tempo total da conversão (aplicado pelo chamador, que mata a worker) */
+  /** tempo total da conversão (aplicado pelo chamador, que mata o processo filho com SIGKILL) */
   timeoutMs: number;
-  /** teto de heap da worker (MiB) */
+  /** teto de heap V8 do processo filho (`--max-old-space-size`, MiB) — NÃO cobre Buffer/ArrayBuffer */
   workerMaxOldGenMb: number;
+  /** teto de RSS do processo filho (MiB), medido pelo pai; acima disso o filho leva SIGKILL (cobre memória externa) */
+  procMaxRssMb: number;
+  /** teto de espaço de endereçamento do filho (MiB, `ulimit -v`/RLIMIT_AS) — limite real do SO; 0 = desligado */
+  procMaxAddressSpaceMb: number;
+  /** bytes máximos lidos da saída (stdout) do filho; acima disso o filho leva SIGKILL */
+  maxStdoutBytes: number;
+  /** conversões simultâneas por instância da api (semáforo global; 1–4) */
+  maxConcurrent: number;
 }
 
 /** Padrões CONSERVADORES e NÃO CALIBRADOS (calibrado=falso): não há medição de anexos reais. */
@@ -60,6 +68,10 @@ export const CONVERSION_LIMIT_DEFAULTS: ConversionLimits = {
   maxZipRatio: 100,
   timeoutMs: 30_000,
   workerMaxOldGenMb: 512,
+  procMaxRssMb: 1024,
+  procMaxAddressSpaceMb: 4096,
+  maxStdoutBytes: 4 * 1024 * 1024,
+  maxConcurrent: 2,
 };
 
 export interface ConvertMeta { attachmentId: string; filename: string; sha256: string; now: Date }
@@ -298,7 +310,7 @@ async function convertDoc(buf: Buffer, meta: ConvertMeta, limits: ConversionLimi
 
 // ── entrada única ────────────────────────────────────────────────────────────────────────────
 
-/** Converte (síncrono do ponto de vista do chamador; deve rodar numa worker). Lança `ConversionError`. */
+/** Converte (síncrono do ponto de vista do chamador; deve rodar no processo filho). Lança `ConversionError`. */
 export async function convertBuffer(ext: string, buf: Buffer, meta: ConvertMeta, limits: ConversionLimits = CONVERSION_LIMIT_DEFAULTS): Promise<ConvertOutput> {
   if (![".pdf", ".docx", ".doc"].includes(ext)) throw new ConversionError("UNSUPPORTED_TYPE", `extensão ${ext} não é convertível`);
   if (buf.length === 0) throw new ConversionError("CORRUPT", "arquivo vazio");

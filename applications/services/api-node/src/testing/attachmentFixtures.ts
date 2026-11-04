@@ -3,7 +3,7 @@
  * NÃO é código de produto: só é importado por `*.test.ts`. Nada é lido do disco; tudo é gerado em memória.
  */
 import AdmZip from "adm-zip";
-import { deflateRawSync } from "zlib";
+import { deflateRawSync, deflateSync } from "zlib";
 
 const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
 
@@ -76,6 +76,20 @@ export function makePdf(pages: string[][] = [["Relatório de requisitos", "Linha
   }
   objs[1] = "<< /Type /Catalog /Pages 2 0 R >>";
   objs[2] = `<< /Type /Pages /Kids [${kids.map((k) => `${k} 0 R`).join(" ")}] /Count ${kids.length} >>`;
+  return assemblePdf(objs);
+}
+
+/**
+ * PDF "bomba": uma página cujo content stream é Flate e INFLA para `inflatedMiB` MiB (espaços em branco, razão ~1000:1) —
+ * poucos KB no arquivo, centenas de MB em memória quando o pdf.js decodifica. Só para testes de isolamento (S-04).
+ */
+export function makePdfFlateBomb(inflatedMiB: number): Buffer {
+  const comp = deflateSync(Buffer.alloc(inflatedMiB * 1024 * 1024, 0x20), { level: 9 });
+  const objs: string[] = [];
+  objs[1] = "<< /Type /Catalog /Pages 2 0 R >>";
+  objs[2] = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
+  objs[3] = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << >> >>";
+  objs[4] = `<< /Length ${comp.length} /Filter /FlateDecode >>\nstream\n${comp.toString("latin1")}\nendstream`;
   return assemblePdf(objs);
 }
 

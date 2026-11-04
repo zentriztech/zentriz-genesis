@@ -26,7 +26,7 @@
 3. **Fail-closed só onde importa:** flags indisponíveis (transporte/5xx, duas tentativas) param a **leitura da spec** (`SpecReadError`); na herança de tasks viram `off` (comportamento anterior). 404/405/501/401/403 = API sem a rota ⇒ `off` com aviso.
 4. **`EVOLVE_RECONCILER` é job de plataforma**: só o nível global entra (zentriz_admin não tem tenant). Valores 0=off, 1=shadow, 2=on.
 5. **M-16 recusa**, não marca: não há coluna para a marca e nada converte arquivo no servidor hoje.
-6. **Migration 147** (a 146 fica para a outra frente): UPDATE condicional, sem `DO $$` e sem `;` em literais.
+6. **Migration 147** (a numeração 146 não é usada; novas frentes começam em 161, S-08): UPDATE condicional, sem `DO $$` e sem `;` em literais.
 
 ## 3. Saídas reais
 
