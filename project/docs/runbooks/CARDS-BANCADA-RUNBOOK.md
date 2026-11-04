@@ -108,6 +108,7 @@ O gate de promoção e o merge leem a compatibilidade da seção `## Compatibili
 - **Como detectar.** Card `Bloqueado`, `blocked_reason` começando por `budget:` (ex.: `budget:BUDGET_PAUSED`, `BUDGET_INSUFFICIENT`, `BUDGET_MISSING`, `KILL_SWITCH`, `CARD_BUDGET_CAP`); o filho fica `stopped` com `stopped_by='budget'` (exceto `CARD_BUDGET_CAP` com filho em status de Bancada, que o Guard não para: o filho segue com o status e só o card vira `blocked`); evento do Guard (`actor_kind='guard'`) em `ticket_card_events`. O portal mostra a ação "Aumentar o orçamento" (`cardJourney.ts:161,190`).
 - **Causa.** Negativa do Guard (soberano): `cardPromote.ts:176-188`. Pela decisão do plano (§1, critério Custo), negativa do Guard ⇒ `blocked` por orçamento, **nunca `failed`**. O gancho das rotas internas do Guard (`routes/llmGuard.ts`, Y-14, throttle de 15 s por projeto e origem) alinha o card sem ninguém olhar a jornada quando o preflight nega com `BUDGET_*` **ou `CARD_BUDGET_CAP`** (AN/A2, corrigido na AO; antes o gancho ignorava o teto do card). Com `EVOLVE_RECONCILER=on` há também a varredura periódica (`syncCardsWithChildren`, `cardPromote.ts`), que agora cobre o filho vivo na Bancada com `card_cap_reached` nas últimas 24 h. **Sem o reconciliador e sem nenhuma outra chamada**, um card cujo filho nunca mais chama o Guard só é alinhado quando alguém abre a jornada. O runner reconhece `CARD_BUDGET_CAP` como negativa de orçamento (`orchestrator/guard_denial.py`): devolve a task e pausa o run na hora, sem as 10 reverificações de ~40 min.
 - **Ação segura.** (a) Aumentar o orçamento do **dono** da versão (D-E10: o card usa o mesmo orçamento do dono; rota `PUT /api/projects/:id/budget` do projeto-dono) **ou, no caso de `CARD_BUDGET_CAP`, subir o `card_budget_pct`** do tenant (`PUT /api/cost-policies`; o tenant nunca pode ficar acima da política global, `TENANT_POLICY_EXCEEDS_GLOBAL`). O gate de retomada usa como folga a mediana das chamadas do dono (AN/A4), então o card só volta a `in_factory` se a próxima chamada for aceita; (b) `POST /api/cards/:id/resume`. Se o Guard ainda nega, responde `402 CARD_BUDGET_BLOCKED` e o card **continua** `blocked`. Com saldo, o card volta a `in_factory`; se o filho ainda estiver `stopped`, a resposta traz `childRestartRequired:true` e `next:"POST /api/projects/:id/run"`: **liberar a pausa não religa a execução**, é preciso reiniciar o filho.
+- **Retomada em um passo (AU/N-8).** Se o orçamento do dono **já comporta** a próxima atividade (ex.: o Guard pausou por estimativa e o saldo basta, ou você acabou de aumentar o valor), use `POST /api/projects/<qualquer-projeto-da-linhagem>/budget/resume` (sem corpo) em vez do truque de repetir o `PUT /budget` com o mesmo valor. A rota é **humana** (admin do tenant, dono do projeto ou `zentriz_admin`; token de serviço recebe 403), **idempotente** e **auditada** (`llm_guard_events.kind='budget_resume_manual'`: quem, quando, motivo da pausa, saldo; consulta em §10.14). Ela confere a causa (só a pausa de orçamento do dono; kill switch, tetos globais e teto do card seguem soberanos e **não** são liberados por aqui) e o saldo com o mesmo critério do Guard: sem saldo responde `402 BUDGET_STILL_INSUFFICIENT` e **nada muda** (aumente o orçamento por `PUT /budget`). Com saldo: limpa a pausa do dono e dos filhos, alinha os cards `budget:*` (voltam a `in_factory`) e devolve `childrenToRestart` com o `POST /api/projects/<filho>/run` de cada filho parado — **a rota não religa a execução** (religar gasta dinheiro; é decisão explícita). Repetir a chamada é no-op (`resumed:false`, sem evento novo).
 - **NÃO fazer.** Não tentar mascarar com `UPDATE projects SET status=...`; não desligar o kill switch ou os tetos globais (`llm_guard_settings`) para "destravar" um card; não marcar o filho como `running` à mão; não criar outro card para contornar o saldo (o orçamento é compartilhado).
 
 ### 3.2 Falha da Fábrica (`child_failed`) ou da materialização
@@ -153,7 +154,7 @@ Primeiro passo de diagnóstico: consulta §10.6 (estado de publicação do filho
 
 ### 4.4 PR aberto, ninguém mergeou; PR fechado sem merge
 
-- **Aberto.** O card segue `in_factory` (`pr_not_merged`): é espera humana legítima. Merge manual pelo botão **"Mergear agora"** (`POST /api/projects/:id/evolution/merge`; dono ou `tenant_admin`; `zentriz_admin` não). Travas de política (MAJOR, compatibilidade implícita, sem testes, regressões) exigem `confirm:"MERGE"`; "sem evidência de testes" e "instalação revogada" não são contornáveis.
+- **Aberto.** O card segue `in_factory` (`pr_not_merged`): é espera humana legítima. Merge manual pelo botão **"Mergear agora"** (`POST /api/projects/:id/evolution/merge`; dono ou `tenant_admin`; `zentriz_admin` não). Travas de política (MAJOR, compatibilidade implícita, sem testes, regressões) exigem `confirm:"MERGE"` (AU: a resposta `400 CONFIRM_REQUIRED` traz `explanation` em linguagem de usuário — p.ex. `blocked_no_tests` = produto sem testes executáveis ⇒ **sem baseline, sem PASS_TO_PASS, nenhuma regressão verificada**; o corpo aceita `reason` opcional e a confirmação é gravada **antes** do merge em `extra.evolution_merge_confirmation` + diálogo do projeto — quem, quando, risco assumido e motivo, consulta em §10.14; se a trilha não puder ser gravada o merge **não** acontece: `503 AUDIT_UNAVAILABLE`); "sem evidência de testes" e "instalação revogada" não são contornáveis.
 - **Merge feito direto no GitHub.** O Genesis só percebe com `EVOLVE_RECONCILER=on` (`deliverAcceptedCards`, a cada passada, ≤ 100 candidatos); `EVOLUTION_MERGE_WATCH=on` ajuda mas **não** é o pré-requisito (N7). Em `shadow`/`off` o card fica `in_factory`.
 - **Fechado sem merge e superado.** Se a versão sucessora (cadeia `superseded_by`, até 5 elos) está mergeada e sem pendência, o card entrega por `successor_merged` (N8); senão `pr_closed_successor_not_merged` (pendente).
 - **NÃO fazer.** Não mergear o PR antigo (v2) depois de a v3 ser a versão corrente com auto-merge ligado (N3: o worker agora só **observa** superados, mas mantenha `EVOLUTION_AUTO_MERGE` e `EVOLUTION_AUTO_REDEPLOY` desligados no rollout); não fechar PRs "para limpar".
@@ -416,6 +417,18 @@ SELECT created_at, kind, detail FROM llm_guard_events
  WHERE project_id = '<CHILD_OR_DRAFT_UUID>' ORDER BY created_at DESC LIMIT 50;
 ```
 
+### 10.14 Quem retomou a pausa de orçamento e quem confirmou um merge de risco (AU)
+
+```sql
+-- retomadas humanas de pausa por orçamento (POST /api/projects/:id/budget/resume)
+SELECT created_at, project_id, detail->>'by' AS quem, detail->>'pausedReason' AS motivo_da_pausa,
+       detail->>'remainingUsd' AS saldo_usd
+  FROM llm_guard_events WHERE kind = 'budget_resume_manual' ORDER BY created_at DESC LIMIT 50;
+-- merges forçados com confirm:"MERGE" (quem, quando, risco assumido, motivo)
+SELECT id, title, extra->'evolution_merge_confirmation' AS confirmacao
+  FROM projects WHERE extra ? 'evolution_merge_confirmation' ORDER BY updated_at DESC LIMIT 50;
+```
+
 ## 11. Erros e códigos HTTP
 
 Todo erro de card leva `userMessage` PT-BR da tabela única `services/cardErrors.ts` (exceto o 404 `Recurso indisponível` da flag desligada).
@@ -424,6 +437,7 @@ Todo erro de card leva `userMessage` PT-BR da tabela única `services/cardErrors
 |---|---|---|---|
 | 400 | `BAD_REQUEST`, `INVALID_ID`, `SERVICE_REQUIRED`, `ATTACHMENT_INVALID`, `ATTACHMENT_TOO_LARGE`, `ATTACHMENT_TOO_MANY`, `ATTACHMENT_UNREADABLE`, `CARD_PATH_OUT_OF_SCOPE` | Entrada inválida (id não canônico, tipo/limite de anexo, caminho fora do escopo do card) | Corrigir a entrada |
 | 402 | `BUDGET_MISSING`, `BUDGET_PAUSED`, `BUDGET_INSUFFICIENT`, `BUDGET_FREE_BELOW_MIN`, `CARD_BUDGET_BLOCKED`, `KILL_SWITCH`, `GLOBAL_HOURLY_CAP`, `GLOBAL_DAILY_CAP`, `REPEAT_PAYLOAD`, `PROJECT_NOT_FOUND`, `GUARD_ERROR`, `TENANT_LLM_BUDGET_EXCEEDED` | Guard soberano | §3.1; nunca vira `failed` |
+| 402 | `BUDGET_STILL_INSUFFICIENT` (`POST /api/projects/:id/budget/resume`, AU) | A retomada humana foi pedida mas o saldo não comporta a próxima atividade; a pausa continua | Aumentar o orçamento (`PUT /budget`) e repetir; §3.1 |
 | 403 | `FORBIDDEN` (token de serviço), `CARD_ACTION_NOT_ALLOWED`, `MANAGEMENT_ACCOUNT_READONLY_CREATE`, `MANAGEMENT_ACCOUNT`, `ADMIN_ONLY_KEY` | Papel insuficiente | §9 |
 | 404 | `NOT_FOUND` (inclui `Recurso indisponível` com flag desligada, outro tenant, id inexistente) | Sem acesso ou flag off | §6 |
 | 409 (estado) | `CARD_INVALID_TRANSITION`, `CARD_DIVERGED`, `CARD_NOT_EDITABLE`, `CARD_NOT_DELETABLE`, `CARD_CHILD_NOT_IN_FACTORY`, `CARD_DELIVERY_IS_AUTOMATIC`, `TICKET_IMMUTABLE`, `NOT_PROMOTED`, `USE_CARD_PROMOTE`, `USE_CARD_DELETE`, `USE_CARDS`, `CARD_OPERATION_UNSUPPORTED`, `PRODUCT_ARCHIVED`, `NO_ACCEPTED_HEAD` | Operação fora do estado ou fora do modelo de cards | A mensagem diz a rota correta |
@@ -433,12 +447,27 @@ Todo erro de card leva `userMessage` PT-BR da tabela única `services/cardErrors
 | 422 | `CARD_DRAFT_CHANGED`, `HEAD_SPEC_UNREADABLE`, `CODE_BASE_UNAVAILABLE`, `CARD_PATH_COLLIDES_WITH_BASE` (passo `card_spec`), `ATTACHMENT_UNREADABLE` (passo `ticket`) | **Falha terminal** da materialização: filho `failed`, card `blocked` | §2.3 / §3.2 |
 | 500 | `MATERIALIZATION_FAILED`, `INTERNAL`, `CARDS_BACKFILL_FAILED` | Erro transitório; a repetição retoma | Repetir; ver log |
 | 502 | (republicar) | Publicação falhou de novo | Ver diálogo do projeto |
+| 503 | `AUDIT_UNAVAILABLE` (`POST /evolution/merge`, AU) | A confirmação de risco não pôde ser gravada na trilha; o merge NÃO foi feito | Repetir; se persistir, ver o banco/log da API |
 
 ### 11.1 Notas da AR (execuções reais da 4.5)
 
 - **401 `UNAUTHORIZED`** em `POST /cards` (e demais mutações de card): token autenticado **sem `sub`** (sem identidade de autor). Antes: 500 `INTERNAL` por `created_by` nulo (D-12). Ação: autenticar de novo com um token de usuário.
 - **400 `INVALID_FLAG_VALUE`** em `PUT /api/admin/runtime-config/<flag>`: flags de rollout aceitam `0/1/2`, `on/off/true/false` e (só `EVOLVE_RECONCILER`) `shadow`; o valor é **gravado como inteiro canônico**. A leitura da tabela aceita os mesmos sinônimos (`CARDS_BANCADA='on'` gravada por SQL agora vale 1; antes ficava ignorada, só com `console.warn`). **Atenção:** `CARDS_BANCADA` ligada por SQL **não dispara o backfill** de `card_state` (só o `PUT` dispara): use sempre o `PUT`. `GET /api/admin/runtime-config/resolved` ganhou a chave `rolloutFlags` (`{ FLAG: { value, source, ignored?[] } }`): `ignored` lista as linhas inválidas que a resolução descartou (D-8). As chaves planas anteriores não mudaram.
-- **Corpo do PR** (D-13): a seção "Gates da fábrica" declara **passou / FALHOU / não executado/sem evidência** para escopo, símbolos e QA, lidos do checkpoint do runner (`evolution_violations`) e do diálogo do projeto (`qa.review`, "QA reportou QA_FAIL … não aprovada"). Sem evidência nunca diz "passou". Escopo e símbolos cobrem as escritas do **Dev** (as do Cyborg não passam por esse gate: D-1, fora desta correção).
+- **Corpo do PR** (D-13, ampliado na AU/N-6): a seção "Gates da fábrica" declara **passou / FALHOU / não executado/sem evidência** para **cinco** gates: escopo, símbolos, QA, **TSK-FULL-TEST** e **baseline/P2P**. Fontes reais: checkpoint do runner (`evolution_violations`, `evolution_baseline`), diálogo do projeto (`qa.review`, "QA reportou QA_FAIL … não aprovada", "TASK-FULL-TEST …"), status da task e, para o escopo, o **diff real de `apps/`** (`git status` contra o clone da linhagem) comparado ao `files_allowed` do RFC — arquivo fora do RFC (inclusive lockfile) ⇒ **FALHOU**, com os caminhos. `TSK-FULL-TEST` `CANCELLED` ⇒ "NOT_RUN"; `DONE` só vale como execução se houver o registro "TASK-FULL-TEST (Claude Code): aprovada" (o aceite fecha a task como `DONE` mesmo sem executar). Baseline `no_tests`/`error`/ausente ⇒ não executado (com `exit≠0` o texto avisa que o executor quebrou, N-4); regressões ⇒ FALHOU. Sem evidência nunca diz "passou". `GET /evolution-state` devolve os mesmos gates em `factoryGates`.
+
+### 11.2 Notas da AU (execução real 4.5b, relatório AS)
+
+Escopo da frente `evo/r2` (api-node). O que é do orchestrator/`scripts/` é da `evo/r1`.
+
+| # | Defeito (AS) | Tratamento no api-node (AU) | Resta |
+|---|---|---|---|
+| N-1 | Contexto do Dev inclui `node_modules`/`.git` e estoura o Guard | — (orchestrator) | evo/r1 |
+| N-2 | EACCES: `/tmp/zentriz-files/<id>` criado como root pelo runner, FTS roda como `ubuntu` | — (ambiente/uid; sem código no api-node). Pré-condição de dev: a pasta do filho precisa ser gravável pelo uid do FTS | decisão de ambiente / evo/r1 |
+| N-3 | `pnpm install` num projeto npm cria `pnpm-lock.yaml` e a publicação o inclui no PR | `pushProjectFiles` com `excludeForeignLockfiles` (só evolução) **não publica** lockfile de outro gerenciador (regra: rastreado no clone > `packageManager` > npm>yarn>pnpm; só age com 2+ gerenciadores na mesma pasta); a exclusão é dita no diálogo do projeto e no gate de escopo | a causa (o `/cyborg-build` gerando o arquivo) é do orchestrator/`scripts/` |
+| N-4 | `no_tests` com `exit_code≠0` (jest sem configuração) mascarado como "sem testes" | o gate de baseline e o detalhe de `blocked_no_tests` avisam "executor saiu com erro (exit N)"; `evolution-state.factoryGates` expõe | classificação `error` no FTS é da evo/r1 |
+| N-6 | PR declarou escopo "passou" com arquivo fora do RFC e omitiu FULL-TEST e baseline | §11.1 (cinco gates, diff real) | — |
+| N-8 | Religar a linhagem exigia 3 passos manuais | `POST /api/projects/:id/budget/resume` (§3.1) | o `POST /run` do filho continua explícito, por desenho |
+| (merge) | `confirm:"MERGE"` sem explicação nem rastro | `explanation` + trilha `evolution_merge_confirmation` (§4.4, §10.14) | — |
 
 ## 12. Decisões e assunções
 

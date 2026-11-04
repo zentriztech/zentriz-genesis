@@ -853,6 +853,66 @@ export async function maybeResumeBudget(db: Queryable, ownerId: string): Promise
   return true;
 }
 
+export interface ChildToRestart { projectId: string; status: string; next: string }
+export type BudgetResumeResult =
+  | { kind: "not_found" }
+  | { kind: "no_budget"; ownerProjectId: string }
+  | { kind: "not_paused"; ownerProjectId: string; budgetUsd: number; spentUsd: number; remainingUsd: number; childrenToRestart: ChildToRestart[]; cardsSynced: number }
+  | { kind: "insufficient"; ownerProjectId: string; budgetUsd: number; spentUsd: number; remainingUsd: number; minNextActivityUsd: number; pausedReason: string | null }
+  | { kind: "resumed"; ownerProjectId: string; budgetUsd: number; spentUsd: number; remainingUsd: number; childrenToRestart: ChildToRestart[]; cardsSynced: number };
+
+/**
+ * N-8 (AU): retomada HUMANA e idempotente de uma linhagem pausada pelo Guard — a menor operação segura. Antes, religar após
+ * `BUDGET_PAUSED` exigia 3 passos manuais (PUT do mesmo orçamento só para disparar `maybeResumeBudget`, `POST /cards/:id/resume`
+ * e `POST /projects/:id/run`).
+ *
+ * O que FAZ: confere a CAUSA da pausa (só `budget_paused_at` do dono — nunca kill switch, teto global ou teto do card, que seguem
+ * soberanos), confere o SALDO (mesmo critério do Guard: saldo ≥ `minNextActivityUsd`) e só então limpa a pausa do dono e dos filhos,
+ * grava a trilha (`budget_resume_manual`: quem, quando, motivo da pausa, saldo) e alinha os cards bloqueados por `budget:*`.
+ * O que NÃO faz: não altera o orçamento, não afrouxa o Guard (sem saldo ⇒ `insufficient`, nada muda) e NÃO religa a execução —
+ * devolve os filhos `stopped` por orçamento com o `next` (`POST /api/projects/:id/run`), pois religar gasta dinheiro e é decisão humana explícita.
+ * Idempotente: sem pausa vigente é no-op (`not_paused`, sem evento novo); o UPDATE condicional impede evento duplicado em chamadas concorrentes.
+ */
+export async function resumeBudgetPauseByHuman(db: Queryable, projectId: string, actor: { id: string; email: string }): Promise<BudgetResumeResult> {
+  const owner = await resolveBudgetOwner(db, projectId);
+  if (!owner) return { kind: "not_found" };
+  if (owner.budgetUsd == null) return { kind: "no_budget", ownerProjectId: owner.ownerId };
+  const spend = await getBudgetSpend(db, owner.ownerId);
+  const remaining = owner.budgetUsd - spend.totalUsd;
+  const view = { ownerProjectId: owner.ownerId, budgetUsd: owner.budgetUsd, spentUsd: Math.round(spend.totalUsd * 10000) / 10000, remainingUsd: Math.round(remaining * 100) / 100 };
+  const tail = async () => {
+    const kids = (await db.query(
+      `SELECT id, status FROM projects WHERE COALESCE(budget_owner_project_id, id) = $1 AND status = 'stopped' AND stopped_by = 'budget'`, [owner.ownerId],
+    )).rows as Array<{ id: string; status: string }>;
+    const cardKids = (await db.query(
+      `SELECT t.child_project_id AS id FROM tickets t JOIN projects p ON p.id = t.child_project_id
+        WHERE t.card_state IN ('promoted', 'in_factory', 'blocked') AND COALESCE(p.budget_owner_project_id, p.id) = $1
+          AND (t.card_state <> 'blocked' OR t.blocked_reason LIKE 'budget:%')`, [owner.ownerId],
+    )).rows as Array<{ id: string }>;
+    let cardsSynced = 0;
+    try {
+      const { syncCardForChildProject } = await import("./cardPromote.js");
+      for (const id of new Set([...kids.map((k) => k.id), ...cardKids.map((c) => c.id)])) { await syncCardForChildProject(db as never, id); cardsSynced++; }
+    } catch { /* o reconciliador alinha depois; a retomada já foi gravada */ }
+    return { childrenToRestart: kids.map((k) => ({ projectId: k.id, status: k.status, next: `POST /api/projects/${k.id}/run` })), cardsSynced };
+  };
+  if (!owner.pausedAt) return { kind: "not_paused", ...view, ...(await tail()) };
+  const minNext = minNextActivityUsd(spend);
+  if (remaining < minNext) return { kind: "insufficient", ...view, minNextActivityUsd: minNext, pausedReason: owner.pausedReason };
+  const upd = await db.query(
+    `UPDATE projects SET budget_paused_at = NULL, budget_paused_reason = NULL, updated_at = now()
+      WHERE (id = $1 OR budget_owner_project_id = $1) AND budget_paused_at IS NOT NULL RETURNING id`, [owner.ownerId],
+  );
+  if ((upd.rowCount ?? upd.rows.length) > 0) {
+    await logEvent(db, "budget_resumed", owner.ownerId, { budgetUsd: owner.budgetUsd, spentUsd: spend.totalUsd });
+    await logEvent(db, "budget_resume_manual", owner.ownerId, {
+      by: actor.email, byUserId: actor.id, at: new Date().toISOString(), pausedAt: owner.pausedAt, pausedReason: owner.pausedReason,
+      budgetUsd: owner.budgetUsd, spentUsd: spend.totalUsd, remainingUsd: remaining, minNextActivityUsd: minNext,
+    });
+  }
+  return { kind: "resumed", ...view, ...(await tail()) };
+}
+
 // ── E-mails ──────────────────────────────────────────────────────────────────
 
 function opsRecipient(): string {

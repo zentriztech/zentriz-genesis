@@ -231,6 +231,18 @@ D-5 (a suíte do produto base tinha 12 testes já falhando; é do produto gerado
 
 O relatório da 4.5b (`EVOLUIR-PROJETO-AS-execucao-real-4-5b.md`) **não existia** em `project/docs/analysis/` no worktree desta tarefa nem em `zentriz-autonomy-suite/zentriz-genesis/project/docs/analysis/` quando este documento foi escrito (verificado). A coluna "Verificado em execução real?" da §7.1 só pode virar "Sim" quando a 4.5b comprovar, com os critérios binários do plano, que L1 a L5 e L7 deixaram de ocorrer. **Ação:** ao chegar o relatório AS, atualizar a §7.1 (coluna e correções), a §1.1 e a §8, e só então pedir o OK da onda 1.
 
+### 7.4 Execução 4.5b real (relatório AS) e correções da AU
+
+O relatório da 4.5b existe agora (`EVOLUIR-PROJETO-AS-execucao-real-4-5b.md`; o §7.3 acima foi escrito antes dele). Resumo honesto: o card TK-0004 chegou a `delivered` (US$ 3,617), mas a linha de base **não foi medida** e o PR entrou com `pnpm-lock.yaml` fora do RFC. Lições do lado api-node e o que as previne:
+
+| Lição | O que fazer antes de ligar um tenant / ao operar |
+|---|---|
+| N-6: o texto do PR podia dizer "passou" sem evidência | Ler a seção "Gates da fábrica" do PR: cinco gates (escopo com diff real, símbolos, QA, TSK-FULL-TEST, baseline/P2P). **"não executado/sem evidência" não é aprovação** e `NOT_RUN` do FULL-TEST significa que a validação e2e não ocorreu |
+| N-3: lockfile de outro gerenciador no PR | A publicação agora não envia lockfile de gerenciador estranho; mesmo assim confira o diff do PR (qualquer arquivo fora do `files_allowed` aparece como FALHOU no gate de escopo) |
+| N-4/N-5: baseline `no_tests`/`error` | Produto sem configuração de testes (ex.: jest sem `ts-jest`) ⇒ sem baseline e sem P2P ⇒ o merge só passa com `confirm:"MERGE"`; a mensagem agora explica isso e o `confirm` fica registrado (quem, quando, motivo). Pré-condição por tenant: o produto-base deve ter suíte executável |
+| N-8: religar após pausa de orçamento | `POST /api/projects/:id/budget/resume` (humano, idempotente, auditado; RUNBOOK §3.1) em vez de repetir o `PUT /budget`; depois reiniciar cada filho listado. O Guard não é afrouxado |
+| N-1/N-2 | Do orchestrator e do ambiente (evo/r1 / decisão de ambiente); não resolvidos aqui |
+
 ## 8. Lacunas
 
 1. **4.5b não incorporada** (§7.3). Sem ela, as correções AQ e AR estão provadas por testes (mutação: 16 de 19 e 19 de 19 testes novos falham sem a correção, AQ §7, AR §2), **não** por execução real com LLM e GitHub.

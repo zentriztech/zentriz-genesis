@@ -323,6 +323,16 @@ describe("tryAutoMergeEvolution — evaluateOnly (GAP-59)", () => {
     expect((await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true })).state).toBe("blocked_no_tests");
   });
 
+  it("AU/N-4: no_tests com exit≠0 (executor saiu com erro) diz isso no detalhe; sem exit, detalhe curto", async () => {
+    checkpoint.readEvolutionCheckpoint.mockResolvedValue({ evolution_baseline: { status: "no_tests", no_tests: true, exit_code: 1 } });
+    const { db } = makeDb({ row: baseRow(evolExtra()) });
+    const r = await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true });
+    expect(r.state).toBe("blocked_no_tests");
+    expect(r.detail).toMatch(/executor de testes saiu com erro/);
+    checkpoint.readEvolutionCheckpoint.mockResolvedValue({ evolution_baseline: { status: "no_tests", no_tests: true } });
+    expect((await tryAutoMergeEvolution(makeDb({ row: baseRow(evolExtra()) }).db as never, "child", { evaluateOnly: true })).detail).toBe("baseline sem testes");
+  });
+
   it("compat MAJOR → blocked_major na sonda", async () => {
     const { db } = makeDb({ row: baseRow(evolExtra({ evolution_compat: "major" })) });
     expect((await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true })).state).toBe("blocked_major");

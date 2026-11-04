@@ -22,6 +22,7 @@ import { projectRootCandidates } from "./connectManifestsDisk.js";
 import { sha256Hex } from "../lib/specTreeHash.js";
 import { ticketStamp, TICKET_KIND_LABEL } from "./tickets.js";
 import { readEvolutionCheckpoint } from "./evolutionState.js";
+import { detectForeignLockfiles, JS_LOCKFILES, listChangedFiles, pathsOutsideScope } from "../lib/evolutionScope.js";
 
 type Db = Pick<Pool, "query">;
 export type Compat = "patch" | "minor" | "major";
@@ -154,22 +155,30 @@ export async function findLineageRepo(db: Db, childId: string, parentId: string 
 
 export type GateStatus = "passed" | "failed" | "not_run";
 export interface GateOutcome { status: GateStatus; detail: string }
-export interface FactoryGateOutcomes { scope: GateOutcome; symbols: GateOutcome; qa: GateOutcome }
+export interface FactoryGateOutcomes { scope: GateOutcome; symbols: GateOutcome; qa: GateOutcome; fullTest: GateOutcome; baseline: GateOutcome }
 
 const GATE_LABEL: Record<GateStatus, string> = { passed: "passou", failed: "FALHOU", not_run: "não executado/sem evidência" };
 
 /**
- * D-13 (AR): resultado REAL de cada gate da fábrica, lido do que ficou registrado — nunca presumido.
- *  · escopo (RFC `files_allowed`) e símbolos preservados: `evolution_violations` do checkpoint do runner (mensagens "FORA DO ESCOPO" /
- *    "SÍMBOLOS REMOVIDOS"); sem checkpoint ⇒ `not_run` (não há evidência de que rodaram). Cobrem as escritas do Dev.
+ * D-13 (AR) + N-6 (AU): resultado REAL de cada gate da fábrica, lido do que ficou registrado — nunca presumido.
+ *  · escopo (RFC `files_allowed`): (a) `evolution_violations` do checkpoint ("FORA DO ESCOPO") e (b) o diff REAL de `apps/` contra o clone
+ *    da linhagem, comparado ao escopo — pega o que o gate do runner não vê (lockfile gerado por build, p.ex. `pnpm-lock.yaml`, PR #5 da 4.5b);
+ *    lockfile de outro gerenciador é EXCLUÍDO da publicação (não conta como violação, mas é dito). Sem checkpoint e sem diff ⇒ `not_run`.
+ *  · símbolos preservados: "SÍMBOLOS REMOVIDOS" no checkpoint; sem checkpoint ⇒ `not_run`.
  *  · QA: o diálogo do projeto (`qa.review` = o QA rodou; "QA reportou QA_FAIL … não aprovada"/"QA atingiu máximo" = reprovado).
+ *  · TSK-FULL-TEST: a task `CANCELLED` é NOT_RUN (D-3/AQ); `DONE` só vale como execução com o registro "TASK-FULL-TEST (Claude Code): aprovada"
+ *    no diálogo — o aceite fecha a task como `DONE` mesmo sem ter executado, então o status sozinho não prova nada.
+ *  · baseline/P2P: `evolution_baseline` do checkpoint (medida/sem regressão ⇒ passou; regressões ⇒ FALHOU; `error`/`no_tests`/ausente ⇒ não executado,
+ *    com o motivo dito — sem baseline não há não-regressão).
  * Falha de leitura de qualquer fonte ⇒ `not_run` com o motivo. O texto do PR só afirma "passou" com evidência.
  */
-export async function describeFactoryGates(db: Db, childId: string): Promise<FactoryGateOutcomes> {
+export async function describeFactoryGates(db: Db, childId: string, opts: { scope?: string[] | null; appsDir?: string | null } = {}): Promise<FactoryGateOutcomes> {
   const none = (detail: string): GateOutcome => ({ status: "not_run", detail });
   let scope = none("checkpoint do runner indisponível"), symbols = scope;
+  let baseline = none("sem baseline registrada (checkpoint do runner indisponível)");
+  let cp: Record<string, unknown> | null = null;
+  try { cp = await readEvolutionCheckpoint(childId); } catch { cp = null; }
   try {
-    const cp = await readEvolutionCheckpoint(childId);
     const v = cp?.evolution_violations;
     if (cp && v && typeof v === "object") {
       const msgs = Object.values(v as Record<string, unknown>).flatMap((x) => (Array.isArray(x) ? x.map(String) : []));
@@ -178,19 +187,89 @@ export async function describeFactoryGates(db: Db, childId: string): Promise<Fac
       symbols = sy.length ? { status: "failed", detail: `${sy.length} remoção(ões) de símbolos registrada(s) (ex.: ${sy[0].slice(0, 120)})` } : { status: "passed", detail: "nenhuma remoção registrada nas escritas do Dev" };
     }
   } catch { /* mantém not_run */ }
+
+  // N-6: o diff REAL de apps/ contra o escopo do RFC (o que o runner não enxerga: efeitos colaterais de build).
+  try {
+    const rawScope = opts.scope ?? (Array.isArray(cp?.evolution_scope) ? (cp?.evolution_scope as unknown[]).map(String) : []);
+    const scopeGlobs = rawScope.filter((g) => typeof g === "string" && g.trim());
+    const appsDir = opts.appsDir ?? ((process.env.PROJECT_FILES_ROOT ?? "").trim() ? path.join(process.env.PROJECT_FILES_ROOT as string, childId, "apps") : null);
+    const changed = appsDir ? await listChangedFiles(appsDir) : null;
+    if (changed && scopeGlobs.length) {
+      const foreign = new Set(await detectForeignLockfiles(appsDir as string, await listAllFilesForLockDetection(appsDir as string, changed)));
+      const outside = pathsOutsideScope(changed, scopeGlobs).filter((f) => !foreign.has(f));
+      const note = foreign.size ? ` Lockfile(s) de outro gerenciador de pacotes EXCLUÍDO(S) da publicação: ${[...foreign].slice(0, 3).join(", ")}.` : "";
+      if (outside.length) {
+        const sample = outside.slice(0, 5).join(", ");
+        scope = { status: "failed", detail: `${outside.length} arquivo(s) no diff FORA do \`files_allowed\` do RFC (${sample}${outside.length > 5 ? ", …" : ""}).${note}${scope.status === "failed" ? ` ${scope.detail}.` : ""}` };
+      } else if (scope.status === "failed") {
+        scope = { status: "failed", detail: `${scope.detail}.${note}` };
+      } else {
+        scope = { status: "passed", detail: `diff real (${changed.length} arquivo(s)) dentro do \`files_allowed\` do RFC.${note}` };
+      }
+    } else if (scope.status === "passed") {
+      scope = { status: "passed", detail: `${scope.detail} (diff real de apps/ não conferido: ${changed ? "RFC sem escopo declarado" : "apps/ não é clone git"})` };
+    }
+  } catch { /* o resultado do checkpoint permanece */ }
+
+  try {
+    const bl = cp?.evolution_baseline as Record<string, unknown> | null | undefined;
+    if (bl && typeof bl === "object") {
+      const st = String(bl.status ?? "");
+      const fin = (bl.final ?? null) as Record<string, unknown> | null;
+      const regs = Array.isArray(fin?.regressions) ? (fin?.regressions as unknown[]).length : 0;
+      if (bl.no_tests === true || st === "no_tests") {
+        // N-4: `no_tests` com exit ≠ 0 não é "produto sem testes": o runner de testes SAIU com erro sem medir nenhum (ex.: jest sem configuração de TS).
+        const broken = Number(bl.exit_code ?? 0) > 0;
+        baseline = none(`SEM TESTES: PASS_TO_PASS vazio, nenhuma não-regressão foi verificada${broken ? ` — atenção: o executor saiu com erro (exit ${Number(bl.exit_code)}) e 0 testes medidos; a suíte pode existir mas estar sem configuração/quebrada` : ""}`);
+      }
+      else if (st === "error") baseline = none(`baseline NÃO medida (${String(bl.error ?? "erro de medição").slice(0, 120)}) — sem P2P`);
+      else if (!fin) baseline = none("baseline medida, mas sem resultado final da suíte para comparar (P2P não calculado)");
+      else if (String(fin.status ?? "") === "error") baseline = none("baseline medida, mas a medição final falhou (P2P não calculado)");
+      else if (regs > 0) baseline = { status: "failed", detail: `${regs} regressão(ões) no PASS_TO_PASS` };
+      else baseline = { status: "passed", detail: `baseline medida (${Number(bl.passed ?? 0)} teste(s) passando) e 0 regressões no PASS_TO_PASS` };
+    }
+  } catch { /* mantém not_run */ }
+
   let qa = none("sem registro do QA no diálogo do projeto");
+  let fullTest = none("sem registro da TSK-FULL-TEST");
   try {
     const rows = (await db.query(
       `SELECT event_type, summary_human FROM project_dialogue
-        WHERE project_id = $1 AND (event_type = 'qa.review' OR summary_human ILIKE '%QA reportou QA_FAIL%' OR summary_human ILIKE '%QA atingiu m%ximo%')`,
+        WHERE project_id = $1 AND (event_type = 'qa.review' OR summary_human ILIKE '%QA reportou QA_FAIL%' OR summary_human ILIKE '%QA atingiu m%ximo%' OR summary_human ILIKE '%TASK-FULL-TEST%')
+        ORDER BY created_at ASC`,
       [childId],
     )).rows as Array<{ event_type?: string | null; summary_human?: string | null }>;
-    const unapproved = rows.filter((r) => /n[ãa]o aprovada|QA atingiu m[aá]ximo|BLOCKED \(BLOCKER/i.test(String(r.summary_human ?? "")));
-    const ran = rows.some((r) => r.event_type === "qa.review");
+    const qaRows = rows.filter((r) => !/TASK-FULL-TEST/i.test(String(r.summary_human ?? "")));
+    const unapproved = qaRows.filter((r) => /n[ãa]o aprovada|QA atingiu m[aá]ximo|BLOCKED \(BLOCKER/i.test(String(r.summary_human ?? "")));
+    const ran = qaRows.some((r) => r.event_type === "qa.review");
     if (unapproved.length) qa = { status: "failed", detail: `${unapproved.length} task(s) sem aprovação do QA após os reworks` };
     else if (ran) qa = { status: "passed", detail: "QA executado, sem reprovação final registrada" };
-  } catch (e) { qa = none(`leitura do diálogo falhou (${e instanceof Error ? e.message.slice(0, 80) : "erro"})`); }
-  return { scope, symbols, qa };
+
+    // TSK-FULL-TEST: o ÚLTIMO registro da execução manda (o diálogo está em ordem cronológica).
+    const ftMsgs = rows.map((r) => String(r.summary_human ?? "")).filter((m) => /TASK-FULL-TEST/i.test(m));
+    const verdict = [...ftMsgs].reverse().find((m) => /NÃO EXECUTADA|NOT_RUN|REPROVADA|\(Claude Code\):\s*aprovada/i.test(m));
+    const taskRow = (await db.query("SELECT status FROM project_tasks WHERE project_id = $1 AND task_id = 'TSK-FULL-TEST'", [childId])).rows[0] as { status?: string } | undefined;
+    const tstatus = String(taskRow?.status ?? "").toUpperCase();
+    if (tstatus === "CANCELLED" || (verdict && /NÃO EXECUTADA|NOT_RUN/i.test(verdict))) fullTest = none("NOT_RUN: a TSK-FULL-TEST não executou (task CANCELLED) — a validação e2e NÃO ocorreu");
+    else if (verdict && /REPROVADA/i.test(verdict)) fullTest = { status: "failed", detail: verdict.replace(/^.*?REPROVADA\s*[—-]?\s*/i, "reprovada: ").slice(0, 200) };
+    else if (verdict && (tstatus === "DONE" || tstatus === "QA_PASS")) fullTest = { status: "passed", detail: "executada e aprovada (registro da execução no diálogo)" };
+    else if (tstatus) fullTest = none(`task em '${tstatus}' sem registro de execução aprovada (o aceite pode tê-la fechado sem executar)`);
+  } catch (e) {
+    const why = `leitura do diálogo falhou (${e instanceof Error ? e.message.slice(0, 80) : "erro"})`;
+    qa = none(why); fullTest = none(why);
+  }
+  return { scope, symbols, qa, fullTest, baseline };
+}
+
+/** Todos os caminhos candidatos a lockfile estranho: os alterados + os lockfiles já presentes na mesma pasta (para a regra de gerenciador). */
+async function listAllFilesForLockDetection(appsDir: string, changed: string[]): Promise<string[]> {
+  const { readdir } = await import("node:fs/promises");
+  const dirs = new Set(changed.filter((f) => JS_LOCKFILES[path.posix.basename(f)]).map((f) => path.posix.dirname(f)));
+  const out = new Set(changed);
+  for (const d of dirs) {
+    try { for (const e of await readdir(path.join(appsDir, d))) if (JS_LOCKFILES[e]) out.add(d === "." ? e : `${d}/${e}`); } catch { /* segue */ }
+  }
+  return [...out];
 }
 
 /** Linhas do corpo do PR: cada gate com o seu resultado real; nunca afirma o que não rodou. */
@@ -202,8 +281,10 @@ export function renderGateLines(g: FactoryGateOutcomes): string[] {
     row("Gate de escopo (RFC `files_allowed`)", g.scope),
     row("Símbolos preservados", g.symbols),
     row("QA", g.qa),
+    row("TSK-FULL-TEST (e2e)", g.fullTest),
+    row("Baseline / não-regressão (P2P)", g.baseline),
     "",
-    "_Escopo e símbolos cobrem as escritas do Dev. Revise o diff antes do merge em `dev`._",
+    "_Escopo e símbolos cobrem as escritas do Dev e o diff real de `apps/`. \"Não executado/sem evidência\" NÃO é aprovação. Revise o diff antes do merge em `dev`._",
   ];
 }
 
@@ -238,7 +319,8 @@ export async function buildPullRequestBody(db: Db, childId: string, version: str
       }
     } catch { /* sem changelog no corpo */ }
   }
-  lines.push("", ...renderGateLines(await describeFactoryGates(db, childId)));
+  const scopeGlobs = Array.isArray(extra.evolution_scope) ? (extra.evolution_scope as unknown[]).map(String) : undefined;
+  lines.push("", ...renderGateLines(await describeFactoryGates(db, childId, { scope: scopeGlobs })));
   return lines.filter((l) => l !== undefined).join("\n");
 }
 

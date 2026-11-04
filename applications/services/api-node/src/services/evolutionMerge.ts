@@ -250,7 +250,8 @@ export async function tryAutoMergeEvolution(
     : [];
   if (baselineStatus === "no_tests") {
     if (policy && !flagOn("EVOLUTION_AUTO_MERGE_ALLOW_NO_TESTS")) {
-      return stop({ state: "blocked_no_tests", detail: "baseline sem testes" },
+      const brokenRunner = Number((baseline as { exit_code?: unknown }).exit_code ?? 0) > 0;
+      return stop({ state: "blocked_no_tests", detail: brokenRunner ? "baseline sem testes medidos (o executor de testes saiu com erro: suíte ausente ou sem configuração)" : "baseline sem testes" },
         "⏸️ Merge automático bloqueado: a linha de base não tem testes (PASS_TO_PASS vazio). Confirme manualmente se aceitar o risco.");
     }
   } else if (policy) {
