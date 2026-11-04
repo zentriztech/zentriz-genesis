@@ -73,3 +73,7 @@ docker-compose.override.bedrock.yml
 applications/orchestrator/state/
 
 docker-compose.override.foundry.yml
+
+# Testes do portal (Playwright)
+test-results/
+playwright-report/
