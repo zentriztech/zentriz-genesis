@@ -132,7 +132,7 @@ Evidências `[F2-…]` impressas pelos testes: `matriz {"applied":25,"noop":32,"
 - **Chave `dedupeKey` em `ticket_card_events`:** vale por (ticket, destino, chave); reutilizar a mesma chave em ciclos legítimos diferentes seria tratado como replay.
 - **`projects_count` administrativo (`routes/tenants.ts:144`)** conta rascunhos; ajustar se virar métrica de plano.
 - **Leitores Python de `projects.status`** por lista de negação **não foram inventariados** (lacuna de H §12 continua).
-- **Migrations 148–150 não foram aplicadas em produção**; antes do deploy, repetir a pré-checagem de H (runbook 6.2). 146 segue reservada à outra frente.
+- **Migrations 148–150 não foram aplicadas em produção**; antes do deploy, repetir a pré-checagem de H (runbook 6.2). A numeração 146 não é usada: novas frentes de migration começam em 161 (S-08, relatório T).
 
 ## 7. Fora de escopo (próximas tarefas)
 
