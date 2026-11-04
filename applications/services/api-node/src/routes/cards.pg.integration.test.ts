@@ -296,6 +296,12 @@ describePg("Fase 2 / 2.6 — API de cards (Postgres real)", () => {
     const rv = await post(s, `/api/cards/${B.id}/revalidate`);
     expect(rv.statusCode, rv.body).toBe(200);
     expect(rv.json().base).toMatchObject({ headProjectId: pa.json().childProjectId, headVersion: 2, previousHeadProjectId: s.parentId });
+    // Y-02/Y-08: o HEAD agora (v2) já tem o RFC-0001 do card A; o card B não pode reescrevê-lo ⇒ "Validar" recusa até renumerar.
+    const clash = await post(s, `/api/cards/${B.id}/ready`);
+    expect(clash.statusCode, clash.body).toBe(409);
+    expect(clash.json().code).toBe("CARD_PATH_COLLIDES_WITH_BASE");
+    await pool.query("DELETE FROM project_spec_files WHERE project_id = $1 AND filename = 'RFC-0001-exportar-csv.md'", [B.draftProjectId]);
+    await addRfc(s, B.draftProjectId, { n: 2, compat: "MINOR", nonGoals: true, title: "Filtro por data" });
     expect((await post(s, `/api/cards/${B.id}/ready`)).statusCode).toBe(200);
     const pb = await post(s, `/api/cards/${B.id}/promote`);
     expect(pb.statusCode, pb.body).toBe(201);
@@ -596,12 +602,12 @@ describePg("Fase 2 / 2.6 — API de cards (Postgres real)", () => {
     expect(await eventsOf(c.id)).toEqual(["draft", "ready", "promoted", "in_factory", "ready"]);
     expect(await reopenTicketsOfChild(pool, childId)).toBe(0); // repetir: nada
     // o filho aceito move o HEAD ⇒ outro card pronto sobre a base antiga fica com base vencida
-    const d = await readyCard(s);
+    const d = await readyCard(s, { rfc: { n: 2, compat: "MINOR", nonGoals: true } });
     await pool.query("UPDATE projects SET status = 'accepted' WHERE id = $1", [childId]);
     const pd = await post(s, `/api/cards/${d.id}/promote`);
     expect(pd.json().code).toBe("CARD_BASE_STALE"); // o filho aceito (v2) virou o HEAD; o card pronto antes dele tem base vencida
     // Q1: claim vencido sem efeitos de um card promovido ⇒ ready pela máquina
-    const e = await readyCard(s);
+    const e = await readyCard(s, { rfc: { n: 3, compat: "MINOR", nonGoals: true } });
     const claimed = await pool.query(
       `INSERT INTO projects (tenant_id, created_by, title, status, product_id, parent_project_id, version_number, budget_owner_project_id, extra)
        VALUES ($1,$2,'claim','materializing',$3,$4,9,$4, jsonb_build_object('evolution', true, 'ticket_id', $5::text, 'materialization', jsonb_build_object('lease_until', (now() - interval '1 hour'), 'steps', '{}'::jsonb)))

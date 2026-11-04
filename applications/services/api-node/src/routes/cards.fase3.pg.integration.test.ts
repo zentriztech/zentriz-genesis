@@ -504,7 +504,8 @@ describePg("Fase 3 — backend dos cards (Postgres real)", () => {
     await advanceAutonomyRun(pool, run3);
     const r3 = await runStatus(run3);
     expect(r3.status).toBe("stalled");
-    expect(JSON.stringify(r3.rounds) + (r3.last_error ?? "")).toContain("card_draft, card 'ready'");
+    // Y-23: ao ir a `ready` o card já encerra (stalled) os laços ativos do rascunho; a rodada que ainda chega responde pela trava.
+    expect(JSON.stringify(r3.rounds) + (r3.last_error ?? "")).toMatch(/card_draft, card 'ready'|Card validado \(ready\)/);
     expect(readFileSync(rfcFile, "utf-8")).toBe(rfcBefore);
 
     // (4) iniciar o laço com o card ready: 409 CARD_SPEC_LOCKED (mensagem do card, não 'SPEC_LOCKED' genérico)
