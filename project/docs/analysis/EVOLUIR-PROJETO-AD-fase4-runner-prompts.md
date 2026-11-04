@@ -29,7 +29,7 @@ Novos: `applications/orchestrator/change_kind.py`, `applications/orchestrator/te
 ## Testes
 Python (`/home/ubuntu/.venvs/genesis-py`, de `applications/`: `python -m pytest orchestrator/tests -q -p no:cacheprovider`):
 - Antes (baseline, ANTES de editar): 23 failed, 1179 passed, 3 skipped.
-- Depois: 23 failed, 1196 passed, 3 skipped. As 23 falhas são exatamente as mesmas (diff da lista vazio): test_connect_contracts (2), prompt_census_invoke_raw_gap146 (4), spec_dossier_downstream (1), spec_validator (11), thinking_arm_gap144 (2), workbench_llm_config (1) + 2 restantes da mesma família de ambiente.
+- Depois: 23 failed, 1196 passed, 3 skipped. As 23 falhas são exatamente as mesmas (diff da lista vazio): test_connect_contracts (2), prompt_census_invoke_raw_gap146 (4), spec_dossier_downstream (1), spec_validator (13), thinking_arm_gap144 (2), workbench_llm_config (1) = 23.
 - Mutação: com as fontes revertidas (só os testes novos), 10 dos 17 falham (prompt 3 tipos × 2 origens = 6, Dev com escopo, seed com `card_id`, `_link_tasks_to_card`, checkpoint/aplicação do contexto). Os 7 que passam são invariantes/guardas que por natureza valem antes e depois: derivação pura (módulo novo), regex de ID inalterado, prompt byte-idêntico sem tipo, POST sem card idêntico.
 
 api-node (Postgres efêmero `f4a-pg` na porta **55441**, pois 55432/55440 estavam ocupadas por f4b; container removido ao final; migrations até 160 aplicadas):
