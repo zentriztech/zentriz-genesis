@@ -61,6 +61,33 @@ beforeEach(() => {
   gh.updatePullRequestBranch.mockResolvedValue({ ok: true });
 });
 
+describe("AV / M-4 — escopo FALHOU bloqueia o merge de filho de card", () => {
+  const cardExtra = (gate: unknown) => evolExtra({ evolution_origin: "card", evolution_scope_gate: gate });
+  it("card com gate de escopo `failed`: merge automático → blocked_scope (nunca toca o GitHub)", async () => {
+    process.env.EVOLUTION_AUTO_MERGE = "on";
+    const { db } = makeDb({ row: baseRow(cardExtra({ status: "failed", detail: "1 arquivo(s) FORA do files_allowed (pnpm-lock.yaml)" })) });
+    const r = await tryAutoMergeEvolution(db as never, "child");
+    expect(r.state).toBe("blocked_scope");
+    expect(r.detail).toContain("pnpm-lock.yaml");
+    expect(gh.getPullRequest).not.toHaveBeenCalled();
+  });
+  it("gate `passed`/`not_run`/ausente, ou evolução legada com gate failed: segue o fluxo normal (sem bloqueio novo)", async () => {
+    process.env.EVOLUTION_AUTO_MERGE = "on";
+    for (const extra of [cardExtra({ status: "passed", detail: "ok" }), cardExtra({ status: "not_run", detail: "x" }), cardExtra(undefined),
+      evolExtra({ evolution_scope_gate: { status: "failed", detail: "legada" } })]) {
+      const { db } = makeDb({ row: baseRow(extra) });
+      expect((await tryAutoMergeEvolution(db as never, "child")).state).toBe("merged");
+    }
+  });
+  it("a sonda (evaluateOnly) e o force NÃO usam essa trava (a confirmação específica é da rota)", async () => {
+    const { db } = makeDb({ row: baseRow(cardExtra({ status: "failed", detail: "x" })) });
+    expect((await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true })).state).toBe("would_merge");
+    process.env.EVOLUTION_AUTO_MERGE = "off";
+    const { db: db2 } = makeDb({ row: baseRow(cardExtra({ status: "failed", detail: "x" })) });
+    expect((await tryAutoMergeEvolution(db2 as never, "child", { force: true })).state).toBe("merged");
+  });
+});
+
 describe("tryAutoMergeEvolution — política (não-force)", () => {
   it("flag OFF → skipped_flag (nada muda)", async () => {
     const { db } = makeDb({ row: baseRow(evolExtra()) });

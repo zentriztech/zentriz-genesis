@@ -19,6 +19,7 @@ import type { Pool } from "pg";
 import { resolveLineageRoot } from "./lineage.js";
 import { ticketStamp } from "./tickets.js";
 import { readEvolutionCheckpoint } from "./evolutionState.js";
+import { scopeGateFailure } from "../lib/evolutionScope.js";
 import { getPullRequest, mergePullRequest, updatePullRequestBranch } from "./github.js";
 
 type Db = Pick<Pool, "query">;
@@ -40,6 +41,7 @@ export type MergeState =
   | "blocked_major"
   | "blocked_compat_implicit"
   | "blocked_regressions"
+  | "blocked_scope"
   | "blocked_no_tests"
   | "blocked_no_evidence"
   | "blocked_head_moved"
@@ -233,6 +235,16 @@ export async function tryAutoMergeEvolution(
     if (COMPAT_RANK[compat] > COMPAT_RANK[maxAutoCompat()]) {
       return stop({ state: "blocked_major", detail: `compat ${compat} acima do teto ${maxAutoCompat()}` },
         `⏸️ Merge automático bloqueado: compatibilidade ${compat.toUpperCase()} acima do teto configurado (${maxAutoCompat().toUpperCase()}).`);
+    }
+  }
+
+  // 4b. Escopo (AV/M-4): filho de card com arquivo fora do `files_allowed` NUNCA é mergeado em silêncio. Vale para o merge AUTOMÁTICO; o manual
+  // exige a confirmação específica (`confirmScope`) na rota, que registra quem assumiu o risco.
+  if (!force && !evaluate) {
+    const sf = scopeGateFailure(extra);
+    if (sf) {
+      return stop({ state: "blocked_scope", detail: sf },
+        `⏸️ Merge automático bloqueado: o gate de escopo FALHOU (${sf}). Revise o diff e use "Mergear agora" confirmando o escopo.`);
     }
   }
 

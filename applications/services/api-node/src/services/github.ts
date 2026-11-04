@@ -488,7 +488,7 @@ export async function pushProjectFiles(
   projectFilesRoot: string,
   projectId: string,
   opts: { syncDeletes?: boolean; messageSuffix?: string; excludeForeignLockfiles?: boolean } = {},
-): Promise<{ sha: string; fileCount: number; deleted?: number; deletionsSkipped?: string; excludedLockfiles?: string[] }> {
+): Promise<{ sha: string; fileCount: number; deleted?: number; deletionsSkipped?: string; excludedLockfiles?: string[]; excludedGenerated?: string[] }> {
   const { readdir, stat, readFile } = await import("fs/promises");
   const pathMod = await import("path");
 
@@ -551,7 +551,22 @@ export async function pushProjectFiles(
     }
   }
 
-  if (allFiles.length === 0) return { sha: "", fileCount: 0, excludedLockfiles };
+  // AV/M-3: em evolução, o que o `.gitignore` do clone ignora e os artefatos gerados NÃO rastreados (build/, out/, venv/, .env…) não vão ao PR.
+  // O que o clone já rastreia continua sendo do produto. Arquivo fora do `files_allowed` NÃO é filtrado aqui: precisa aparecer no gate de
+  // escopo (e bloquear o merge sem confirmação), não sumir em silêncio.
+  let excludedGenerated: string[] = [];
+  if (opts.excludeForeignLockfiles) {
+    const { filterPublishable } = await import("../lib/evolutionScope.js");
+    const { excluded } = await filterPublishable(pathMod.join(projectFilesRoot, projectId, "apps"), allFiles.map((f) => f.relativePath));
+    if (excluded.length) {
+      const drop = new Set(excluded);
+      for (let i = allFiles.length - 1; i >= 0; i--) if (drop.has(allFiles[i].relativePath)) allFiles.splice(i, 1);
+      excludedGenerated = excluded;
+      console.warn(`[GitHub] push ${projectId}: ${excluded.length} artefato(s) gerado(s)/ignorado(s) NÃO publicado(s) (ex.: ${excluded.slice(0, 3).join(", ")})`);
+    }
+  }
+
+  if (allFiles.length === 0) return { sha: "", fileCount: 0, excludedLockfiles, excludedGenerated };
 
   const octokit = await getOctokitForInstallation(installationId);
 
@@ -664,7 +679,7 @@ export async function pushProjectFiles(
     }
   }
 
-  return { sha: currentSha, fileCount: allFiles.length, deleted, deletionsSkipped, excludedLockfiles };
+  return { sha: currentSha, fileCount: allFiles.length, deleted, deletionsSkipped, excludedLockfiles, excludedGenerated };
 }
 
 export async function createBranchIfNotExists(

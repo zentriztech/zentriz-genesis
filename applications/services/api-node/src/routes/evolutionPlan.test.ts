@@ -209,6 +209,38 @@ describe("POST /api/projects/:id/evolution/merge (M1)", () => {
     }
   });
 
+  it("AV / M-4: escopo FALHOU num card exige `confirmScope` próprio; `confirm: MERGE` sozinho não basta; a trilha é gravada antes do merge", async () => {
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor", evolution_origin: "card",
+      evolution_scope_gate: { status: "failed", detail: "1 arquivo(s) FORA do files_allowed (x.ts)" } } };
+    let r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: { confirm: "MERGE" } });
+    expect(r.statusCode).toBe(400);
+    expect(JSON.parse(r.body)).toMatchObject({ code: "CONFIRM_REQUIRED", blockedBy: "blocked_scope" });
+    expect(merge.tryAutoMergeEvolution).not.toHaveBeenCalledWith(expect.anything(), PROJ, expect.objectContaining({ force: true }));
+    r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: { confirmScope: "OUT_OF_SCOPE", reason: "revisei o diff" } });
+    expect(r.statusCode).toBe(200);
+    const trail = queries.findIndex((q) => /evolution_merge_scope_confirmation/.test(String(q.params[1] ?? "")));
+    expect(trail).toBeGreaterThanOrEqual(0);
+    expect(JSON.parse(String(queries[trail].params[1])).evolution_merge_scope_confirmation).toMatchObject({ by_user_id: USER_ID, reason: "revisei o diff" });
+    expect(merge.tryAutoMergeEvolution).toHaveBeenCalledWith(expect.anything(), PROJ, { force: true, actorUserId: USER_ID });
+  });
+
+  it("AV / M-4: trilha de escopo indisponível ⇒ 503 e NENHUM merge (fail-closed)", async () => {
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_origin: "card", evolution_scope_gate: { status: "failed", detail: "x" } } };
+    {
+      // o mock global só falha para `evolution_merge_confirmation`; a trilha do escopo usa outra chave, então simulamos a queda do pool
+      const { pool } = await import("../db/client.js");
+      const real = pool.query;
+      (pool as { query: unknown }).query = async (sql: string, params: unknown[] = []) => {
+        if (/evolution_merge_scope_confirmation/.test(String(params[1] ?? ""))) throw new Error("db down");
+        return (real as (a: string, b: unknown[]) => Promise<unknown>)(sql, params);
+      };
+      const r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: { confirmScope: "OUT_OF_SCOPE" } });
+      (pool as { query: unknown }).query = real;
+      expect(r.statusCode).toBe(503);
+      expect(merge.tryAutoMergeEvolution).not.toHaveBeenCalledWith(expect.anything(), PROJ, expect.objectContaining({ force: true }));
+    }
+  });
+
   it("🔴 GAP-59: sem evidência de testes → 409 imediato — `confirm` NÃO contorna fail-closed", async () => {
     probeResult = { state: "blocked_no_evidence", detail: "checkpoint / baseline PASS_TO_PASS ausente" };
     project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };

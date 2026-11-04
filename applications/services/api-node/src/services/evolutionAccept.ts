@@ -324,6 +324,24 @@ export async function buildPullRequestBody(db: Db, childId: string, version: str
   return lines.filter((l) => l !== undefined).join("\n");
 }
 
+/**
+ * AV/M-4: grava o veredito do gate de ESCOPO (`files_allowed` do RFC × diff real de `apps/`) em `extra.evolution_scope_gate`, para o merge
+ * poder exigir confirmação explícita quando FALHOU (antes era só texto do PR). Só para filho de CARD (`evolution_origin='card'`);
+ * evolução legada fica como estava. Best-effort: sem gravação, o merge não bloqueia por escopo (o texto do PR segue declarando).
+ */
+export async function recordScopeGate(db: Db, childId: string, extra: Record<string, unknown>): Promise<GateOutcome | null> {
+  if (extra.evolution_origin !== "card") return null;
+  try {
+    const scopeGlobs = Array.isArray(extra.evolution_scope) ? (extra.evolution_scope as unknown[]).map(String) : undefined;
+    const { scope } = await describeFactoryGates(db, childId, { scope: scopeGlobs });
+    await db.query(
+      "UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1",
+      [childId, JSON.stringify({ evolution_scope_gate: { status: scope.status, detail: scope.detail.slice(0, 600), at: new Date().toISOString() } })],
+    );
+    return scope;
+  } catch { return null; }
+}
+
 export function hasGitDir(appsDir: string): boolean {
   try { return fs.existsSync(path.join(appsDir, ".git")); } catch { return false; }
 }
@@ -399,6 +417,7 @@ export async function runEvolutionAcceptFlow(db: Db, childId: string, opts: { re
   try {
     const { pushEvolutionToGitHub } = await import("./githubPush.js");
     const body = await buildPullRequestBody(db, childId, version, { ...extra, evolution_compat: compat });
+    await recordScopeGate(db, childId, extra);   // AV/M-4: o merge lê este veredito (card com escopo FALHOU exige confirmação)
     const push = await pushEvolutionToGitHub(childId, { versionLabel: version, prBody: body, title });
     // N1: `fallback_new_repo` NÃO é sucesso por si — só conta se o repositório foi realmente criado e registrado (`push.ok`).
     pushOk = push.ok || push.mode === "skipped";
