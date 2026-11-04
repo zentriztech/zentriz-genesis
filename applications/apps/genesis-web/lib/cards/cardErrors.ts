@@ -71,6 +71,12 @@ export function errorDetail(err: ApiError): string {
       return b.from && b.to ? `De “${String(b.from)}” para “${String(b.to)}”. Atualize a tela e confira o estado do card.` : "";
     case "CARD_NOT_READY":
       return b.state === "refining" ? "O card voltou a “Refinando”: valide de novo antes de promover." : "";
+    case "CARD_PREVIOUS_UNMERGED": {
+      const who = [b.blockingCardCode, b.blockingPrNumber ? `PR #${String(b.blockingPrNumber)}` : null].filter(Boolean).join(" · ");
+      return `${who ? `Bloqueio: ${who}. ` : ""}${typeof b.action === "string" ? b.action : ""}`.trim();
+    }
+    case "MATERIALIZATION_FAILED":
+      return b.reason === "CODE_BASE_FETCH_FAILED" ? "Não foi possível buscar o código do repositório; nada foi copiado do disco. Tente promover de novo." : "";
     case "MATERIALIZATION_IN_PROGRESS":
     case "EVOLUTION_BUSY":
       return err.retryAfterSeconds ? `Tente de novo em ${err.retryAfterSeconds} s.` : "";

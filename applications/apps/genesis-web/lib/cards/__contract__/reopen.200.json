@@ -26,7 +26,10 @@
       "createdAt": "2026-11-04T12:00:00.000Z",
       "updatedAt": "2026-11-04T12:00:00.000Z",
       "promotedAt": null,
-      "deliveredAt": null
+      "deliveredAt": null,
+      "factoryHealth": null,
+      "factoryGates": null,
+      "codeBaseWarning": null
     },
     "message": "Card reaberto: a spec voltou a aceitar edição. Valide de novo antes de promover."
   }

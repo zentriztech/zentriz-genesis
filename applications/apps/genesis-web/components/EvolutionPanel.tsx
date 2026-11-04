@@ -14,9 +14,11 @@ import Link from "next/link";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
+import Checkbox from "@mui/material/Checkbox";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
 import Divider from "@mui/material/Divider";
+import FormControlLabel from "@mui/material/FormControlLabel";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
@@ -32,10 +34,24 @@ interface EvolutionState {
   baseline: { status?: string; passed?: number; failed?: number; total?: number; no_tests?: boolean; final?: { passed?: number; failed?: number; regressions?: string[] } } | null;
   publish: { pending: boolean; branch: string | null; repo: string | null; prUrl: string | null; compareUrl: string | null; version: string | null; supersedes: string | null; acceptedAt: string | null; prNumber?: number | null };
   // Bloco 4 M1: estado do merge do PR evolution/vN → dev (degrada p/ null se a API não enviar).
-  merge?: { state: string | null; sha: string | null; at: string | null; method: string | null; actor: string | null; detail: string | null; prNumber: number | null; acceptedPermissions?: string | null } | null;
+  merge?: { state: string | null; sha: string | null; at: string | null; method: string | null; actor: string | null; detail: string | null; prNumber: number | null; acceptedPermissions?: string | null;
+    confirmation?: { by_email?: string | null; by_user_id?: string; at?: string; blocked_by?: string; risk?: string; detail?: string | null; reason?: string | null } | null } | null;
   // Bloco 4 M7 (Python): métricas de reescrita do Dev (do checkpoint); null se ausente.
+  // 4.5c: os 5 gates REAIS da fábrica (mesmos do texto do PR), o veredito de escopo gravado no aceite (com os arquivos fora do escopo)
+  // e a confirmação de escopo já registrada.
+  factoryGates?: Partial<Record<GateKey, { status: "passed" | "failed" | "not_run"; detail: string }>> | null;
+  scopeGate?: { status?: string; detail?: string; files?: string[]; at?: string } | null;
+  scopeConfirmation?: { by_email?: string | null; by_user_id?: string; at?: string; detail?: string; reason?: string | null } | null;
   rewriteStats?: { files_rewritten?: number; lines_added?: number; lines_removed?: number; symbols_preserved?: number } | Record<string, unknown> | null;
 }
+type GateKey = "scope" | "symbols" | "qa" | "fullTest" | "baseline";
+const GATE_NAME: Record<GateKey, string> = { scope: "Escopo (RFC files_allowed)", symbols: "Símbolos preservados", qa: "QA", fullTest: "TSK-FULL-TEST (e2e)", baseline: "Baseline / não-regressão (P2P)" };
+const GATE_ORDER: GateKey[] = ["scope", "symbols", "qa", "fullTest", "baseline"];
+const GATE_STATUS: Record<"passed" | "failed" | "not_run", { label: string; color: ChipColor }> = {
+  passed: { label: "passou", color: "success" }, failed: { label: "FALHOU", color: "error" }, not_run: { label: "não executado / sem evidência", color: "warning" },
+};
+/** Texto da confirmação de escopo que a API exige (`confirmScope`). */
+const SCOPE_CONFIRM_TEXT = "OUT_OF_SCOPE";
 interface TreeFile { path: string; isPrimary: boolean }
 interface VersionEntry { id: string; versionNumber: number; status: string; isCurrent: boolean; isServiceCurrent?: boolean; supersededBy?: string | null; evolutionVersion?: string | null }
 
@@ -50,6 +66,7 @@ const MERGE_STATE_INFO: Record<string, { label: string; color: ChipColor }> = {
   blocked_protection: { label: "Proteção de branch", color: "warning" },
   blocked_checks: { label: "Checks pendentes", color: "warning" },
   blocked_major: { label: "MAJOR — exige confirmação", color: "warning" },
+  blocked_scope: { label: "Escopo violado — exige confirmação dupla", color: "error" },
   blocked_compat_implicit: { label: "Compatibilidade não declarada", color: "warning" },
   blocked_regressions: { label: "Regressões nos testes", color: "error" },
   blocked_no_tests: { label: "Sem testes (base)", color: "warning" },
@@ -87,6 +104,11 @@ export default function EvolutionPanel({ projectId, productId }: { projectId: st
    * "exige confirmação" e não tinha onde digitar MERGE — erro sem saída.
    */
   const [confirmDemanded, setConfirmDemanded] = useState(false);
+  // 4.5c — merge com escopo violado: confirmação DUPLA (MERGE + OUT_OF_SCOPE), ciência dos arquivos e motivo opcional.
+  const [scopeDemanded, setScopeDemanded] = useState<{ detail: string; files: string[] } | null>(null);
+  const [scopeText, setScopeText] = useState("");
+  const [scopeAck, setScopeAck] = useState(false);
+  const [reason, setReason] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
@@ -103,16 +125,17 @@ export default function EvolutionPanel({ projectId, productId }: { projectId: st
   }, [projectId]);
   useEffect(() => { void load(); }, [load]);
 
-  const handleMerge = useCallback(async (confirm?: string) => {
+  const handleMerge = useCallback(async (body: { confirm?: string; confirmScope?: string; reason?: string } = {}) => {
     setMerging(true); setMergeMsg(null);
     try {
-      const res = await apiPost<{ ok: boolean; state: string; detail: string | null }>(
-        `/api/projects/${projectId}/evolution/merge`,
-        confirm ? { confirm } : {},
-      );
+      const payload: Record<string, string> = {};
+      if (body.confirm) payload.confirm = body.confirm;
+      if (body.confirmScope) payload.confirmScope = body.confirmScope;
+      if (body.reason?.trim()) payload.reason = body.reason.trim();
+      const res = await apiPost<{ ok: boolean; state: string; detail: string | null }>(`/api/projects/${projectId}/evolution/merge`, payload);
       if (res.ok) {
         setMergeMsg({ severity: "success", text: "Evolução mergeada em 'dev'." });
-        setConfirmText(""); setConfirmDemanded(false);
+        setConfirmText(""); setConfirmDemanded(false); setScopeDemanded(null); setScopeText(""); setScopeAck(false); setReason("");
       } else {
         const info = MERGE_STATE_INFO[res.state];
         setMergeMsg({ severity: "warning", text: `Não mergeado (${info?.label ?? res.state})${res.detail ? `: ${res.detail}` : ""}.` });
@@ -122,8 +145,14 @@ export default function EvolutionPanel({ projectId, productId }: { projectId: st
       // 400 CONFIRM_REQUIRED chega aqui como ApiError — a mensagem já NOMEIA o risco (GAP-59) e o
       // campo de confirmação passa a aparecer, mesmo que o estado gravado não indicasse risco nenhum.
       const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : "Falha ao mergear";
-      if (e instanceof ApiError && e.code === "CONFIRM_REQUIRED") setConfirmDemanded(true);
-      setMergeMsg({ severity: e instanceof ApiError && e.code === "CONFIRM_REQUIRED" ? "warning" : "error", text: msg });
+      const required = e instanceof ApiError && e.code === "CONFIRM_REQUIRED";
+      if (required) {
+        const b = (e as ApiError).body ?? {};
+        if (b.state === "blocked_scope") {
+          setScopeDemanded({ detail: String(b.detail ?? ""), files: Array.isArray(b.files) ? b.files.map(String) : [] });
+        } else setConfirmDemanded(true);
+      }
+      setMergeMsg({ severity: required ? "warning" : "error", text: msg });
     } finally { setMerging(false); }
   }, [projectId, load]);
 
@@ -161,9 +190,15 @@ export default function EvolutionPanel({ projectId, productId }: { projectId: st
   const hasPr = typeof state.publish.prNumber === "number" || (merge?.prNumber ?? null) !== null;
   const isMerged = mergeState === "merged";
   const commitHref = merge?.sha && state.publish.repo ? `https://github.com/${state.publish.repo}/commit/${merge.sha}` : null;
+  // Escopo violado: veredito gravado no aceite (diff real × files_allowed) OU a API tendo exigido agora. Exige DUAS confirmações.
+  const scopeFailed = state.scopeGate?.status === "failed" || mergeState === "blocked_scope" || scopeDemanded !== null;
+  const scopeFiles = scopeDemanded?.files?.length ? scopeDemanded.files : (state.scopeGate?.files ?? []);
+  const scopeDetail = scopeDemanded?.detail || state.scopeGate?.detail || merge?.detail || "";
+  const scopeReady = !scopeFailed || (scopeAck && scopeText === SCOPE_CONFIRM_TEXT && confirmText === "MERGE");
+  const gateEntries = GATE_ORDER.filter((k) => state.factoryGates?.[k]);
   // Confirmação exigida: MAJOR, estados de risco JÁ gravados, ou o back-end tendo pedido agora
   // (GAP-59 — a sonda vê riscos que o estado gravado não registra). O back-end é a trava real.
-  const needsConfirm = confirmDemanded || (state.compat ?? "").toLowerCase() === "major" || (mergeState ? MERGE_CONFIRM_STATES.has(mergeState) : false);
+  const needsConfirm = scopeFailed || confirmDemanded || (state.compat ?? "").toLowerCase() === "major" || (mergeState ? MERGE_CONFIRM_STATES.has(mergeState) : false);
   const rs = state.rewriteStats as { files_rewritten?: number; lines_added?: number; lines_removed?: number; symbols_preserved?: number } | null;
   const showMerge = hasPr && !state.publish.pending;
 
@@ -188,21 +223,63 @@ export default function EvolutionPanel({ projectId, productId }: { projectId: st
           <Typography variant="caption" color="error.main" sx={{ display: "block", mb: 0.5 }}>Permissões que faltam: <code>{merge.acceptedPermissions}</code></Typography>
         )}
         {mergeMsg && <Alert severity={mergeMsg.severity} sx={{ py: 0, mb: 0.75, fontSize: "0.72rem" }}>{mergeMsg.text}</Alert>}
+        {!isMerged && scopeFailed && (
+          <Alert severity="error" role="alert" data-testid="scope-confirm" sx={{ mb: 1, "& .MuiAlert-message": { minWidth: 0, overflowWrap: "anywhere" } }}>
+            <Typography variant="body2" fontWeight={700}>Escopo violado: o diff tem arquivo(s) fora do que o RFC permitia mudar</Typography>
+            <Typography variant="body2" sx={{ mt: 0.25 }}>
+              Mergear leva para <code>dev</code> uma mudança que o card não previu{scopeDetail ? ` (${scopeDetail})` : ""}. A decisão fica registrada com o seu nome e o motivo abaixo.
+            </Typography>
+            {scopeFiles.length > 0 ? (
+              <Box component="ul" aria-label="Arquivos fora do escopo" data-testid="scope-files" sx={{ m: 0, mt: 0.5, pl: 2.5, fontFamily: "monospace", fontSize: "0.72rem" }}>
+                {scopeFiles.map((f) => <li key={f}>{f}</li>)}
+              </Box>
+            ) : (
+              <Typography variant="caption" sx={{ display: "block", mt: 0.5 }}>A lista de arquivos não foi gravada; confira o diff do PR antes de confirmar.</Typography>
+            )}
+            <FormControlLabel sx={{ mt: 0.5, alignItems: "flex-start" }}
+              control={<Checkbox size="small" checked={scopeAck} onChange={(e) => setScopeAck(e.target.checked)} disabled={merging} />}
+              label={<Typography variant="body2">Revisei o diff e entendo que estes arquivos fora do escopo irão para dev.</Typography>} />
+            <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
+              <TextField size="small" label={`Confirmação de escopo: digite ${SCOPE_CONFIRM_TEXT}`} value={scopeText} onChange={(e) => setScopeText(e.target.value)} disabled={merging}
+                inputProps={{ "aria-label": `Confirmação de escopo, digite ${SCOPE_CONFIRM_TEXT}` }} sx={{ width: 260 }} />
+              <TextField size="small" label="Motivo (opcional)" value={reason} onChange={(e) => setReason(e.target.value)} disabled={merging} sx={{ width: 260 }} />
+            </Stack>
+          </Alert>
+        )}
         {!isMerged && (
           <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
             {needsConfirm && (
               <TextField size="small" placeholder="Digite MERGE" value={confirmText} onChange={(e) => setConfirmText(e.target.value)}
+                inputProps={{ "aria-label": "Confirmação do merge, digite MERGE" }}
                 disabled={merging} sx={{ width: 140, "& input": { fontSize: "0.72rem", py: 0.5 } }} />
             )}
             <Button size="small" variant="contained" color={needsConfirm ? "warning" : "primary"}
-              disabled={merging || (needsConfirm && confirmText !== "MERGE")}
-              onClick={() => void handleMerge(needsConfirm ? confirmText : undefined)}
+              disabled={merging || (needsConfirm && confirmText !== "MERGE") || !scopeReady}
+              onClick={() => void handleMerge(scopeFailed
+                ? { confirm: confirmText, confirmScope: scopeText, reason }
+                : needsConfirm ? { confirm: confirmText, reason } : {})}
               startIcon={merging ? <CircularProgress size={12} /> : undefined}
               sx={{ fontSize: "0.68rem", textTransform: "none" }}>
-              Mergear agora
+              {scopeFailed ? "Mergear mesmo fora do escopo" : "Mergear agora"}
             </Button>
-            {needsConfirm && <Typography variant="caption" color="warning.main">Mudança de risco — confirme digitando MERGE.</Typography>}
+            {needsConfirm && <Typography variant="caption" color="warning.main">{scopeFailed ? "Confirmação dupla: MERGE + " + SCOPE_CONFIRM_TEXT + " + ciência dos arquivos." : "Mudança de risco — confirme digitando MERGE."}</Typography>}
           </Stack>
+        )}
+        {(merge?.confirmation || state.scopeConfirmation) && (
+          <Box data-testid="merge-confirmations" sx={{ mt: 0.75 }}>
+            {merge?.confirmation && (
+              <Typography variant="caption" sx={{ display: "block" }}>
+                Merge confirmado por <b>{merge.confirmation.by_email ?? merge.confirmation.by_user_id ?? "—"}</b>{merge.confirmation.at ? ` em ${new Date(merge.confirmation.at).toLocaleString("pt-BR")}` : ""}
+                {merge.confirmation.risk ? ` apesar de: ${merge.confirmation.risk}` : ""}{merge.confirmation.reason ? ` — motivo: ${merge.confirmation.reason}` : ""}.
+              </Typography>
+            )}
+            {state.scopeConfirmation && (
+              <Typography variant="caption" sx={{ display: "block" }}>
+                Escopo violado confirmado por <b>{state.scopeConfirmation.by_email ?? state.scopeConfirmation.by_user_id ?? "—"}</b>{state.scopeConfirmation.at ? ` em ${new Date(state.scopeConfirmation.at).toLocaleString("pt-BR")}` : ""}
+                {state.scopeConfirmation.reason ? ` — motivo: ${state.scopeConfirmation.reason}` : ""}.
+              </Typography>
+            )}
+          </Box>
         )}
       </Section>
 
@@ -276,6 +353,24 @@ export default function EvolutionPanel({ projectId, productId }: { projectId: st
           </Box>
         ))}
       </Section>
+
+      {gateEntries.length > 0 && (
+        <Section title="Gates da fábrica (5)" hint="O resultado REAL de cada gate, o mesmo que o texto do PR afirma. “Não executado” não é aprovação.">
+          <Box component="ul" aria-label="Gates da fábrica" data-testid="factory-gates" sx={{ m: 0, p: 0, listStyle: "none" }}>
+            {gateEntries.map((k) => {
+              const g = state.factoryGates![k]!;
+              return (
+                <li key={k}>
+                  <Stack direction="row" spacing={0.75} alignItems="flex-start" sx={{ mb: 0.5 }}>
+                    <Chip size="small" variant="outlined" color={GATE_STATUS[g.status].color} label={`${GATE_NAME[k]}: ${GATE_STATUS[g.status].label}`} sx={{ fontSize: "0.62rem", height: "auto", "& .MuiChip-label": { whiteSpace: "normal" } }} />
+                    <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>{g.detail}</Typography>
+                  </Stack>
+                </li>
+              );
+            })}
+          </Box>
+        </Section>
+      )}
 
       <Section title="Não-regressão (suíte legada)" hint="Baseline antes das mudanças × resultado final; teste que passava e agora falha = regressão.">
         {!state.baseline ? (

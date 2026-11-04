@@ -86,6 +86,7 @@ const state = s.literal(...STATES);
 const kindS = s.literal("evolution", "fix", "feature");
 const stage = s.literal("draft", "refining", "ready", "promoted", "in_factory", "delivered");
 
+const gateS = s.object({ status: s.literal("passed", "failed", "not_run"), detail: s.string });
 export const cardSummarySchema = s.object(cardSummaryShape());
 
 const attachmentSchema = s.object({
@@ -111,6 +112,9 @@ function cardSummaryShape() {
     state, status: s.string, origin: s.string, externalRef: s.nullable(s.string), blockedReason: s.nullable(s.string),
     draftProjectId: s.nullable(s.string), childProjectId: s.nullable(s.string), executionStatus: s.nullable(s.string), executionTitle: s.nullable(s.string),
     prUrl: s.nullable(s.string), attachmentsCount: s.number, createdAt: s.date, updatedAt: s.date, promotedAt: s.nullable(s.date), deliveredAt: s.nullable(s.date),
+    factoryHealth: s.nullable(s.literal("ok", "attention", "failed")),
+    factoryGates: s.nullable(s.object({ scope: gateS, symbols: gateS, qa: gateS, fullTest: gateS, baseline: gateS })),
+    codeBaseWarning: s.nullable(s.string),
   };
 }
 
