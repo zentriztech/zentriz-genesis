@@ -92,3 +92,43 @@ describe("pushProjectFiles — commit em lote carimbado", () => {
     expect(paths.sort()).toEqual(["a.txt", "package-lock.json", "pnpm-lock.yaml"]);
   });
 });
+
+describe("AV / M-3 — pushProjectFiles de evolução respeita .gitignore e não publica artefato gerado", () => {
+  let root: string;
+  beforeEach(() => { root = mkdtempSync(join(tmpdir(), "av-m3-push-")); });
+  afterEach(() => { __setOctokitFactoryForTests(null); rmSync(root, { recursive: true, force: true }); });
+
+  it("evolução: build/ não rastreado, .env e arquivo ignorado ficam fora; fonte nova e arquivo fora do files_allowed SEGUEM (o gate de escopo os mostra)", async () => {
+    const { execFileSync } = await import("child_process");
+    const apps = join(root, "p1", "apps");
+    mkdirSync(join(apps, "src"), { recursive: true }); mkdirSync(join(apps, "build"), { recursive: true });
+    const sh = (...a: string[]) => execFileSync("git", ["-C", apps, "-c", "user.email=a@b.c", "-c", "user.name=t", ...a]);
+    execFileSync("git", ["init", "-q", apps]);
+    writeFileSync(join(apps, ".gitignore"), "*.log\n");
+    writeFileSync(join(apps, "src", "a.ts"), "1");
+    sh("add", "-A"); sh("commit", "-qm", "base");
+    writeFileSync(join(apps, "src", "nova.ts"), "n");
+    writeFileSync(join(apps, "alheio.ts"), "fora do files_allowed");
+    writeFileSync(join(apps, "build", "bundle.js"), "gerado");
+    writeFileSync(join(apps, "debug.log"), "log");
+    writeFileSync(join(apps, ".env"), "TOKEN=x");
+    const paths: string[] = [];
+    const git = {
+      getRef: vi.fn(async () => ({ data: { object: { sha: "c0" } } })),
+      getCommit: vi.fn(async () => ({ data: { tree: { sha: "t0" } } })),
+      createBlob: vi.fn(async () => ({ data: { sha: "b1" } })),
+      createTree: vi.fn(async (o: { tree: Array<{ path: string }> }) => { paths.push(...o.tree.map((t) => t.path)); return { data: { sha: "t1" } }; }),
+      createCommit: vi.fn(async () => ({ data: { sha: "c1" } })),
+      updateRef: vi.fn(async () => ({})),
+      getTree: vi.fn(async () => ({ data: { tree: [], truncated: false } })),
+    };
+    __setOctokitFactoryForTests(async () => ({ git, repos: {}, pulls: {} }) as never);
+    const r = await pushProjectFiles(1, "o", "r", "evolution/v2", root, "p1", { syncDeletes: false, excludeForeignLockfiles: true });
+    expect(paths.sort()).toEqual([".gitignore", "alheio.ts", "src/a.ts", "src/nova.ts"]);
+    expect(r.excludedGenerated).toEqual([".env", "build/bundle.js", "debug.log"]);
+    // fluxo de projeto novo (sem a opção) não muda: publica tudo o que o walk encontra
+    paths.length = 0;
+    await pushProjectFiles(1, "o", "r", "main", root, "p1", { syncDeletes: false });
+    expect(paths).toContain("build/bundle.js");
+  });
+});

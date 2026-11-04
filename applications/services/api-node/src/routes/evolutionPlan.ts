@@ -228,7 +228,7 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
   // coisa e nada é gravado ⇒ `evolution_merge_state` vazio ⇒ o botão mergeava com regressões sem pedir
   // confirmação e sem contar ao humano que havia regressões. A pergunta certa não é "o que bloqueou
   // antes?", é "o que o `force` vai contornar AGORA?".
-  app.post<{ Params: { id: string }; Body: { confirm?: string; reason?: string } }>(
+  app.post<{ Params: { id: string }; Body: { confirm?: string; confirmScope?: string; reason?: string } }>(
     "/api/projects/:id/evolution/merge",
     { bodyLimit: 4 * 1024 },
     async (request, reply) => {
@@ -245,6 +245,18 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
         return reply.status(409).send({ code: "NO_PR", message: "Não há PR publicado para esta evolução (verifique a publicação)." });
       }
       const { tryAutoMergeEvolution } = await import("../services/evolutionMerge.js");
+      const { scopeGateFailure } = await import("../lib/evolutionScope.js");
+
+      // AV/M-4: escopo do RFC violado num filho de card exige confirmação PRÓPRIA (`confirmScope: "OUT_OF_SCOPE"`), independente do
+      // `confirm: "MERGE"` dos demais riscos — um "MERGE" dado por causa de regressões não cobre arquivos fora do `files_allowed`.
+      const scopeFail = scopeGateFailure(ex);
+      if (scopeFail && (request.body?.confirmScope ?? "") !== "OUT_OF_SCOPE") {
+        return reply.status(400).send({
+          code: "CONFIRM_REQUIRED", state: "blocked_scope", blockedBy: "blocked_scope", detail: scopeFail,
+          explanation: "O diff real da evolução tem arquivo(s) fora do `files_allowed` do RFC (o que o card disse que mudaria). Mergear leva essa mudança não prevista para `dev`; a decisão fica registrada com o seu nome.",
+          message: `Esta evolução exige confirmação de escopo: ${scopeFail}. Revise o diff do PR e reenvie com { confirmScope: "OUT_OF_SCOPE" } (e, se quiser, "reason") para assumir o risco.`,
+        });
+      }
 
       // Sonda: aplica as travas de política SEM tocar o GitHub, sem reivindicar `merging` e sem
       // persistir estado. É o que diz ao humano o que ele está a ponto de contornar.
@@ -302,6 +314,22 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
           );
         } catch {
           return reply.status(503).send({ code: "AUDIT_UNAVAILABLE", message: "Não foi possível registrar a confirmação na trilha de auditoria; o merge NÃO foi feito. Tente novamente." });
+        }
+      }
+      if (scopeFail) {
+        // Trilha do escopo (AV/M-4), gravada ANTES do merge e fail-closed como a do `confirm`.
+        try {
+          const reason = typeof request.body?.reason === "string" ? request.body.reason.trim().slice(0, 500) || null : null;
+          await pool.query(
+            "UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1",
+            [proj.id, JSON.stringify({ evolution_merge_scope_confirmation: { by_user_id: user.id, by_email: user.email ?? null, at: new Date().toISOString(), detail: scopeFail, reason } })],
+          );
+          await pool.query(
+            "INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)",
+            [proj.id, `⚠️ Merge CONFIRMADO por ${user.email || user.id} apesar do escopo violado: ${scopeFail}${reason ? ` — motivo: ${reason}` : ""}.`],
+          );
+        } catch {
+          return reply.status(503).send({ code: "AUDIT_UNAVAILABLE", message: "Não foi possível registrar a confirmação de escopo na trilha de auditoria; o merge NÃO foi feito. Tente novamente." });
         }
       }
       const result = await tryAutoMergeEvolution(pool, proj.id, { force: true, actorUserId: user.id });

@@ -2,7 +2,7 @@
  * evolutionScope.test.ts — AU (N-3/N-6): escopo do RFC e lockfiles estranhos, lado api-node.
  */
 import { describe, it, expect } from "vitest";
-import { isPathInScope, pathsOutsideScope, foreignLockfiles, listChangedFiles, detectForeignLockfiles } from "./evolutionScope.js";
+import { isPathInScope, pathsOutsideScope, foreignLockfiles, listChangedFiles, detectForeignLockfiles, isGeneratedArtifact, filterPublishable, scopeGateFailure } from "./evolutionScope.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -65,5 +65,53 @@ describe("listChangedFiles / detectForeignLockfiles (git real)", () => {
       expect(await listChangedFiles(plain)).toBeNull();
       rmSync(plain, { recursive: true, force: true });
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("AV / M-3 — artefatos gerados e .gitignore", () => {
+  it("isGeneratedArtifact: build/dist/venv/caches e .env* são gerados; .env.example e fontes não", () => {
+    for (const p of ["build/app.js", "packages/a/dist/x.js", "target/classes/A.class", "venv/lib/x.py", "src/__pycache__/a.pyc", ".env", "api/.env.production", "node_modules/x/i.js", "a/b.pyc"]) {
+      expect(isGeneratedArtifact(p), p).toBe(true);
+    }
+    for (const p of ["src/a.ts", ".env.example", "src/env/index.ts", "docs/build-notes.md", "Dockerfile"]) expect(isGeneratedArtifact(p), p).toBe(false);
+  });
+  it("scopeGateFailure: só filho de card com gate `failed`", () => {
+    expect(scopeGateFailure({ evolution_origin: "card", evolution_scope_gate: { status: "failed", detail: "d" } })).toBe("d");
+    expect(scopeGateFailure({ evolution_origin: "card", evolution_scope_gate: { status: "passed" } })).toBeNull();
+    expect(scopeGateFailure({ evolution_origin: "card", evolution_scope_gate: { status: "not_run" } })).toBeNull();
+    expect(scopeGateFailure({ evolution_scope_gate: { status: "failed", detail: "d" } })).toBeNull();
+    expect(scopeGateFailure(null)).toBeNull();
+  });
+  it("filterPublishable (git real): rastreado sempre fica; gerado não rastreado e ignorado pelo .gitignore saem; fonte nova fica", async () => {
+    const root = mkdtempSync(join(tmpdir(), "av-m3-"));
+    try {
+      const sh = (...a: string[]) => execFileSync("git", ["-C", root, "-c", "user.email=a@b.c", "-c", "user.name=t", ...a]);
+      execFileSync("git", ["init", "-q", root]);
+      mkdirSync(join(root, "src")); mkdirSync(join(root, "build")); mkdirSync(join(root, "private"));
+      writeFileSync(join(root, ".gitignore"), "*.secret.json\nprivate/\n");
+      writeFileSync(join(root, "src", "a.ts"), "1");
+      writeFileSync(join(root, "build", "keep.js"), "tracked-build");      // build/ RASTREADO no produto: fica
+      sh("add", "-A"); sh("commit", "-qm", "base");
+      writeFileSync(join(root, "src", "novo.ts"), "n");
+      writeFileSync(join(root, "build", "out.js"), "gerado");              // build/ não rastreado: sai
+      writeFileSync(join(root, "cfg.secret.json"), "{}");                  // .gitignore: sai
+      writeFileSync(join(root, "private", "p.txt"), "p");                  // .gitignore (dir): sai
+      writeFileSync(join(root, ".env"), "TOKEN=x");                        // segredo local: sai
+      writeFileSync(join(root, ".env.example"), "TOKEN=");                 // documentação: fica
+      const all = ["src/a.ts", "src/novo.ts", "build/keep.js", "build/out.js", "cfg.secret.json", "private/p.txt", ".env", ".env.example"];
+      const { kept, excluded } = await filterPublishable(root, all);
+      expect(excluded).toEqual([".env", "build/out.js", "cfg.secret.json", "private/p.txt"]);
+      expect(kept).toEqual(["src/a.ts", "src/novo.ts", "build/keep.js", ".env.example"]);
+      // o gate de escopo também não vê o gerado não rastreado como diff do produto
+      expect(await listChangedFiles(root)).toEqual([".env.example", "src/novo.ts"]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  it("filterPublishable sem git: vale só a regra de artefato gerado", async () => {
+    const plain = mkdtempSync(join(tmpdir(), "av-m3-nogit-"));
+    try {
+      const r = await filterPublishable(plain, ["src/a.ts", "dist/x.js", ".env"]);
+      expect(r.kept).toEqual(["src/a.ts"]);
+      expect(r.excluded).toEqual([".env", "dist/x.js"]);
+    } finally { rmSync(plain, { recursive: true, force: true }); }
   });
 });

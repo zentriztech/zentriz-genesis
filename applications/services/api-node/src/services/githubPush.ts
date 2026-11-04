@@ -703,7 +703,7 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
     // passa a achar tudo o que o pedido gerou — rastreabilidade que o sufixo no ID da task NÃO
     // daria (o regex do runner trunca `TSK-BE-001-TK12` em silêncio).
     const stamp = ticketStamp((row.extra ?? null) as Record<string, unknown> | null);
-    const { sha, fileCount, deleted, deletionsSkipped, excludedLockfiles } = await pushProjectFiles(installationId, owner, repoName, branch, PROJECT_FILES_ROOT, projectId, { syncDeletes, messageSuffix: stamp ? ` (${stamp})` : undefined, excludeForeignLockfiles: true });
+    const { sha, fileCount, deleted, deletionsSkipped, excludedLockfiles, excludedGenerated } = await pushProjectFiles(installationId, owner, repoName, branch, PROJECT_FILES_ROOT, projectId, { syncDeletes, messageSuffix: stamp ? ` (${stamp})` : undefined, excludeForeignLockfiles: true });
     if (deletionsSkipped) console.warn(`[GitHubPush] evolução ${projectId}: ${deletionsSkipped}`);
 
     await client.query(
@@ -740,7 +740,7 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
     const prMsg = pr.ok ? `PR aberto: ${pr.url}` : `PR não aberto automaticamente (${pr.error}) — abra em ${pr.compareUrl}`;
     await client.query(
       `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)`,
-      [projectId, `🔄 Evolução v${opts.versionLabel} publicada em ${lineageRepo.repo_full_name}@${branch} (${fileCount} arquivos${deleted ? `, ${deleted} removido(s)` : ""}${deletionsSkipped ? `; ${deletionsSkipped}` : ""}${excludedLockfiles?.length ? `; lockfile(s) estranho(s) NÃO publicado(s): ${excludedLockfiles.join(", ")}` : ""}). ${prMsg}. Deadpool segue a mesma chave ${systemId}/${serviceId}.`],
+      [projectId, `🔄 Evolução v${opts.versionLabel} publicada em ${lineageRepo.repo_full_name}@${branch} (${fileCount} arquivos${deleted ? `, ${deleted} removido(s)` : ""}${deletionsSkipped ? `; ${deletionsSkipped}` : ""}${excludedLockfiles?.length ? `; lockfile(s) estranho(s) NÃO publicado(s): ${excludedLockfiles.join(", ")}` : ""}${excludedGenerated?.length ? `; ${excludedGenerated.length} artefato(s) gerado(s)/ignorado(s) pelo .gitignore NÃO publicado(s) (ex.: ${excludedGenerated.slice(0, 3).join(", ")})` : ""}). ${prMsg}. Deadpool segue a mesma chave ${systemId}/${serviceId}.`],
     );
     if (row.tenant_id) {
       notifyTelegramTenant(row.tenant_id as string, `🔄 Evolução v${opts.versionLabel} de *${row.title}*: ${pr.ok ? pr.url : `https://github.com/${lineageRepo.repo_full_name}/tree/${branch}`}`).catch(() => {});

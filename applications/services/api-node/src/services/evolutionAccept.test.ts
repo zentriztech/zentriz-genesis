@@ -271,6 +271,25 @@ describe("evolutionAccept (Evoluir E5)", () => {
       expect(l).toContain("pnpm-lock.yaml");
     });
 
+    it("AV / M-4: recordScopeGate grava o veredito `failed` em extra.evolution_scope_gate só para filho de CARD", async () => {
+      const { recordScopeGate } = await import("./evolutionAccept.js");
+      const apps = await setup("av-m4", {});
+      await fs.mkdir(path.join(apps, "other"), { recursive: true });
+      await fs.writeFile(path.join(apps, "other", "x.ts"), "x");
+      const writes: Array<{ id: unknown; json: Record<string, unknown> }> = [];
+      const db = { query: vi.fn(async (sql: string, params: unknown[] = []) => {
+        if (/UPDATE projects SET extra/.test(sql)) { writes.push({ id: params[0], json: JSON.parse(String(params[1])) }); return { rows: [] }; }
+        return { rows: [] };
+      }) };
+      expect(await recordScopeGate(db as never, "av-m4", { evolution_scope: ["src/**"] })).toBeNull();            // legada: não grava
+      expect(writes).toHaveLength(0);
+      const g = await recordScopeGate(db as never, "av-m4", { evolution_origin: "card", evolution_scope: ["src/**"] });
+      expect(g?.status).toBe("failed");
+      expect(writes).toHaveLength(1);
+      expect(writes[0].json.evolution_scope_gate).toMatchObject({ status: "failed" });
+      expect(String((writes[0].json.evolution_scope_gate as { detail: string }).detail)).toContain("other/x.ts");
+    });
+
     it("diff real dentro do escopo ⇒ passou, com a contagem real", async () => {
       const apps = await setup("n6-c", {});
       await fs.writeFile(path.join(apps, "src", "a.ts"), "2");

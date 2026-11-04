@@ -64,7 +64,23 @@ function runnerProjectOf(request: FastifyRequest): string | null {
  */
 async function denyForeignTenant(request: FastifyRequest, reply: FastifyReply, projectId: string | null, shape: Record<string, unknown>): Promise<boolean> {
   const auth = authenticateInternal(request);
-  const pl = auth.ok ? (auth.payload as { role?: string; svc?: string; tenantId?: string | null } | null) : null;
+  const pl = auth.ok ? (auth.payload as { role?: string; svc?: string; tenantId?: string | null; projectId?: string } | null) : null;
+  // AV/M-5: o token de MÁQUINA do run (`svc:"runner"`) é amarrado ao TENANT do próprio token (e, com claim, ao projeto do claim — o
+  // `runnerProjectOf` já força o projeto). Projeto que não é do tenant do token (token trocado/forjado, ou token de tenant sem claim de
+  // projeto escolhendo o projeto pelo corpo) ⇒ o MESMO 404 de projeto inexistente. Sem projeto na chamada não há o que vazar.
+  if (pl?.svc === "runner") {
+    const target = pl.projectId ?? projectId;
+    if (!target) return false;
+    let bound = false;
+    if (UUID_ANY.test(target)) {
+      const r = await pool.query("SELECT tenant_id FROM projects WHERE id = $1", [target]);
+      const owner = r.rows[0] ? ((r.rows[0].tenant_id as string | null) ?? null) : undefined;
+      bound = owner !== undefined && owner === (pl.tenantId ?? null);
+    }
+    if (bound) return false;
+    await reply.status(404).send({ ...shape, code: "PROJECT_NOT_FOUND", message: "Projeto não encontrado." });
+    return true;
+  }
   if (!pl || pl.role !== "tenant_admin" || pl.svc) return false;
   if (!projectId) return false; // sem projeto não há dado de outro tenant a vazar nem a alterar
   let owned = false;
@@ -76,6 +92,8 @@ async function denyForeignTenant(request: FastifyRequest, reply: FastifyReply, p
   await reply.status(404).send({ ...shape, code: "PROJECT_NOT_FOUND", message: "Projeto não encontrado." });
   return true;
 }
+
+const UUID_ANY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Deadpool conhece systemId/serviceId, não o projeto: resolve pelo vínculo de monitoramento. */
 async function resolveProjectId(body: GuardBody, forced: string | null = null): Promise<string | null> {
@@ -240,7 +258,7 @@ export async function llmGuardUserRoutes(app: FastifyInstance): Promise<void> {
 
   app.put<{ Body: Record<string, string | number> }>("/api/admin/llm-guard/settings", async (request, reply) => {
     if (!requireAdmin(request)) return reply.status(403).send({ code: "FORBIDDEN" });
-    const allowed = new Set(["kill_switch", "global_max_usd_per_hour", "global_max_usd_per_day", "unattributed_max_usd_per_day", "repeat_max_per_6h"]);
+    const allowed = new Set(["kill_switch", "global_max_usd_per_hour", "global_max_usd_per_day", "tenant_max_usd_per_hour", "unattributed_max_usd_per_day", "repeat_max_per_6h"]);
     const by = getUser(request).email;
     for (const [k, raw] of Object.entries(request.body ?? {})) {
       if (!allowed.has(k)) return reply.status(400).send({ code: "UNKNOWN_SETTING", message: k });

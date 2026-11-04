@@ -15,6 +15,26 @@ export const EVO_ALWAYS_ALLOWED = ["tests/**", "**/tests/**", "**/__tests__/**",
 /** Diretórios que nunca são publicados (espelho de SKIP_DIRS de `pushProjectFiles`). */
 export const NEVER_PUBLISHED_DIRS = new Set(["node_modules", ".next", "dist", ".git", "coverage", ".nyc_output", ".venv-genesis"]);
 
+/**
+ * AV/M-3: diretórios e arquivos que são ARTEFATO GERADO e nunca devem ir ao PR de uma evolução se o clone da linhagem não os rastreia
+ * (o que o produto já versiona continua valendo). Mais largo que `NEVER_PUBLISHED_DIRS` (que vale sempre): inclui `build`, `out`, `target`,
+ * ambientes virtuais e caches, que o `walk` do publicador não conhecia.
+ */
+export const GENERATED_DIRS = new Set([
+  ...NEVER_PUBLISHED_DIRS, "build", "out", "target", "venv", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".turbo", ".cache", ".gradle", ".parcel-cache",
+]);
+/** `.env`, `.env.local`, `.env.production`… (segredo local); `.env.example|sample|template` são documentação e passam. */
+const ENV_SECRET_RE = /^\.env(?:\..+)?$/;
+const ENV_DOC_RE = /^\.env\.(?:example|sample|template|dist)$/;
+/** Puro: o caminho (relativo a `apps/`) é artefato gerado/segredo local? */
+export function isGeneratedArtifact(rel: string): boolean {
+  const parts = normalize(rel).split("/");
+  const base = parts[parts.length - 1] ?? "";
+  if (parts.slice(0, -1).some((seg) => GENERATED_DIRS.has(seg))) return true;
+  if (ENV_SECRET_RE.test(base) && !ENV_DOC_RE.test(base)) return true;
+  return base === ".DS_Store" || base.endsWith(".pyc");
+}
+
 function normalize(p: string): string {
   let s = p.trim().replace(/\\/g, "/");
   while (s.startsWith("./")) s = s.slice(2);
@@ -127,9 +147,61 @@ export async function listChangedFiles(appsDir: string): Promise<string[] | null
       const e = parts[i];
       if (e.length < 4) continue;
       const code = e.slice(0, 2);
-      files.push(e.slice(3));
+      // AV/M-3: artefato gerado NÃO rastreado (`??`) não é diff do produto — o publicador também não o envia.
+      if (!(code === "??" && isGeneratedArtifact(e.slice(3)))) files.push(e.slice(3));
       if (code[0] === "R" || code[0] === "C") i++; // o par "origem" do renomeado vem como entrada seguinte
     }
     return files.filter((f) => !f.split("/").some((seg) => NEVER_PUBLISHED_DIRS.has(seg))).sort();
   } catch { return null; }
+}
+
+/**
+ * AV/M-3: separa o que PODE ir ao PR do que é artefato gerado ou ignorado. Regras, nesta ordem:
+ *  1. rastreado no clone da linhagem (`git ls-files`) ⇒ é do produto, SEMPRE publicável;
+ *  2. não rastreado e `isGeneratedArtifact` (build/, dist/, venv/, .env…) ⇒ excluído;
+ *  3. não rastreado e IGNORADO pelo `.gitignore` do clone (`git check-ignore`) ⇒ excluído.
+ * Sem git (apps/ não é clone) só vale a regra 2. Nunca lança; falha do git cai para a regra 2.
+ */
+export async function filterPublishable(appsDir: string, relPaths: string[]): Promise<{ kept: string[]; excluded: string[] }> {
+  const { execFile, spawn } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  let tracked: Set<string> | null = null;
+  try {
+    const { stdout } = await promisify(execFile)("git", ["-C", appsDir, "ls-files", "-z"], { maxBuffer: 64 * 1024 * 1024, timeout: 20_000 });
+    tracked = new Set(stdout.split("\0").map((x) => x.trim()).filter(Boolean));
+  } catch { tracked = null; }
+  const isTracked = (r: string) => tracked?.has(r) === true;
+  const excluded = new Set<string>();
+  const candidates: string[] = [];
+  for (const r of relPaths) {
+    if (isTracked(r)) continue;
+    if (isGeneratedArtifact(r)) { excluded.add(r); continue; }
+    candidates.push(r);
+  }
+  if (tracked && candidates.length) {
+    try {
+      const out = await new Promise<string>((resolve, reject) => {
+        const ch = spawn("git", ["-C", appsDir, "check-ignore", "-z", "--stdin"], { stdio: ["pipe", "pipe", "ignore"] });
+        let buf = "";
+        const t = setTimeout(() => { ch.kill(); reject(new Error("timeout")); }, 30_000);
+        ch.stdout.on("data", (d) => { buf += String(d); });
+        ch.on("error", (e) => { clearTimeout(t); reject(e); });
+        // exit 0 = algum ignorado, 1 = nenhum, 128 = erro
+        ch.on("close", (code) => { clearTimeout(t); code === 0 || code === 1 ? resolve(buf) : reject(new Error(`git check-ignore ${code}`)); });
+        ch.stdin.end(candidates.join("\0") + "\0");
+      });
+      for (const x of out.split("\0")) if (x) excluded.add(x);
+    } catch { /* sem .gitignore verificável: vale só a regra 2 */ }
+  }
+  return { kept: relPaths.filter((r) => !excluded.has(r)), excluded: relPaths.filter((r) => excluded.has(r)).sort() };
+}
+
+/**
+ * AV/M-4: o gate de escopo FALHOU (arquivo fora do `files_allowed` do RFC no diff real) num filho de CARD? Lê o veredito gravado no aceite
+ * (`extra.evolution_scope_gate`). Sem veredito ou `not_run` ⇒ `null` (não há prova de violação; o texto do PR declara o que não rodou).
+ */
+export function scopeGateFailure(extra: Record<string, unknown> | null | undefined): string | null {
+  if (!extra || extra.evolution_origin !== "card") return null;
+  const g = extra.evolution_scope_gate as { status?: unknown; detail?: unknown } | undefined;
+  return g && g.status === "failed" ? String(g.detail ?? "escopo do RFC violado") : null;
 }

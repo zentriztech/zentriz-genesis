@@ -171,7 +171,7 @@ export async function syncCardWithChild(pool: Pool, ticketId: string): Promise<C
   if (isSupersededChild(t.child_status, t.child_extra)) return null;
   if (DEAD_CHILD.has(t.child_status)) {
     if (t.card_state === "promoted" || t.card_state === "in_factory") {
-      return transitionCard(pool, { ticketId, to: "blocked", actorKind: "system", reason: `child_${t.child_status}`, dedupeKey: `child_${t.child_status}` });
+      return transitionCard(pool, { ticketId, to: "blocked", actorKind: "system", reason: `child_${t.child_status}`, dedupeKey: `child_${t.child_status}:${t.child_project_id ?? "none"}` });
     }
     return null;
   }
@@ -179,8 +179,10 @@ export async function syncCardWithChild(pool: Pool, ticketId: string): Promise<C
   if (budgetStopped && t.child_project_id) {
     const gate = await childBudgetGate(pool, t.child_project_id);
     if (!gate.ok && (t.card_state === "promoted" || t.card_state === "in_factory")) {
-      // `dedupeKey` por código: a mesma parada não escreve dois eventos; outro motivo do Guard atualiza o `blocked_reason`.
-      return transitionCard(pool, { ticketId, to: "blocked", actorKind: "guard", reason: `${BUDGET_BLOCK_PREFIX}${gate.code}`, dedupeKey: `budget_stop:${t.child_project_id}:${gate.code}` });
+      // A-2 (AV): `dedupeKey` POR OCORRÊNCIA (filho + código + instância da pausa). A mesma parada não escreve dois eventos, mas uma
+      // SEGUNDA pausa (pausa → retomada → pausa) tem outra instância e leva o card a `blocked` de novo.
+      const occ = await stopOccurrence(pool, t.child_project_id, gate.code);
+      return transitionCard(pool, { ticketId, to: "blocked", actorKind: "guard", reason: `${BUDGET_BLOCK_PREFIX}${gate.code}`, dedupeKey: `budget_stop:${t.child_project_id}:${gate.code}:${occ}` });
     }
     if (!gate.ok && t.card_state === "blocked" && isBudgetBlockReason(t.blocked_reason) && t.blocked_reason !== `${BUDGET_BLOCK_PREFIX}${gate.code}`) {
       return transitionCard(pool, { ticketId, to: "blocked", actorKind: "guard", reason: `${BUDGET_BLOCK_PREFIX}${gate.code}` });
@@ -193,7 +195,8 @@ export async function syncCardWithChild(pool: Pool, ticketId: string): Promise<C
   if (t.child_project_id && (t.card_state === "promoted" || t.card_state === "in_factory") && !budgetStopped) {
     const gate = await childBudgetGate(pool, t.child_project_id);
     if (!gate.ok && gate.code === "CARD_BUDGET_CAP") {
-      return transitionCard(pool, { ticketId, to: "blocked", actorKind: "guard", reason: `${BUDGET_BLOCK_PREFIX}CARD_BUDGET_CAP`, dedupeKey: `budget_stop:${t.child_project_id}:CARD_BUDGET_CAP` });
+      const occ = await stopOccurrence(pool, t.child_project_id, "CARD_BUDGET_CAP");
+      return transitionCard(pool, { ticketId, to: "blocked", actorKind: "guard", reason: `${BUDGET_BLOCK_PREFIX}CARD_BUDGET_CAP`, dedupeKey: `budget_stop:${t.child_project_id}:CARD_BUDGET_CAP:${occ}` });
     }
   }
   if (t.card_state === "blocked" && isBudgetBlockReason(t.blocked_reason)) {
@@ -208,6 +211,26 @@ export async function syncCardWithChild(pool: Pool, ticketId: string): Promise<C
     return transitionCard(pool, { ticketId, to: "in_factory", actorKind: "system", reason: "child_in_factory" });
   }
   return null;
+}
+
+/**
+ * A-2 (AV): carimbo da OCORRÊNCIA da parada, para a chave de dedupe. Pausa do dono ⇒ `budget_paused_at` do dono (muda a cada pausa nova);
+ * teto do card ⇒ instante do último `card_cap_reached` do filho; sem nenhum dos dois ⇒ `updated_at` do filho. Estável enquanto a MESMA
+ * parada dura (repetir a passada não duplica evento) e diferente na parada seguinte.
+ */
+async function stopOccurrence(pool: Pool, childProjectId: string, code: string): Promise<string> {
+  const ms = async (sql: string): Promise<string | null> => {
+    const v = (await pool.query(sql, [childProjectId]).catch(() => ({ rows: [] as Array<Record<string, unknown>> }))).rows[0]?.ms;
+    return v === null || v === undefined ? null : String(v);
+  };
+  if (code === "CARD_BUDGET_CAP") {
+    const e = await ms(`SELECT (extract(epoch FROM max(created_at)) * 1000)::bigint AS ms FROM llm_guard_events WHERE project_id = $1 AND kind = 'card_cap_reached'`);
+    if (e) return `cap${e}`;
+  } else {
+    const o = await ms(`SELECT (extract(epoch FROM o.budget_paused_at) * 1000)::bigint AS ms FROM projects p JOIN projects o ON o.id = COALESCE(p.budget_owner_project_id, p.id) WHERE p.id = $1`);
+    if (o) return `pause${o}`;
+  }
+  return `upd${(await ms(`SELECT (extract(epoch FROM updated_at) * 1000)::bigint AS ms FROM projects WHERE id = $1`)) ?? "0"}`;
 }
 
 /** Guard de custo do filho (orçamento compartilhado: o dono é resolvido por `budget_owner_project_id`). */
