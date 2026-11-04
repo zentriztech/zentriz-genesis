@@ -29,6 +29,7 @@ import { dispatchProjectRun } from "../services/runnerDispatch.js";
 import { maybeNotifyBlock, maybeNotifyDone, scheduleFactoryDone } from "../services/opsNotify.js";
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
 import { ticketTransitionsEnabled } from "../services/ticketTransitions.js";
+import { evolutionPromoteEnabled } from "../services/evolutionPromote.js";
 import { resolveInboxProductId } from "../services/inbox.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { sha256Hex } from "../lib/specTreeHash.js";
@@ -3743,6 +3744,12 @@ export async function projectRoutes(app: FastifyInstance) {
       );
 
       request.log.info({ parentId, childId, version: nextVersion, workMode, evolutionSource, inherited }, "[evolve] Projeto filho criado");
+
+      // 1.7 (EVOLUTION_PROMOTE_BANCADA=on): o produto passa a refletir o filho NA HORA (accepted ⇒ partially_accepted). Sem isto o
+      // agregado fica `accepted` até a próxima mudança de status (o claim novo, EVOLVE_CLAIM=on, já recomputa no finalize).
+      if (await evolutionPromoteEnabled(pool, { tenantId, userTenantId: user.tenantId ?? null })) {
+        await recomputeProductLifecycle(client, childProductId);
+      }
 
       return reply.status(201).send({
         ok: true,

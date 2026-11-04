@@ -55,7 +55,8 @@ import {
   normalizeProduct, computeProductSpecHash, loadProductProjects, isProductNormalized,
   debitNormalizerUsage, NormalizationError, type NormalizeOutcome, type ProductProjectRow,
 } from "../services/productNormalizer.js";
-import { assessProductReadiness, evaluateProductPromotability } from "../services/promotability.js";
+import { assessEvolutionReadiness, assessProductReadiness, evaluateProductPromotability } from "../services/promotability.js";
+import { evolutionPromoteEnabled, listPromotableEvolutionChildren } from "../services/evolutionPromote.js";
 
 /** Teto de produtos cujo estado de normalização é recomputado numa listagem (R2 do adversarial). */
 const NORMALIZED_CHECK_MAX_PRODUCTS = 40;
@@ -1332,6 +1333,44 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     }
     // Só promove da Bancada. Já em fábrica/terminal → 409 informativo (idempotente-safe).
     if (row.lifecycle_status !== "draft") {
+      // 1.7 (EVOLUTION_PROMOTE_BANCADA=on): produto que já saiu de `draft` mas tem filho(s) de EVOLUÇÃO na Bancada (spec_submitted/draft)
+      // promove esses filhos — sem Normalizar (o RFC é o documento de decisão) e sem plano de ordem (cada evolução é um incremento
+      // independente de um serviço já aceito). Flag off ou sem filho de evolução ⇒ o 409 histórico abaixo.
+      if (await evolutionPromoteEnabled(pool, { productId: id, tenantId: (row.tenant_id as string | null) ?? null })) {
+        const kids = await listPromotableEvolutionChildren(pool, id);
+        if (kids.length > 0) {
+          for (const k of kids) {
+            const ready = await assessEvolutionReadiness(pool, k.projectId); // erro de I/O sobe (500): nunca libera às cegas
+            if (!ready.ok) {
+              return reply.status(409).send({
+                code: ready.reason, gate: ready.code, message: `${k.title}: ${ready.message}`, projectId: k.projectId, evolution: true,
+              });
+            }
+          }
+          const evoClient = await pool.connect();
+          let evoPromoted: string[] = [];
+          try {
+            await evoClient.query("BEGIN");
+            const up = await evoClient.query(
+              `UPDATE projects SET status = 'promoted', updated_at = now()
+                WHERE id = ANY($1::uuid[]) AND status IN ('draft','spec_submitted') AND (extra->>'evolution') = 'true' RETURNING id`,
+              [kids.map((k) => k.projectId)],
+            );
+            evoPromoted = up.rows.map((r) => String(r.id));
+            await evoClient.query("COMMIT");
+          } catch (e) {
+            await evoClient.query("ROLLBACK").catch(() => {});
+            throw e;
+          } finally { evoClient.release(); }
+          const lifecycle = await recomputeProductLifecycle(pool, id);
+          void emitValueEvent(pool, {
+            tenantId: (row.tenant_id as string | null) ?? null,
+            eventType: "spec_promoted",
+            metadata: { product_id: id, promoted_projects: evoPromoted.length, started: false, evolution: true },
+          });
+          return reply.send({ ok: true, evolution: true, promotedProjects: evoPromoted, lifecycleStatus: lifecycle, alreadyPromoted: evoPromoted.length === 0 });
+        }
+      }
       return reply.status(409).send({
         code: "NOT_ON_WORKBENCH",
         message: `Produto não está na Bancada (estado atual: ${row.lifecycle_status}).`,

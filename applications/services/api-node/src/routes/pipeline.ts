@@ -22,7 +22,9 @@ import {
 } from "../services/productNormalizer.js";
 // O veredito de "posso promover?" é do SERVIDOR (achado do Jean 2026-09-11: três telas decidiam
 // sozinhas e divergiram) — ver `services/promotability.ts`.
-import { assessProjectReadiness, decideSpecPromotability, safeReadiness } from "../services/promotability.js";
+import {
+  assessEvolutionReadiness, assessProjectReadiness, decideEvolutionPromotability, decideSpecPromotability, isEvolutionPromotable, safeEvolutionReadiness, safeReadiness,
+} from "../services/promotability.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 
@@ -137,7 +139,15 @@ export async function pipelineRoutes(app: FastifyInstance) {
       if (status === "promoted") {
         return reply.send({ ok: true, status: "promoted", productId: project.product_id ?? null, graduated: false, alreadyPromoted: true });
       }
-      if (status !== "draft") {
+      // 1.7 (EVOLUTION_PROMOTE_BANCADA=on): filho de EVOLUÇÃO em `spec_submitted` (ou `draft`) é promovível na Bancada.
+      // Flag off ⇒ `evoPath=false` e o fluxo abaixo é o histórico, byte a byte.
+      let evoPath = false;
+      if (status === "draft" || status === "spec_submitted") {
+        const ex = (await client.query("SELECT extra, tenant_id FROM projects WHERE id = $1", [projectId])).rows[0] as
+          { extra: Record<string, unknown> | null; tenant_id: string | null } | undefined;
+        evoPath = await isEvolutionPromotable(client, { id: projectId, status, extra: ex?.extra ?? null, tenantId: ex?.tenant_id ?? null }, user.tenantId ?? null);
+      }
+      if (status !== "draft" && !evoPath) {
         return reply.status(409).send({
           code: "NOT_ON_WORKBENCH",
           message: `Só um rascunho pode ser promovido (estado atual: "${status}").`,
@@ -164,7 +174,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
       // para a spec que o projeto tem AGORA: editou depois de normalizar, retrava sozinho. A trava
       // NUNCA degrada em silêncio — se não der para avaliá-la, o promote falha alto (o `.catch(()=>[])`
       // do caminho de produto provou que engolir o erro vira promoção sem documento, sem ninguém ver).
-      {
+      if (!evoPath) {
         let norm: Awaited<ReturnType<typeof isProjectNormalized>>;
         try {
           norm = await isProjectNormalized(client, projectId);
@@ -189,7 +199,20 @@ export async function pipelineRoutes(app: FastifyInstance) {
 
       // TRAVA DE PRONTIDÃO (2026-10-16): `connect.yaml` + validação do conteúdo atual — a mesma
       // função do veredito da tela. Falha de avaliação ⇒ 500, nunca promoção às cegas.
-      {
+      if (evoPath) {
+        // 1.7: prontidão do filho de evolução = RFC (gate invariante) + connect.yaml/validação + orçamento. SEM trava de normalização.
+        let ready: Awaited<ReturnType<typeof assessEvolutionReadiness>>;
+        try {
+          ready = await assessEvolutionReadiness(client, projectId);
+        } catch (err) {
+          request.log.error({ err, projectId }, "[Pipeline/promote] falha ao avaliar a prontidão da evolução");
+          return reply.status(500).send({
+            code: "READINESS_CHECK_FAILED",
+            message: "Não foi possível verificar o RFC, a validação e o orçamento desta evolução. Tente de novo.",
+          });
+        }
+        if (!ready.ok) return reply.status(409).send({ code: ready.reason, gate: ready.code, message: ready.message });
+      } else {
         let ready: Awaited<ReturnType<typeof assessProjectReadiness>>;
         try {
           ready = await assessProjectReadiness(client, projectId);
@@ -221,9 +244,21 @@ export async function pipelineRoutes(app: FastifyInstance) {
           }
         }
       }
-      await client.query(
-        "UPDATE projects SET status = 'promoted', updated_at = now() WHERE id = $1 AND status = 'draft'", [projectId],
-      );
+      if (evoPath) {
+        // 1.7: CAS por status (D-L6) — rowCount 0 ⇒ outra requisição promoveu (ou descartou) antes: idempotente/409.
+        const up = await client.query(
+          "UPDATE projects SET status = 'promoted', updated_at = now() WHERE id = $1 AND status IN ('draft','spec_submitted') RETURNING id", [projectId],
+        );
+        if ((up.rowCount ?? 0) === 0) {
+          const cur = String((await client.query("SELECT status FROM projects WHERE id = $1", [projectId])).rows[0]?.status ?? "");
+          if (cur === "promoted") return reply.send({ ok: true, status: "promoted", productId: project.product_id ?? null, graduated: false, alreadyPromoted: true });
+          return reply.status(409).send({ code: "NOT_ON_WORKBENCH", message: `Só um rascunho pode ser promovido (estado atual: "${cur}").` });
+        }
+      } else {
+        await client.query(
+          "UPDATE projects SET status = 'promoted', updated_at = now() WHERE id = $1 AND status = 'draft'", [projectId],
+        );
+      }
       const productId = graduatedSolo ?? (project.product_id as string | null) ?? null;
       // Sem isto o produto continuaria 'draft' e o portal não ofereceria "Iniciar produto".
       await recomputeProductLifecycle(client, productId);
@@ -386,7 +421,14 @@ export async function pipelineRoutes(app: FastifyInstance) {
       const readiness = row.status === "draft" && st?.normalized === true
         ? await safeReadiness(() => assessProjectReadiness(client, projectId))
         : null;
-      const promotion = decideSpecPromotability(row.status ?? null, st ? st.normalized : null, readiness);
+      // 1.7 (EVOLUTION_PROMOTE_BANCADA=on): filho de evolução em Bancada tem veredito próprio (RFC + prontidão + orçamento; sem Normalizar).
+      const evoVerdict = await isEvolutionPromotable(client, { id: projectId, status: row.status, extra: row.extra }, user.tenantId ?? null)
+        ? decideEvolutionPromotability({
+          status: row.status,
+          readiness: await safeEvolutionReadiness(() => assessEvolutionReadiness(client, projectId, { readOnly: true })),
+        })
+        : null;
+      const promotion = evoVerdict ?? decideSpecPromotability(row.status ?? null, st ? st.normalized : null, readiness);
       return reply.send({
         projectId,
         normalized: st ? st.normalized : null,

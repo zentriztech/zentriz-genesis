@@ -27,11 +27,18 @@
 import { isProductNormalized, isProjectNormalized, loadProductProjects, type Queryable } from "./productNormalizer.js";
 import { assessSpecValidation, specValidationGateEnabled } from "./specValidation.js";
 import { assessConnectDeclaration, type FactoryCertificate } from "./factoryCertificate.js";
+import { evaluateEvolutionGate } from "./evolutionGate.js";
+import { checkProjectBudgetGate } from "./llmGuard.js";
+import { evolutionPromoteEnabled, isEvolutionExtra, listPromotableEvolutionChildren, EVOLUTION_PROMOTABLE_STATUSES } from "./evolutionPromote.js";
 
 export type { Queryable };
 
 /** Razão da recusa — `null` quando pode promover ou quando não deu para decidir. */
-export type PromotionBlockReason = "NOT_ON_WORKBENCH" | "NOT_NORMALIZED" | "CONNECT_MISSING" | "NOT_VALIDATED" | null;
+export type PromotionBlockReason =
+  | "NOT_ON_WORKBENCH" | "NOT_NORMALIZED" | "CONNECT_MISSING" | "NOT_VALIDATED"
+  // 1.7 (EVOLUTION_PROMOTE_BANCADA=on, só filho de evolução): RFC ausente/inválido e orçamento do dono.
+  | "EVOLUTION_RFC" | "BUDGET_BLOCKED"
+  | null;
 
 /**
  * Prontidão para a Fábrica DEPOIS da normalização: declaração Connect + validação do conteúdo atual.
@@ -59,6 +66,11 @@ export interface Promotability {
    */
   blockingProjectId?: string | null;
   blockingProjectTitle?: string | null;
+  /**
+   * 1.7: `true` quando o veredito é de FILHO DE EVOLUÇÃO (a etapa "Normalizar" não se aplica: o RFC é o documento de decisão).
+   * Ausente em todo veredito histórico (flag off) — o payload não muda.
+   */
+  evolution?: boolean;
 }
 
 /** Único estado de produto que a Fábrica aceita promover (`routes/products.ts`). */
@@ -219,6 +231,9 @@ export async function evaluateProductPromotability(
     skipNormalizedCheck?: boolean;
   },
 ): Promise<Promotability> {
+  // 1.7 (EVOLUTION_PROMOTE_BANCADA=on): produto fora de `draft` com filho de evolução na Bancada ⇒ veredito de evolução.
+  const evo = await evaluateEvolutionProductPromotability(db, { id: product.id, lifecycleStatus: product.lifecycleStatus });
+  if (evo) return evo;
   const normalized = product.skipNormalizedCheck ? null : await safeProductNormalized(db, product);
   // Prontidão só quando é ela que decide (na Bancada E normalizado): é o caso raro, então o custo
   // extra de I/O da listagem fica limitado aos produtos que de fato estão a um passo do promote.
@@ -273,4 +288,87 @@ async function safeProjectNormalized(
   } catch {
     return null;
   }
+}
+
+// ── 1.7 — filho de EVOLUÇÃO na Bancada (flag EVOLUTION_PROMOTE_BANCADA) ───────────────────────────
+
+export type EvolutionReadiness =
+  | { ok: true }
+  | { ok: false; reason: "EVOLUTION_RFC" | "CONNECT_MISSING" | "NOT_VALIDATED" | "BUDGET_BLOCKED"; code: string; message: string; projectId: string };
+
+/**
+ * Prontidão do filho de evolução, na ORDEM do que o usuário destrava: RFC → connect.yaml/validação → orçamento.
+ * `readOnly:true` (veredito de tela) não grava o carimbo do gate de RFC; a promoção de verdade grava (como o `/run`).
+ * Lança em erro de I/O: quem chama decide (tela ⇒ `null` "não conferi"; promote ⇒ falha alto).
+ * Nenhum gate é enfraquecido; só a trava de NORMALIZAÇÃO não se aplica (o RFC é o documento de decisão, D-A6).
+ */
+export async function assessEvolutionReadiness(
+  db: Queryable, projectId: string, opts: { readOnly?: boolean } = {},
+): Promise<EvolutionReadiness> {
+  const extra = (await db.query("SELECT extra FROM projects WHERE id = $1", [projectId])).rows[0]?.extra as Record<string, unknown> | null | undefined;
+  const gate = await evaluateEvolutionGate(db as never, projectId, extra ?? null, { readOnly: opts.readOnly });
+  if (!gate.ok) return { ok: false, reason: "EVOLUTION_RFC", code: gate.code, message: gate.message, projectId };
+  const ready = await assessProjectReadiness(db, projectId);
+  if (!ready.ok) return { ok: false, reason: ready.reason, code: ready.code, message: ready.message, projectId };
+  const budget = await checkProjectBudgetGate(db as never, projectId);
+  if (!budget.ok) return { ok: false, reason: "BUDGET_BLOCKED", code: budget.code, message: budget.message, projectId };
+  return { ok: true };
+}
+
+/** Veredito de UM filho de evolução (sem I/O). `readiness: null` = "não conferi" ⇒ `canPromote: null` (o botão fica). */
+export function decideEvolutionPromotability(
+  args: { status: string | null; readiness?: EvolutionReadiness | null },
+): Promotability {
+  const { status } = args;
+  if (!status || !(EVOLUTION_PROMOTABLE_STATUSES as readonly string[]).includes(status)) {
+    return { canPromote: false, reason: "NOT_ON_WORKBENCH", message: alreadyInFactory("Esta evolução", String(status)), status, normalized: null, evolution: true };
+  }
+  const r = args.readiness;
+  if (r === null || r === undefined) return { canPromote: null, reason: null, message: null, status, normalized: null, evolution: true };
+  if (!r.ok) {
+    return {
+      canPromote: false, reason: r.reason, message: r.message, code: r.code, status, normalized: null, evolution: true,
+      blockingProjectId: r.projectId, blockingProjectTitle: null,
+    };
+  }
+  return { canPromote: true, reason: null, message: null, status, normalized: null, evolution: true };
+}
+
+/**
+ * Veredito do PRODUTO quando ele já saiu de `draft` mas tem filho(s) de evolução na Bancada. `null` = não se aplica
+ * (flag off, produto em `draft`, ou nenhum filho de evolução promovível) ⇒ vale o veredito histórico. O primeiro filho que falha define a razão.
+ */
+export async function evaluateEvolutionProductPromotability(
+  db: Queryable, product: { id: string; lifecycleStatus: string | null },
+): Promise<Promotability | null> {
+  if (product.lifecycleStatus === PRODUCT_PROMOTABLE_LIFECYCLE) return null;
+  if (!(await evolutionPromoteEnabled(db as never, { productId: product.id }))) return null;
+  let kids;
+  try {
+    kids = await listPromotableEvolutionChildren(db as never, product.id);
+  } catch {
+    return null;
+  }
+  if (kids.length === 0) return null;
+  for (const k of kids) {
+    const readiness = await safeEvolutionReadiness(() => assessEvolutionReadiness(db, k.projectId, { readOnly: true }));
+    const v = decideEvolutionPromotability({ status: k.status, readiness });
+    if (v.canPromote !== true) {
+      return { ...v, status: product.lifecycleStatus, message: v.message ? `${k.title}: ${v.message}` : v.message, blockingProjectTitle: k.title };
+    }
+  }
+  return { canPromote: true, reason: null, message: null, status: product.lifecycleStatus, normalized: null, evolution: true };
+}
+
+export async function safeEvolutionReadiness(fn: () => Promise<EvolutionReadiness>): Promise<EvolutionReadiness | null> {
+  try { return await fn(); } catch { return null; }
+}
+
+/** `true` se o projeto é filho de evolução promovível pela Bancada COM a flag ligada (decide o caminho de promoção). */
+export async function isEvolutionPromotable(
+  db: Queryable, project: { id: string; status: string | null; extra: Record<string, unknown> | null | undefined; tenantId?: string | null }, userTenantId?: string | null,
+): Promise<boolean> {
+  if (!isEvolutionExtra(project.extra)) return false;
+  if (!project.status || !(EVOLUTION_PROMOTABLE_STATUSES as readonly string[]).includes(project.status)) return false;
+  return evolutionPromoteEnabled(db as never, { projectId: project.id, tenantId: project.tenantId ?? null, userTenantId: userTenantId ?? null });
 }

@@ -29,7 +29,10 @@ import {
 } from "../services/specTextExtract.js";
 import { createRateLimiter, clientIp } from "../services/rateLimit.js";
 import { isProjectNormalized, type Queryable } from "../services/productNormalizer.js";
-import { assessProjectReadiness, decideSpecPromotability, safeReadiness, type FactoryReadiness } from "../services/promotability.js";
+import {
+  assessEvolutionReadiness, assessProjectReadiness, decideEvolutionPromotability, decideSpecPromotability, isEvolutionPromotable, safeEvolutionReadiness, safeReadiness,
+  type EvolutionReadiness, type FactoryReadiness,
+} from "../services/promotability.js";
 
 const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
 
@@ -535,7 +538,20 @@ export async function specRoutes(app: FastifyInstance) {
           .filter((id) => statusById.get(id) === "draft" && normOf(id) === true)
           .slice(0, READINESS_CHECK_MAX_SPECS);
         for (const pid of candidates) readyById.set(pid, await safeReadiness(() => assessProjectReadiness(client, pid)));
-        const promotionOf = (id: string) => decideSpecPromotability(statusById.get(id) ?? null, normOf(id), readyById.get(id) ?? null);
+        // 1.7 (EVOLUTION_PROMOTE_BANCADA=on): filhos de evolução em Bancada ganham veredito próprio (sem Normalizar; RFC + prontidão + orçamento).
+        const evoVerdictById = new Map<string, ReturnType<typeof decideEvolutionPromotability>>();
+        let evoChecked = 0;
+        for (const r of rows as Array<Record<string, unknown>>) {
+          const id = String(r.id);
+          const st = (r.status as string | null) ?? null;
+          if (!await isEvolutionPromotable(client, { id, status: st, extra: (r.extra as Record<string, unknown> | null) ?? null, tenantId: (r.tenant_id as string | null) ?? null }, user.tenantId ?? null)) continue;
+          const readiness: EvolutionReadiness | null = evoChecked < READINESS_CHECK_MAX_SPECS
+            ? await safeEvolutionReadiness(() => assessEvolutionReadiness(client, id, { readOnly: true }))
+            : null;
+          evoChecked += 1;
+          evoVerdictById.set(id, decideEvolutionPromotability({ status: st, readiness }));
+        }
+        const promotionOf = (id: string) => evoVerdictById.get(id) ?? decideSpecPromotability(statusById.get(id) ?? null, normOf(id), readyById.get(id) ?? null);
         // 2026-10-02 (pedido do Jean): orçamento/gasto/saldo de LLM no card. Lote de 1 query; falha
         // ⇒ `budget: null` (o card some com o bloco, a listagem não quebra).
         const budgets = await budgetBriefs(client, enriched.map((s) => s.id))

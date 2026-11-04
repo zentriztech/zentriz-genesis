@@ -13,7 +13,7 @@
  *
  * FASE 1' (evo/f1): os defeitos (a), (b)/(b') e (g) foram CORRIGIDOS atrás da flag EVOLVE_CLAIM=on (services/evolveClaim.ts) —
  * seus `it.fails` viraram `it` normais e os cenários rodam com a flag ligada (vi.stubEnv). Os demais defeitos seguem provados
- * com `it.fails` (tarefas 1.4–1.7). O comportamento com a flag desligada está em projects.evolve.claim.pg.integration.test.ts.
+ * com `it.fails` (tarefas 1.4–1.7). Na 1.4 e na 1.7 os `it.fails` (d), (f), (h) viraram `it` com as flags TICKET_TRANSITIONS / EVOLUTION_PROMOTE_BANCADA=on. O comportamento com a flag desligada está em projects.evolve.claim.pg.integration.test.ts.
  *
  * Só roda com PG_TEST_URL (Postgres EFÊMERO migrado 1→N, ver src/testing/evolvePg.ts). Sem ele: skip.
  */
@@ -193,10 +193,12 @@ describePg("Fase 0' / 0.3 — reprodução dos defeitos do /evolve (Postgres rea
   });
 
   // ── (d) status do filho × /promote ────────────────────────────────────────────────
-  describe("(d) status do filho de /evolve × POST /api/projects/:id/promote (exige 'draft')", () => {
+  describe("(d) status do filho de /evolve × POST /api/projects/:id/promote — CORRIGIDO na 1.7 (EVOLUTION_PROMOTE_BANCADA=on): evolução aceita 'spec_submitted'", () => {
+    afterAll(() => { vi.unstubAllEnvs(); });
     let withFiles: { status: string; promote: { statusCode: number; code?: string } };
     let noFiles: { status: string; promote: { statusCode: number; code?: string } };
     beforeAll(async () => {
+      vi.stubEnv("EVOLUTION_PROMOTE_BANCADA", "on");
       const s1 = await seed();
       const c1 = (await evolve(s1.parentId, { request: "Adicionar exportação CSV" })).json().childProjectId as string;
       const st1 = (await pool.query("SELECT status FROM projects WHERE id=$1", [c1])).rows[0].status as string;
@@ -213,8 +215,7 @@ describePg("Fase 0' / 0.3 — reprodução dos defeitos do /evolve (Postgres rea
     it("harness: o filho de pai com spec nasce 'spec_submitted' (projects.ts:3575-3577)", () => {
       expect(withFiles.status).toBe("spec_submitted");
     });
-    // DEFEITO 0.3-d: /evolve deixa o filho em 'spec_submitted'; /promote só admite 'draft' (pipeline.ts:141) ⇒ 409 NOT_ON_WORKBENCH — remover it.fails quando corrigido (tarefa 1.7)
-    it.fails("filho recém-criado por /evolve NÃO é recusado com NOT_ON_WORKBENCH pelo /promote", () => {
+    it("filho recém-criado por /evolve NÃO é recusado com NOT_ON_WORKBENCH pelo /promote", () => {
       expect(withFiles.promote.code).not.toBe("NOT_ON_WORKBENCH");
     });
     it("REFUTAÇÃO parcial: filho de pai SEM arquivos fica 'draft' e o /promote não o recusa por status (cai no gate de spec ausente)", () => {
@@ -224,12 +225,14 @@ describePg("Fase 0' / 0.3 — reprodução dos defeitos do /evolve (Postgres rea
   });
 
   // ── (h) Bancada × filho de evolução (promoção do produto) ─────────────────────────
-  describe("(h) Bancada promove filho de evolução? POST /api/products/:id/promote + veredito da tela", () => {
+  describe("(h) Bancada promove filho de evolução? CORRIGIDO na 1.7 (EVOLUTION_PROMOTE_BANCADA=on): POST /api/products/:id/promote + veredito da tela", () => {
+    afterAll(() => { vi.unstubAllEnvs(); });
     let s: Seed; let lifecycleAfterEvolve: string; let lifecycleAfterRecompute: string | null;
     let promote: { statusCode: number; code?: string; lifecycleStatus?: string };
     let verdict: Awaited<ReturnType<typeof evaluateProductPromotability>>;
     let childExtra: Record<string, unknown>;
     beforeAll(async () => {
+      vi.stubEnv("EVOLUTION_PROMOTE_BANCADA", "on");
       s = await seed();
       const child = (await evolve(s.parentId, { request: "Adicionar exportação CSV" })).json().childProjectId as string;
       childExtra = (await pool.query("SELECT extra FROM projects WHERE id=$1", [child])).rows[0].extra;
@@ -247,12 +250,10 @@ describePg("Fase 0' / 0.3 — reprodução dos defeitos do /evolve (Postgres rea
     it("harness: o filho carrega extra.evolution=true", () => {
       expect(childExtra.evolution).toBe(true);
     });
-    // DEFEITO 0.3-h: produto com filho de evolução está em 'accepted'/'partially_accepted', nunca 'draft'; o promote do produto exige 'draft' (products.ts:1333) ⇒ 409 NOT_ON_WORKBENCH — remover it.fails quando corrigido (tarefa 1.7)
-    it.fails("a Bancada consegue promover o produto que tem um filho de evolução em rascunho (não responde NOT_ON_WORKBENCH)", () => {
+    it("a Bancada consegue promover o produto que tem um filho de evolução em rascunho (não responde NOT_ON_WORKBENCH)", () => {
       expect(promote.code).not.toBe("NOT_ON_WORKBENCH");
     });
-    // DEFEITO 0.3-h: o veredito da tela diz 'já saiu da Bancada' (canPromote=false) para um filho que acabou de entrar nela — remover it.fails quando corrigido (tarefa 1.7)
-    it.fails("o veredito da tela para o produto não é canPromote=false/NOT_ON_WORKBENCH", () => {
+    it("o veredito da tela para o produto não é canPromote=false/NOT_ON_WORKBENCH", () => {
       expect(verdict.reason).not.toBe("NOT_ON_WORKBENCH");
     });
   });

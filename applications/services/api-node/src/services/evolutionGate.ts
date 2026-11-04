@@ -179,8 +179,14 @@ export function compatMax(list: Array<RfcCompat | null>): RfcCompat | null {
   return best;
 }
 
-/** Aplica o gate à promoção de um projeto. Não-evolução → passthrough. Evolução válida → grava metadados. */
-export async function evaluateEvolutionGate(db: Db, projectId: string, extra: Record<string, unknown> | null | undefined): Promise<EvolutionGateResult> {
+/**
+ * Aplica o gate à promoção de um projeto. Não-evolução → passthrough. Evolução válida → grava metadados.
+ * `opts.readOnly` (1.7): mesmo veredito, sem gravar o carimbo (`evolution_rfcs`/`scope`/`request`) em `extra` — para o veredito de
+ * TELA (GET), que não pode escrever. O gate em si (RFC presente + válido) é UM só: nenhum caminho paralelo.
+ */
+export async function evaluateEvolutionGate(
+  db: Db, projectId: string, extra: Record<string, unknown> | null | undefined, opts: { readOnly?: boolean } = {},
+): Promise<EvolutionGateResult> {
   if (!extra || extra.evolution !== true) return { ok: true, applied: false };
   const rfcs = await collectEvolutionRfcs(db, projectId, extra);
   if (rfcs.length === 0) {
@@ -214,9 +220,11 @@ export async function evaluateEvolutionGate(db: Db, projectId: string, extra: Re
   if (typeof extra.evolution_request === "string" && extra.evolution_request && !extra.evolution_request_original) {
     patch.evolution_request_original = extra.evolution_request;
   }
-  await db.query(
-    "UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1",
-    [projectId, JSON.stringify(patch)],
-  );
+  if (!opts.readOnly) {
+    await db.query(
+      "UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1",
+      [projectId, JSON.stringify(patch)],
+    );
+  }
   return { ok: true, applied: true, rfcs: rfcs.length, scope, compat };
 }
