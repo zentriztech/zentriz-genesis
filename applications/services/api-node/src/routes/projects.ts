@@ -7,6 +7,7 @@ import { pushProjectToGitHub, deriveSystemService, gitLinkProjectFolder, checkou
 import { identityInputsFor, resolveLineageRoot } from "../services/lineage.js";
 import { evolveClaimEnabled } from "../services/evolveFlags.js";
 import { runEvolveWithClaim } from "../services/evolveClaim.js";
+import { legacyEvolveBlockedByCard } from "../services/cardPromote.js";
 import { isVersionConflict } from "../services/evolutionUniqueness.js";
 import { getInstallationTokenForClone, repoShortName } from "../services/github.js";
 import { destroyDeployment } from "../services/ephemeralDeploy.js";
@@ -3432,6 +3433,18 @@ export async function projectRoutes(app: FastifyInstance) {
     const ticketId = (request.body?.ticketId ?? "").trim();
     const evolutionRequest = request.body?.request?.trim() ?? "";
     const workMode: "copy" | "branch" = request.body?.workMode === "branch" ? "branch" : "copy";
+
+    // Fase 2 (2.6 d): ticket que é CARD não é promovido por aqui (contornaria base e prontidão e divergiria card_state × status).
+    if (ticketId) {
+      const blocked = await legacyEvolveBlockedByCard(pool, user, ticketId);
+      if (blocked) {
+        return reply.status(409).send({
+          code: "USE_CARD_PROMOTE",
+          message: `Este pedido é um card: promova por POST /api/cards/${blocked.cardId}/promote (o /evolve não conhece base nem prontidão do card).`,
+          cardId: blocked.cardId,
+        });
+      }
+    }
 
     // Fase 1' (tarefas 1.1–1.3): com EVOLVE_CLAIM=on o /evolve roda em duas etapas (claim transacional com
     // advisory lock por linhagem + passos idempotentes) — services/evolveClaim.ts. Com `off` (padrão) o handler

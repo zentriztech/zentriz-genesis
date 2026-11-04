@@ -21,6 +21,7 @@ import {
 } from "./ticketAttachments.js";
 import { getAttachmentConverter, conversionOrigin } from "./attachmentConversion.js";
 import { attachmentConversionEnabled, drainTicketConversions } from "./attachmentConversionQueue.js";
+import { transitionCard } from "./cardState.js";
 
 export type TicketChangeKind = "evolution" | "fix" | "feature";
 export type TicketStatus = "open" | "promoted" | "delivered" | "rejected";
@@ -312,12 +313,15 @@ export function evolutionRequestHeader(version: number, ticket?: { number: numbe
  * que não existe mais. Devolve quantos pedidos voltaram à fila.
  */
 export async function reopenTicketsOfChild(db: Db, childProjectId: string, opts: { strict?: boolean; reason?: string } = {}): Promise<number> {
+  // Fase 2 (2.6 d): card cujo filho foi descartado volta a `ready` PELA máquina (vínculo limpo, evento auditado); `delivered` fica.
+  // Ticket legado (card_state NULL) segue os caminhos históricos abaixo, byte a byte.
+  const cardsReopened = await reopenCardsOfChild(db, childProjectId, opts.reason ?? "child_discarded");
   if (opts.strict) {
     // Tarefa 1.4 (TICKET_TRANSITIONS=on): reabre SOMENTE `promoted` (um `delivered` é histórico, um `rejected` é decisão humana)
     // e audita cada ticket reaberto em `ticket_events` (ator `system`, motivo = por que o filho saiu).
     const r = await db.query(
       `UPDATE tickets SET status = 'open', child_project_id = NULL, promoted_at = NULL, delivered_at = NULL, updated_at = now()
-        WHERE child_project_id = $1 AND status = 'promoted' RETURNING id`,
+        WHERE child_project_id = $1 AND status = 'promoted' AND card_state IS NULL RETURNING id`,
       [childProjectId],
     );
     for (const row of (r as unknown as { rows?: Array<{ id: string }> }).rows ?? []) {
@@ -327,14 +331,26 @@ export async function reopenTicketsOfChild(db: Db, childProjectId: string, opts:
         [row.id, opts.reason ?? "child_discarded", childProjectId],
       );
     }
-    return r.rowCount ?? 0;
+    return (r.rowCount ?? 0) + cardsReopened;
   }
   const r = await db.query(
     `UPDATE tickets SET status = 'open', child_project_id = NULL, promoted_at = NULL, delivered_at = NULL, updated_at = now()
-      WHERE child_project_id = $1 AND status <> 'rejected'`,
+      WHERE child_project_id = $1 AND status <> 'rejected' AND card_state IS NULL`,
     [childProjectId],
   );
-  return r.rowCount ?? 0;
+  return (r.rowCount ?? 0) + cardsReopened;
+}
+
+async function reopenCardsOfChild(db: Db, childProjectId: string, reason: string): Promise<number> {
+  const cards = await db.query(
+    "SELECT id FROM tickets WHERE child_project_id = $1 AND card_state IN ('promoted', 'in_factory', 'blocked')", [childProjectId],
+  );
+  let n = 0;
+  for (const c of (cards as unknown as { rows?: Array<{ id: string }> }).rows ?? []) {
+    const t = await transitionCard(db, { ticketId: String(c.id), to: "ready", actorKind: "system", reason, dedupeKey: `child_discarded:${childProjectId}` });
+    if (t.kind === "applied") n++;
+  }
+  return n;
 }
 
 /** Carimbo curto para commit/PR. `null` quando não há ticket — nada muda no caminho antigo. */

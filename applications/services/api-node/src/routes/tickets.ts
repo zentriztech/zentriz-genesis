@@ -18,6 +18,7 @@ import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { sha256Hex } from "../lib/specTreeHash.js";
 import { kickTicketConversions } from "../services/attachmentConversionQueue.js";
+import { deleteCard, legacyPatchCard, type CardRow } from "../services/cardService.js";
 import {
   allocTicketNumber, isTicketChangeKind, loadTicket, loadTicketAttachments,
   ticketCode, ticketUploadDir, type TicketRow,
@@ -290,6 +291,13 @@ export async function ticketRoutes(app: FastifyInstance) {
         return reply.status(404).send({ code: "NOT_FOUND", message: "Pedido não encontrado" });
       }
       const b = request.body ?? {};
+      // Fase 2 (2.6 d): ticket que já é card (`card_state` não nulo) escreve PELA máquina de estados — o contrato de resposta é o mesmo.
+      if ((ticket as unknown as CardRow).card_state) {
+        const routed = await legacyPatchCard(pool, ticket as unknown as CardRow, b, user);
+        if (routed.kind === "error") return reply.status(routed.status).send(routed.body);
+        const [out] = await hydrate([routed.row]);
+        return reply.send(out);
+      }
       const patch: string[] = [];
       const vals: unknown[] = [ticket.id];
 
@@ -408,6 +416,16 @@ export async function ticketRoutes(app: FastifyInstance) {
       return reply.status(409).send({
         code: "TICKET_PROMOTED",
         message: `${ticketCode(ticket.number)} já foi promovido — recuse (status 'rejected') em vez de apagar o histórico.`,
+      });
+    }
+    // Fase 2 (2.6 d): card só se exclui em draft (CAS no banco) e leva o rascunho junto.
+    if ((ticket as unknown as CardRow).card_state) {
+      const r = await deleteCard(pool, ticket.id);
+      if (r.kind === "deleted") return reply.status(204).send();
+      if (r.kind === "not_found") return reply.status(404).send({ code: "NOT_FOUND", message: "Pedido não encontrado" });
+      return reply.status(409).send({
+        code: "TICKET_PROMOTED",
+        message: `${ticketCode(ticket.number)} é um card em '${r.state}': só se exclui um card em draft — recuse (status 'rejected') em vez de apagar o histórico.`,
       });
     }
     // M-07: CAS no BANCO (não na memória): em corrida com o claim do /evolve (que promove com `WHERE status='open'`),

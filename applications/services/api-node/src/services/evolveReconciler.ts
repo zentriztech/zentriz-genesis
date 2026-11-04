@@ -14,7 +14,7 @@
  * Valor ausente ou desconhecido ⇒ off (fail-safe).
  *
  * Achados (kind): claim_expired_no_effects · claim_expired_with_effects · ticket_promoted_without_child ·
- * child_ticket_mismatch · evolution_in_flight_stuck · uniqueness_index_missing.
+ * child_ticket_mismatch · evolution_in_flight_stuck · uniqueness_index_missing · card_status_divergence (Q6, Fase 2: só detecta).
  * Sem PII: o achado guarda só hash (sha256/16 hex) de id, códigos, contagens e idades.
  */
 import type { Pool, PoolClient } from "pg";
@@ -28,6 +28,7 @@ import { UNIQUENESS_INDEXES, getUniquenessCounters } from "./evolutionUniqueness
 import { isSesConfigured, sendEmail } from "./emailSender.js";
 import { readRuntimeNumber } from "./runtimeTunables.js";
 import { resolveReconcilerMode } from "./featureFlags.js";
+import { findCardStatusDivergences, transitionCard } from "./cardState.js";
 
 export type ReconcilerMode = "off" | "shadow" | "on";
 export function reconcilerMode(env: NodeJS.ProcessEnv = process.env): ReconcilerMode {
@@ -58,7 +59,8 @@ export const RECONCILER_LOCK_KEY = 0;
 
 export type FindingKind =
   | "claim_expired_no_effects" | "claim_expired_with_effects" | "ticket_promoted_without_child"
-  | "child_ticket_mismatch" | "evolution_in_flight_stuck" | "uniqueness_index_missing" | "reconciler_disk_unverifiable";
+  | "child_ticket_mismatch" | "evolution_in_flight_stuck" | "uniqueness_index_missing" | "reconciler_disk_unverifiable"
+  | "card_status_divergence";
 
 export interface Finding {
   kind: FindingKind;
@@ -86,6 +88,7 @@ const empty = (mode: ReconcilerMode, skipped?: ReconcilerResult["skipped"]): Rec
 const ALL_KINDS: FindingKind[] = [
   "claim_expired_no_effects", "claim_expired_with_effects", "ticket_promoted_without_child",
   "child_ticket_mismatch", "evolution_in_flight_stuck", "uniqueness_index_missing", "reconciler_disk_unverifiable",
+  "card_status_divergence",
 ];
 
 type Json = Record<string, unknown>;
@@ -165,9 +168,14 @@ export async function cleanExpiredClaim(pool: Pool, c: { id: string; root: strin
       [c.id, Math.floor(p.claimGraceS)],
     );
     if ((up.rowCount ?? 0) === 0) { await client.query("ROLLBACK"); return false; }
+    // Fase 2 (2.6 d): card cujo claim vencido sem efeitos foi limpo volta a `ready` PELA máquina (vínculo limpo + evento `ticket_card_events`).
+    const cards = await client.query("SELECT id FROM tickets WHERE child_project_id = $1 AND card_state = 'promoted'", [c.id]);
+    for (const k of cards.rows) {
+      await transitionCard(client, { ticketId: String(k.id), to: "ready", actorKind: "system", reason: "claim_expired_no_effects", dedupeKey: `claim_expired:${c.id}` });
+    }
     const reopened = await client.query(
       `UPDATE tickets SET status = 'open', child_project_id = NULL, promoted_at = NULL, updated_at = now()
-        WHERE child_project_id = $1 AND status = 'promoted' RETURNING id, tenant_id`,
+        WHERE child_project_id = $1 AND status = 'promoted' AND card_state IS NULL RETURNING id, tenant_id`,
       [c.id],
     );
     // M-07: com TICKET_TRANSITIONS=on a reabertura promoted → open deixa evento (ator `system`), como o failTerminal.
@@ -257,6 +265,15 @@ async function detectStuckInFlight(db: Pool | PoolClient, p: ReconcilerParams): 
   return r.rows.map((x) => ({
     kind: "evolution_in_flight_stuck" as const, entityHash: hashId(String(x.id)), projectHash: hashId(String(x.id)), ticketHash: null,
     severity: "warning" as const, detail: { status: String(x.status), idle_hours: Math.round(Number(x.age_s) / 360) / 10 },
+  }));
+}
+
+/** Q6 (H §7): `card_state` × `tickets.status` divergentes. Só detecta — a correção é humana ou a próxima transição pela máquina. */
+async function detectCardDivergences(db: Pool | PoolClient): Promise<Finding[]> {
+  const rows = await findCardStatusDivergences(db, { limit: 200 });
+  return rows.map((x) => ({
+    kind: "card_status_divergence" as const, entityHash: hashId(x.ticketId), projectHash: null, ticketHash: hashId(x.ticketId), severity: "warning" as const,
+    detail: { card_state: x.cardState, status: x.status, expected_status: x.expectedStatus },
   }));
 }
 
@@ -393,6 +410,7 @@ export async function runReconcilerPass(pool: Pool, env: NodeJS.ProcessEnv = pro
     await run(["child_ticket_mismatch"], async () => { findings.push(...await detectChildTicketMismatch(pool, p)); });
     await run(["evolution_in_flight_stuck"], async () => { findings.push(...await detectStuckInFlight(pool, p)); });
     await run(["uniqueness_index_missing"], async () => { findings.push(...await detectMissingIndexes(pool)); });
+    await run(["card_status_divergence"], async () => { findings.push(...await detectCardDivergences(pool)); });
 
     const seen = new Set<string>();
     for (const f of findings) {
