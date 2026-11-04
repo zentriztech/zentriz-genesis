@@ -17,6 +17,8 @@ vi.mock("./evolutionState.js", () => checkpoint);
 vi.mock("./lineage.js", () => ({ resolveLineageRoot: vi.fn(async () => ({ id: "root", title: "R", product_id: null, depth: 0 })) }));
 const hooks = { runPostMergeHooks: vi.fn(async () => {}) };
 vi.mock("./postMerge/runPostMergeHooks.js", () => hooks);
+const delivery = { deliverCardsOfChild: vi.fn(async () => []) };
+vi.mock("./cardDelivery.js", () => delivery);
 vi.mock("./evolutionAccept.js", () => ({ buildPullRequestBody: vi.fn(async () => "corpo do PR") }));
 
 const { tryAutoMergeEvolution, __setMergeSleepForTests } = await import("./evolutionMerge.js");
@@ -183,6 +185,27 @@ describe("tryAutoMergeEvolution — force contorna política, não realidade nem
     const { db } = makeDb({ row: baseRow(evolExtra({ evolution_compat: "major" })) });
     const r = await tryAutoMergeEvolution(db as never, "child", { force: true, actorUserId: "u-42" });
     expect(r.state).toBe("merged");
+  });
+});
+
+describe("tryAutoMergeEvolution — carimbo do ticket no commit de merge (4.4)", () => {
+  it("com ticket_number: commit_title do squash começa com TK-NNNN", async () => {
+    process.env.EVOLUTION_AUTO_MERGE = "on";
+    const { db } = makeDb({ row: baseRow(evolExtra({ ticket_number: 12 })) });
+    expect((await tryAutoMergeEvolution(db as never, "child")).state).toBe("merged");
+    expect(gh.mergePullRequest).toHaveBeenCalledWith(100, expect.objectContaining({ commitTitle: expect.stringMatching(/^TK-0012 · Evolução v1\.1\.0 — / ) }));
+  });
+  it("4.3: depois de gravar o merge, entrega os cards do filho (deliverCardsOfChild)", async () => {
+    process.env.EVOLUTION_AUTO_MERGE = "on";
+    const { db } = makeDb({ row: baseRow(evolExtra()) });
+    await tryAutoMergeEvolution(db as never, "child");
+    expect(delivery.deliverCardsOfChild).toHaveBeenCalledWith(db, "child");
+  });
+  it("sem ticket_number: título idêntico ao histórico (sem prefixo)", async () => {
+    process.env.EVOLUTION_AUTO_MERGE = "on";
+    const { db } = makeDb({ row: baseRow(evolExtra()) });
+    await tryAutoMergeEvolution(db as never, "child");
+    expect(gh.mergePullRequest).toHaveBeenCalledWith(100, expect.objectContaining({ commitTitle: expect.stringMatching(/^Evolução v1\.1\.0 — / ) }));
   });
 });
 

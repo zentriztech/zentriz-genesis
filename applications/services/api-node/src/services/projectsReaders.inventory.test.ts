@@ -74,6 +74,7 @@ const EXCEPTIONS: Record<string, string> = {
   "routes/tenants.ts:6cecc7d7": "Métrica administrativa projects_count do tenant (visão da plataforma); reavaliar se virar métrica de plano (S §3.3)",
   "routes/users.ts:2ca26a2b": "DEVE contar o rascunho: usuário que criou um rascunho não pode ser excluído sem destino (autoria)",
   "services/costReconcile.ts:dd6e0fcf": "DEVE contar o rascunho: reconciliação de custo do ledger por tenant inclui o chat do rascunho (S §3.3)",
+  "services/cardDelivery.ts:f0e686f7": "Busca por id de projeto já resolvido (join por project_id/id); não lista projetos do produto/tenant, então o rascunho só aparece para quem já tem o id",
   "services/evolutionMerge.ts:f0a7a098": "Busca por id de projeto já resolvido (join por project_id/id); não lista projetos do produto/tenant, então o rascunho só aparece para quem já tem o id",
   "services/evolutionPromote.ts:f20bf521": "Lista de permissão por constante (EVOLUTION_PROMOTABLE_STATUSES): exclui card_draft por construção",
   "services/evolveClaim.ts:a6b7bb19": "findExisting (S-02): casa por extra.ticket_id / evolve_idempotency_key; o rascunho grava extra.card_ticket_id (não ticket_id nem a chave), então não é adotado — coberto por teste de regressão",

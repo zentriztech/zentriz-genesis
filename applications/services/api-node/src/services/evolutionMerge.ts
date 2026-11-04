@@ -17,6 +17,7 @@
  */
 import type { Pool } from "pg";
 import { resolveLineageRoot } from "./lineage.js";
+import { ticketStamp } from "./tickets.js";
 import { readEvolutionCheckpoint } from "./evolutionState.js";
 import { getPullRequest, mergePullRequest, updatePullRequestBranch } from "./github.js";
 
@@ -347,7 +348,9 @@ export async function tryAutoMergeEvolution(
 
   // 7. Merge (sha = head empurrado; 409 se moveu — GAP 2).
   let method = configuredMethod();
-  let commitTitle = sanitizeTitle(`Evolução v${version || pr.headSha.slice(0, 7)} — ${row.title ?? childId}`);
+  // Tarefa 4.4 (RFC-0009 F3): o squash vira UM commit em `dev`; o carimbo do ticket no título faz `git log --grep=TK-NNNN` achá-lo.
+  const mergeStamp = ticketStamp(extra);
+  let commitTitle = sanitizeTitle(`${mergeStamp ? `${mergeStamp} · ` : ""}Evolução v${version || pr.headSha.slice(0, 7)} — ${row.title ?? childId}`);
   let commitMessage = "";
   try {
     const { buildPullRequestBody } = await import("./evolutionAccept.js");
@@ -414,5 +417,10 @@ async function recordMergedAndHooks(
   } catch (e) {
     await logDialogue(db, childId, `⚠️ Hooks pós-merge falharam (não bloqueiam o merge): ${e instanceof Error ? e.message : String(e)}`);
   }
+  // Tarefa 4.3: o merge é o último requisito do card — filho aceito + PR mergeado ⇒ `delivered`. Best-effort e idempotente; ticket legado = no-op.
+  try {
+    const { deliverCardsOfChild } = await import("./cardDelivery.js");
+    await deliverCardsOfChild(db as never, childId);
+  } catch { /* o merge já foi gravado; o reconciliador entrega depois */ }
   return { state: "merged", sha: sha || undefined };
 }

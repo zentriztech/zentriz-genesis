@@ -31,6 +31,11 @@ const execFileAsync = promisify(execFile);
 import { notifyTelegramTenant } from "../routes/telegram.js";
 import { validateDeployMatrix } from "./provision/deployMatrix.js";
 import { ticketStamp } from "./tickets.js";
+
+/** Título do PR da evolução (RFC-0009 F3 / tarefa 4.4): `TK-NNNN · Evolução vX — título` (sem ticket, sem o prefixo). Puro. */
+export function evolutionPrTitle(stamp: string | null, versionLabel: string, title: string): string {
+  return `${stamp ? `${stamp} · ` : ""}Evolução v${versionLabel} — ${title.replace(/ — Evolução v\d+$/i, "")}`;
+}
 import { safeErrorMessage } from "../lib/redactSecrets.js";
 import { renderMobileRncliBundle } from "./provision/renderers/mobileRncliRenderer.js";
 import { renderMobileEasBundle } from "./provision/renderers/mobileEasRenderer.js";
@@ -696,7 +701,7 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
 
     const pr = await openPullRequest(installationId, {
       owner, repo: repoName, head: branch, base: "dev",
-      title: `${stamp ? `${stamp} · ` : ""}Evolução v${opts.versionLabel} — ${(opts.title ?? (row.title as string) ?? projectId).replace(/ — Evolução v\d+$/i, "")}`,
+      title: evolutionPrTitle(stamp, opts.versionLabel, opts.title ?? (row.title as string) ?? projectId),
       body: opts.prBody,
     });
 

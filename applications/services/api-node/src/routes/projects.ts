@@ -821,6 +821,9 @@ export async function projectRoutes(app: FastifyInstance) {
           const { runEvolutionAcceptFlow } = await import("../services/evolutionAccept.js");
           const handled = await runEvolutionAcceptFlow(pool, id);
           if (!handled) await pushProjectToGitHub(id);
+          // Tarefa 4.3: card ligado a este filho ⇒ `delivered` quando o PR já estiver mergeado (senão, quando o merge ocorrer / o reconciliador). No-op sem card.
+          const { deliverCardsOfChild } = await import("../services/cardDelivery.js");
+          await deliverCardsOfChild(pool, id);
         } catch (e) {
           console.error("[accept] side-effect GitHub/evolução falhou:", e);
         }

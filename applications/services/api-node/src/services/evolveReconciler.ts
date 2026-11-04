@@ -83,6 +83,7 @@ export interface ReconcilerResult {
   byKind: Record<string, number>;
   /** Fase 3 (3.5): transições card × filho aplicadas nesta passada (só em `on`; ausente nos demais modos). */
   cardsSynced?: number;
+  cardsDelivered?: number;
 }
 const empty = (mode: ReconcilerMode, skipped?: ReconcilerResult["skipped"]): ReconcilerResult =>
   ({ mode, skipped, detected: 0, cleaned: 0, resolved: 0, notified: 0, byKind: {} });
@@ -418,6 +419,9 @@ export async function runReconcilerPass(pool: Pool, env: NodeJS.ProcessEnv = pro
     if (mode === "on") {
       const { syncCardsWithChildren } = await import("./cardPromote.js");
       res.cardsSynced = await syncCardsWithChildren(pool);
+      // Fase 4 (4.3): card cujo filho já está `accepted` (merge feito no GitHub, aceite sem o gancho) é entregue pela mesma transição idempotente.
+      const { deliverAcceptedCards } = await import("./cardDelivery.js");
+      res.cardsDelivered = await deliverAcceptedCards(pool);
     }
 
     const seen = new Set<string>();
