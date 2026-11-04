@@ -28,7 +28,7 @@ const FILES_ROOT = await vi.hoisted(async () => {
 const remote = vi.hoisted(() => ({ url: null as string | null }));
 
 import {
-  describePg, openPg, dbClientMock, authMock, seedAcceptedProduct, seedTicket, buildApp, childrenOf, ticketRow, type Seed,
+  describePg, openPg, dbClientMock, authMock, seedAcceptedProduct, seedTicket, buildApp, childrenOf, ticketRow, queryGate, type Seed,
 } from "../testing/evolvePg.js";
 
 vi.mock("../db/client.js", () => dbClientMock());
@@ -495,6 +495,58 @@ describePg("Revisão M / motor do claim e consistência (Postgres real)", () => 
       expect(r.statusCode).toBe(201);
       expect(r.json().evolutionSource).toBe("disk-copy");
       expect(r.json().evolutionSourceError).toBeTruthy();
+    });
+  });
+
+  // ── M-07 : caminho legado (EVOLVE_CLAIM=off) com TICKET_TRANSITIONS=on ─────────────────────
+  describe("M-07 — /evolve legado (EVOLVE_CLAIM=off) com TICKET_TRANSITIONS=on: promoção com CAS e evento", () => {
+    const legacy = async (fn: () => Promise<void>) => {
+      vi.stubEnv("EVOLVE_CLAIM", "off");
+      vi.stubEnv("TICKET_TRANSITIONS", "on");
+      try { await fn(); } finally { vi.unstubAllEnvs(); vi.stubEnv("EVOLVE_CLAIM", "on"); }
+    };
+    const eventsOf = async (ticketId: string) => (await pool.query(
+      "SELECT from_status, to_status, actor_kind, reason FROM ticket_events WHERE ticket_id = $1 ORDER BY id", [ticketId])).rows;
+
+    it("promove e grava o evento open→promoted (reason evolve_legacy)", async () => {
+      await legacy(async () => {
+        const s = await seed();
+        const t = await seedTicket(pool, s);
+        const r = await evolve(s.parentId, { ticketId: t.id });
+        expect(r.statusCode).toBe(201);
+        expect((await ticketRow(pool, t.id)).status).toBe("promoted");
+        expect(await eventsOf(t.id)).toEqual([{ from_status: "open", to_status: "promoted", actor_kind: "system", reason: "evolve_legacy" }]);
+      });
+    });
+
+    it("pedido recusado entre a leitura e a promoção: o CAS impede rejected→promoted (sem evento; o filho registra o conflito)", async () => {
+      await legacy(async () => {
+        const s = await seed();
+        const t = await seedTicket(pool, s);
+        const gate = queryGate(pool, /UPDATE tickets SET status = 'promoted'/, { mode: "hold-before", arrivals: 1 });
+        const racing = evolve(s.parentId, { ticketId: t.id });
+        await gate.reached;
+        await pool.query("UPDATE tickets SET status = 'rejected' WHERE id = $1", [t.id]);
+        gate.release();
+        const r = await racing;
+        gate.uninstall();
+        const kid = (await childrenOf(pool, s.parentId))[0];
+        ev("m07-legado-cas", { status: r.statusCode, ticket: (await ticketRow(pool, t.id)).status, eventos: (await eventsOf(t.id)).length, conflito: kid.extra.ticket_promotion_conflict });
+        expect((await ticketRow(pool, t.id)).status).toBe("rejected"); // antes: virava 'promoted'
+        expect(await eventsOf(t.id)).toEqual([]);
+        expect(kid.extra.ticket_promotion_conflict).toBe(true);
+      });
+    });
+
+    it("com TICKET_TRANSITIONS=off o UPDATE legado segue idêntico ao histórico (sem CAS, sem evento)", async () => {
+      vi.stubEnv("EVOLVE_CLAIM", "off");
+      try {
+        const s = await seed();
+        const t = await seedTicket(pool, s);
+        expect((await evolve(s.parentId, { ticketId: t.id })).statusCode).toBe(201);
+        expect((await ticketRow(pool, t.id)).status).toBe("promoted");
+        expect(await eventsOf(t.id)).toEqual([]);
+      } finally { vi.unstubAllEnvs(); vi.stubEnv("EVOLVE_CLAIM", "on"); }
     });
   });
 });
