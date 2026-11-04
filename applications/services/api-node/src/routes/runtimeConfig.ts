@@ -42,6 +42,10 @@ const CONFIG_KEYS: Record<string, { label: string; group: string; unit: string; 
   // cobrir a cópia + o que a edição acrescenta. Lido pela api (specChat.ts) a cada pedido — sem deploy.
   // Faixa = SPEC_CHAT_MAX_TOKENS_BOUNDS (piso histórico da fórmula, teto seguro do SDK).
   SPEC_CHAT_MAX_TOKENS:   { label: "Max tokens Chat da Bancada (arquivo)", group: "tokens", unit: "tk", min: 8000, max: 32000 },
+  // Tarefa 1.5 (anexos do card): tetos por card, valendo só com ATTACHMENTS_STRICT=on. calibrado=falso.
+  ATTACHMENT_MAX_FILES:       { label: "Anexos: máx. arquivos por card", group: "limits", unit: "", min: 1, max: 50 },
+  ATTACHMENT_MAX_TOTAL_BYTES: { label: "Anexos: máx. bytes somados por card", group: "limits", unit: "B", min: 1024, max: 209715200 },
+  ATTACHMENT_MAX_FILE_BYTES:  { label: "Anexos: máx. bytes por arquivo", group: "limits", unit: "B", min: 1024, max: 52428800 },
 };
 
 export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {

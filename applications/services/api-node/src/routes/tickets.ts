@@ -21,6 +21,9 @@ import {
   allocTicketNumber, isTicketChangeKind, loadTicket, loadTicketAttachments,
   ticketCode, ticketUploadDir, type TicketRow,
 } from "../services/tickets.js";
+import {
+  attachmentsStrict, classifyAttachment, loadAttachmentLimits, validateAttachments,
+} from "../services/ticketAttachments.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -156,6 +159,17 @@ export async function ticketRoutes(app: FastifyInstance) {
       }
     }
 
+    // Tarefa 1.5 (ATTACHMENTS_STRICT=on): allowlist por extensão + magic bytes + tetos por card (genesis_runtime_config).
+    // Recusa o pedido INTEIRO com a lista completa de problemas — nada de aceitar parte e sumir com o resto.
+    const strictAttachments = attachmentsStrict();
+    if (strictAttachments && files.length > 0) {
+      const limits = await loadAttachmentLimits(pool, product.tenant_id);
+      const problems = validateAttachments(files, limits);
+      if (problems.length > 0) {
+        return reply.status(400).send({ code: "ATTACHMENT_INVALID", message: problems.map((p) => p.message).join(" "), errors: problems });
+      }
+    }
+
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -175,11 +189,19 @@ export async function ticketRoutes(app: FastifyInstance) {
         for (const f of files) {
           const dest = join(dir, f.filename);
           writeFileSync(dest, f.buffer);
-          await client.query(
-            `INSERT INTO ticket_attachments (ticket_id, filename, file_path, mime_type, size_bytes, content_sha256)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
-            [ticket.id, f.filename, dest, f.mimeType, f.buffer.length, sha256Hex(f.buffer)],
-          );
+          if (strictAttachments) {
+            await client.query(
+              `INSERT INTO ticket_attachments (ticket_id, filename, file_path, mime_type, size_bytes, content_sha256, kind, origin)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'upload')`,
+              [ticket.id, f.filename, dest, f.mimeType, f.buffer.length, sha256Hex(f.buffer), classifyAttachment(f.filename) ?? "card_only"],
+            );
+          } else {
+            await client.query(
+              `INSERT INTO ticket_attachments (ticket_id, filename, file_path, mime_type, size_bytes, content_sha256)
+               VALUES ($1, $2, $3, $4, $5, $6)`,
+              [ticket.id, f.filename, dest, f.mimeType, f.buffer.length, sha256Hex(f.buffer)],
+            );
+          }
         }
       }
       await client.query("COMMIT");
@@ -224,8 +246,11 @@ export async function ticketRoutes(app: FastifyInstance) {
       return reply.status(404).send({ code: "NOT_FOUND", message: "Pedido não encontrado" });
     }
     const [out] = await hydrate([ticket]);
-    const attachments = (await loadTicketAttachments(pool, ticket.id)).map((a) => ({
+    const strictAtt = attachmentsStrict();
+    const attachments = (await loadTicketAttachments(pool, ticket.id, { extended: strictAtt })).map((a) => ({
       id: a.id, filename: a.filename, mimeType: a.mime_type, sizeBytes: Number(a.size_bytes),
+      // ATTACHMENTS_STRICT=on: tipo, hash e origem (upload | converted:<id>) — off mantém o formato anterior.
+      ...(strictAtt ? { kind: a.kind, contentSha256: a.content_sha256, origin: a.origin, derivedFromAttachmentId: a.derived_from_attachment_id ?? null } : {}),
     }));
     return reply.send({ ...out, attachments });
   });
@@ -296,6 +321,33 @@ export async function ticketRoutes(app: FastifyInstance) {
     }
     await pool.query("DELETE FROM tickets WHERE id = $1", [ticket.id]);
     return reply.status(204).send();
+  });
+
+  // ── Anexos do card de um projeto filho (separados dos arquivos de texto da spec) ───────────────
+  // Tarefa 1.5(d): GET /api/projects/:id/spec-files lista só texto da spec; os documentos guardados no card
+  // (pdf/doc/docx e demais não-texto) saem por aqui, com link de download do pedido.
+  app.get<{ Params: { id: string } }>("/api/projects/:id/ticket-attachments", async (request, reply) => {
+    const user = getUser(request);
+    const proj = (await pool.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [request.params.id]))
+      .rows[0] as { id: string; tenant_id: string | null; created_by: string | null } | undefined;
+    if (!proj || !canAccessProjectRow(user, proj)) {
+      return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+    }
+    const rows = (await pool.query(
+      `SELECT a.id, a.ticket_id, t.number, a.filename, a.mime_type, a.size_bytes, a.content_sha256, a.kind, a.origin, a.derived_from_attachment_id
+         FROM ticket_attachments a JOIN tickets t ON t.id = a.ticket_id
+        WHERE t.child_project_id = $1
+        ORDER BY t.number ASC, a.created_at ASC`,
+      [proj.id],
+    )).rows as Array<Record<string, unknown>>;
+    return reply.send(rows
+      .filter((r) => classifyAttachment(String(r.filename)) !== "spec_text")
+      .map((r) => ({
+        id: r.id, ticketId: r.ticket_id, ticketCode: ticketCode(Number(r.number)), filename: r.filename, mimeType: r.mime_type,
+        sizeBytes: Number(r.size_bytes), contentSha256: r.content_sha256, kind: "card_only", origin: r.origin,
+        derivedFromAttachmentId: r.derived_from_attachment_id ?? null,
+        downloadUrl: `/api/tickets/${r.ticket_id}/attachments/${r.id}`,
+      })));
   });
 
   // ── Download de anexo ─────────────────────────────────────────────────────────

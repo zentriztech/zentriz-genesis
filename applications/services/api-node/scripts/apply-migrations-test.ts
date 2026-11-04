@@ -5,8 +5,8 @@
  * Recusa rodar sem DATABASE_URL apontando para localhost:55432 (evita tocar dev/produção).
  */
 const url = process.env.DATABASE_URL ?? "";
-if (!/@(localhost|127\.0\.0\.1):55432\//.test(url)) {
-  console.error("Recusado: DATABASE_URL deve apontar para o Postgres efêmero em localhost:55432");
+if (!/@(localhost|127\.0\.0\.1):(55432|55441)\//.test(url)) {
+  console.error("Recusado: DATABASE_URL deve apontar para o Postgres efêmero em localhost:55432 ou 55441");
   process.exit(2);
 }
 const { initDb } = await import("../src/db/init.js");
