@@ -11,6 +11,7 @@ import { pool } from "../db/client.js";
 import { detectStaticProject, type DetectionResult } from "./staticDetector.js";
 import { generateBucketName, isS3Configured } from "./s3.js";
 import { getInstallationTokenForClone, repoShortName } from "./github.js";
+import { safeErrorMessage } from "../lib/redactSecrets.js";
 import { resolveDeployCredentials } from "./provision/deployCredentials.js";
 import { join } from "node:path";
 
@@ -225,7 +226,7 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
   } catch (err) {
     await pool.query(
       `UPDATE ephemeral_deployments SET status='failed', error_msg=$1, updated_at=now() WHERE id=$2`,
-      [`installation token error: ${err instanceof Error ? err.message : String(err)}`, deploymentId],
+      [`installation token error: ${safeErrorMessage(err)}`, deploymentId],
     );
     return {
       ok: false,
