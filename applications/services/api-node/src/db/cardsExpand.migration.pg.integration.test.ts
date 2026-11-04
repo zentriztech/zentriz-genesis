@@ -124,7 +124,7 @@ describePg("Fase 2 — migrations expand 148/149/150 (Postgres real)", () => {
     const py = readFileSync(join(here, "..", "..", "..", "..", "orchestrator", "runner.py"), "utf-8");
     expect(py).toContain(String.raw`task_id_pattern = _re.compile(r'\b(TSK-[A-Z]+-\d+|TSK-\d+)\b')`);
     expect(py).toContain(String.raw`r'^\s*(?:#{2,4}\s+|\|\s*|\-\s+|\*\s+)(?:\**)?(TSK-[A-Z]+-\d+|TSK-\d+)\b'`);
-    expect(py).not.toMatch(/TSK-EVO-\\d|card_id/); // o runner ainda não conhece o card (Fase 4)
+    expect(py).not.toMatch(/TSK-EVO-\\d/); // Fase 4 (4.2): o runner passou a ligar TSK-EVO-* ao card (card_id, `_link_tasks_to_card`), mas o regex de ID não ganhou padrão EVO
   });
 
   // S-08: a reserva da migration 146 foi ABANDONADA; o esquema final, depois de TODAS as migrations, é o que as fases seguintes esperam.

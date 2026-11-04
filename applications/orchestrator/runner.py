@@ -4177,8 +4177,38 @@ def _inherited_task_ids(project_id: str) -> list[str]:
             if isinstance(t, dict) and str(t.get("taskId") or t.get("task_id") or "").startswith("TSK-INH-")]
 
 
-def _seed_tasks(project_id: str, pm_module: str = "web") -> bool:
+def _apply_change_context(pipeline_ctx, extra: dict) -> dict:
+    """Fase 4 (4.1/4.2): grava no PipelineContext o tipo do card, a origem da spec (`card:TK-NNNN`), o `card_id` e o arquivo de
+    spec de origem, derivados de `projects.extra` do filho. Sem contexto, não faz nada."""
+    from orchestrator.change_kind import derive_change_context
+    cc = derive_change_context(extra)
+    if pipeline_ctx is not None:
+        pipeline_ctx.ticket_kind = cc["ticket_kind"]
+        pipeline_ctx.spec_origin = cc["spec_origin"]
+        pipeline_ctx.card_id = cc["card_id"]
+        pipeline_ctx.origin_spec_file = cc["origin_spec_file"]
+        if cc["card_id"]:
+            logger.info("[F4] Card %s (tipo=%s) — TSK-EVO-* serão ligadas ao card.", cc["spec_origin"], cc["ticket_kind"])
+    return cc
+
+
+def _link_tasks_to_card(tasks: list[dict], card_id: str | None, origin_spec_file: str | None) -> list[dict]:
+    """Fase 4 (4.2): só as tasks NOVAS `TSK-EVO-*` recebem `card_id`/`origin_spec_file` (o ID não muda). As herdadas
+    (`TSK-INH-*`, DONE) e as demais (FULL-TEST, DevOps…) ficam como estão. Sem card ⇒ lista inalterada."""
+    if not card_id:
+        return tasks
+    out: list[dict] = []
+    for t in tasks:
+        tid = str(t.get("task_id") or t.get("taskId") or "")
+        if tid.startswith("TSK-EVO-"):
+            t = {**t, "card_id": card_id, **({"origin_spec_file": origin_spec_file} if origin_spec_file else {})}
+        out.append(t)
+    return out
+
+
+def _seed_tasks(project_id: str, pm_module: str = "web", card_id: str | None = None, origin_spec_file: str | None = None) -> bool:
     tasks = _parse_tasks_from_backlog(project_id, pm_module)
+    tasks = _link_tasks_to_card(tasks, card_id, origin_spec_file)
 
     # TaskState: preservar status de tasks já terminadas (idempotência entre restarts)
     try:
@@ -6136,6 +6166,8 @@ def main() -> int:
                 _evolution_request   = _extra.get("evolution_request", "")
                 _evolution_work_mode = _extra.get("evolution_work_mode", "copy")
                 _parent_project_id_evo = _extra.get("evolution_parent_id")
+                # Fase 4 (4.1/4.2): tipo do card e origem da spec vêm de `extra` (não do frontmatter); card_id liga as TSK-EVO-*.
+                _apply_change_context(pipeline_ctx, _extra)
                 logger.info("[FT-10] Modo EVOLUTION detectado — request=%s work_mode=%s parent=%s",
                             _evolution_request[:80], _evolution_work_mode,
                             (_parent_project_id_evo or "")[:8])
@@ -7332,7 +7364,9 @@ def main() -> int:
                 "Squad criada. Iniciando Monitor Loop: Dev/QA/DevOps serão acionados até você aceitar o projeto ou parar.",
                 request_id,
             )
-            seed_ok = _seed_tasks(project_id, pm_module=pm_module)
+            seed_ok = _seed_tasks(project_id, pm_module=pm_module,
+                                  card_id=getattr(pipeline_ctx, "card_id", None) if pipeline_ctx else None,
+                                  origin_spec_file=getattr(pipeline_ctx, "origin_spec_file", None) if pipeline_ctx else None)
             # Evoluir bloco 2 H6: tasks DONE do pai entram como HERDADAS (TSK-INH-*, status DONE) — visíveis no
             # portal como "já entregues na versão anterior", fora do contador de progresso e do Dev/QA.
             if seed_ok and _is_evolution and _parent_project_id_evo:
