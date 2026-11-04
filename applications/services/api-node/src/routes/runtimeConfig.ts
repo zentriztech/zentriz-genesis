@@ -56,6 +56,8 @@ const CONFIG_KEYS: Record<string, { label: string; group: string; unit: string; 
   CARDS_LIST_PAGE_DEFAULT:    { label: "Cards: itens por página (padrão)", group: "limits", unit: "", min: 1, max: 1000 },
   CARDS_LIST_PAGE_MAX:        { label: "Cards: itens por página (máximo)", group: "limits", unit: "", min: 1, max: 1000 },
   CARD_BASE_SPEC_MAX_BYTES:   { label: "Cards: teto de bytes da spec-base (somente leitura)", group: "limits", unit: "B", min: 1024, max: 50000000 },
+  // Fase 3 (3.3): quanto da spec da versão corrente entra (somente leitura) no prompt do Chat IA / GAPs / planner / validador do card. calibrado=falso.
+  CARD_BASE_CONTEXT_CHARS:    { label: "Cards: teto de caracteres da spec-base no contexto da IA", group: "limits", unit: "ch", min: 1000, max: 400000 },
   // M-03 — flags de rollout da Fase 1' (services/featureFlags.ts). Precedência: tenant explícito > global > env (default) > off.
   // adminOnly: ligar/desligar rollout é decisão da plataforma, nunca do tenant_admin.
   ...Object.fromEntries(FLAG_NAMES.map((k) => [k, {

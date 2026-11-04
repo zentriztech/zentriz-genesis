@@ -29,10 +29,13 @@ import {
 } from "../services/ticketAttachments.js";
 import { allowedCardTargets, cardsBancadaEnabled, isCardState, transitionCard, CARD_STATES, type CardState, type CardTransitionResult } from "../services/cardState.js";
 import {
-  applyCardTextEdit, createCard, deleteCard, isCardKind, loadBaseSpec, loadCard, loadCardsPage, markCardReady, resolveCardTarget,
+  applyCardTextEdit, createCard, deleteCard, isCardKind, loadBaseSpec, loadCard, loadCardsPage, markCardReady, reopenCard, resolveCardTarget,
   revalidateCard, summarizeCards, MAX_CARD_BODY, MAX_CARD_TITLE, type CardRow, type IncomingFile,
 } from "../services/cardService.js";
 import { promoteCard, resumeCard, syncCardWithChild } from "../services/cardPromote.js";
+import { withCardUserMessage } from "../services/cardErrors.js";
+import { buildCardJourney } from "../services/cardJourney.js";
+import { listCardAttachments } from "../services/cardAttachments.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -74,6 +77,10 @@ function transitionFailure(reply: FastifyReply, card: CardRow, to: CardState, r:
 
 export async function cardRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
+  // Fase 3 (3.5): `userMessage` — mensagem curta PT-BR da tabela única `cardErrors.ts` — em TODA resposta de erro dos cards.
+  // O `message` técnico de sempre continua no corpo (contrato da Fase 2 intacto). A recusa da flag off (404 "Recurso indisponível") NÃO leva
+  // `userMessage`: com `CARDS_BANCADA` desligada a resposta é byte a byte a de antes.
+  app.addHook("preSerialization", async (_request, reply, payload) => (payload === NOT_AVAILABLE ? payload : withCardUserMessage(reply.statusCode, payload)));
 
   /** Produto acessível + flag do tenant. `null` ⇒ já respondeu 404. */
   async function productGuard(request: FastifyRequest, reply: FastifyReply, productId: string, opts: { capabilities?: boolean } = {}) {
@@ -271,6 +278,7 @@ export async function cardRoutes(app: FastifyInstance) {
       ready: st === "draft" || st === "refining",
       promote: st === "ready",
       revalidate: st === "draft" || st === "refining" || st === "ready",
+      reopen: st === "ready",
       reject: allowedCardTargets(st, "user").includes("rejected"),
       resume: st === "blocked",
       delete: st === "draft",
@@ -296,8 +304,10 @@ export async function cardRoutes(app: FastifyInstance) {
     switch (r.kind) {
       case "updated": return reply.send(await fresh(r.card.id));
       case "empty_body": return reply.status(400).send({ code: "BAD_REQUEST", message: "O card não pode ficar sem texto." });
+      case "spec_locked":
+        return reply.status(409).send({ code: "CARD_SPEC_LOCKED", state: r.state, canReopen: true, cardId: card.id, reopen: `POST /api/cards/${card.id}/reopen`, message: `${ticketCode(card.number)} está pronto (ready): a spec está travada. Reabra o card (POST /api/cards/${card.id}/reopen) para voltar a editar.` });
       case "not_editable":
-        return reply.status(409).send({ code: "CARD_NOT_EDITABLE", state: r.state, message: `${ticketCode(card.number)} está em '${r.state}': só se edita o texto em draft ou refining (use POST /api/cards/${card.id}/refine em 'ready').` });
+        return reply.status(409).send({ code: "CARD_NOT_EDITABLE", state: r.state, message: `${ticketCode(card.number)} está em '${r.state}': só se edita o texto em draft ou refining.` });
       case "attachment_unreadable": return reply.status(400).send({ code: "ATTACHMENT_UNREADABLE", message: r.message });
       case "transition_failed": return transitionFailure(reply, card, "refining", r.result);
       default: return reply.status(404).send({ code: "NOT_FOUND", message: "Card não encontrado" });
@@ -351,17 +361,58 @@ export async function cardRoutes(app: FastifyInstance) {
     if (denyMutation(user, reply)) return;
     const r = await revalidateCard(pool, card, user);
     switch (r.kind) {
-      case "revalidated":
+      case "revalidated": {
+        const message = r.verdict === "ok"
+          ? "O card está alinhado com a versão corrente."
+          : r.verdict === "stale"
+            ? "A versão corrente mudou: o card foi rebaseado e precisa ser validado de novo."
+            : "O card conflita com a versão corrente: ajuste o RFC (veja os motivos) e revalide.";
         return reply.send({
-          ok: true, card: await fresh(card.id), base: { headProjectId: r.headProjectId, headVersion: r.headVersion, previousHeadProjectId: r.previousBase },
-          next: `POST /api/cards/${card.id}/ready`,
-          message: "Card rebaseado para a versão corrente. Revise os RFCs contra a base nova e rode a validação de novo.",
+          ok: r.verdict !== "conflict", result: r.verdict, reasons: r.reasons, rebased: r.rebased, reopened: r.reopened,
+          card: await fresh(card.id),
+          base: { headProjectId: r.headProjectId, headVersion: r.headVersion, previousHeadProjectId: r.previousBase },
+          checks: { globs: r.globs, repo: r.repo, specDiff: r.specDiff },
+          next: r.verdict === "ok" ? null : r.verdict === "stale" ? `POST /api/cards/${card.id}/ready` : `PATCH/Chat IA no RFC do card, depois POST /api/cards/${card.id}/revalidate`,
+          message,
         });
+      }
       case "not_revalidable": return reply.status(409).send({ code: "CARD_INVALID_TRANSITION", from: r.state, message: `${ticketCode(card.number)} está em '${r.state}': não há base a revalidar.` });
       case "no_head": return reply.status(409).send({ code: "NO_ACCEPTED_HEAD", message: "A linhagem do card não tem versão aceita." });
       case "draft_unreadable": return reply.status(409).send({ code: "CARD_DRAFT_UNREADABLE", message: "O rascunho do card não existe mais." });
       default: return transitionFailure(reply, card, "refining", r.result);
     }
+  });
+
+  // ── Reabrir (ready → refining): destrava a spec do rascunho ────────────────────────────────
+  app.post<{ Params: { id: string } }>("/api/cards/:id/reopen", async (request, reply) => {
+    const user = getUser(request);
+    const card = await cardGuard(request, reply, request.params.id);
+    if (!card) return;
+    if (denyMutation(user, reply)) return;
+    const r = await reopenCard(pool, card, user);
+    switch (r.kind) {
+      case "reopened": return reply.send({ ok: true, replayed: r.replayed, card: await fresh(card.id), message: "Card reaberto: a spec voltou a aceitar edição. Valide de novo antes de promover." });
+      case "not_reopenable":
+        return reply.status(409).send({ code: "CARD_INVALID_TRANSITION", from: r.state, to: "refining", message: `${ticketCode(card.number)} está em '${r.state}': só se reabre um card pronto (ready).` });
+      default: return transitionFailure(reply, card, "refining", r.result);
+    }
+  });
+
+  // ── Jornada (etapas, bloqueios da próxima etapa e ação sugerida) ───────────────────────────
+  app.get<{ Params: { id: string } }>("/api/cards/:id/journey", async (request, reply) => {
+    const card = await cardGuard(request, reply, request.params.id);
+    if (!card) return;
+    // Alinha o card ao estado real do filho antes de contar a história (idempotente; leva a `blocked` o card cujo filho o Guard parou).
+    await syncCardWithChild(pool, card.id).catch(() => undefined);
+    const current = (await loadCard(pool, card.id)) ?? card;
+    return reply.send(await buildCardJourney(pool, current));
+  });
+
+  // ── Anexos com o estado da conversão (pdf/doc/docx → md) ───────────────────────────────────
+  app.get<{ Params: { id: string } }>("/api/cards/:id/attachments", async (request, reply) => {
+    const card = await cardGuard(request, reply, request.params.id);
+    if (!card) return;
+    return reply.send(await listCardAttachments(pool, card));
   });
 
   // ── Promover ────────────────────────────────────────────────────────────────────────────────
@@ -387,7 +438,15 @@ export async function cardRoutes(app: FastifyInstance) {
     if (current.card_state === "in_factory") return reply.send({ ok: true, replayed: true, card: await fresh(card.id) });
     const r = await resumeCard(pool, current, user);
     switch (r.kind) {
-      case "resumed_in_factory": return reply.send({ ok: true, card: await fresh(card.id) });
+      case "resumed_in_factory":
+        return reply.send({
+          ok: true, card: await fresh(card.id),
+          ...(r.childRestartRequired && r.childProjectId
+            ? { childRestartRequired: true, next: `POST /api/projects/${r.childProjectId}/run`, message: "O orçamento voltou, mas a execução continua parada: reinicie-a para a fábrica seguir." }
+            : {}),
+        });
+      case "budget_still_blocked":
+        return reply.status(402).send({ code: "CARD_BUDGET_BLOCKED", guardCode: r.guardCode, message: `Sem saldo para retomar: ${r.guardMessage}`, cardState: "blocked" });
       case "back_to_ready": return reply.send({ ok: true, card: await fresh(card.id), message: "O filho não existe mais: o card voltou a 'ready'. Promova de novo (a base é conferida contra o HEAD).", next: `POST /api/cards/${card.id}/promote` });
       case "not_blocked": return reply.status(409).send({ code: "CARD_INVALID_TRANSITION", from: r.state, to: "in_factory", message: `${ticketCode(card.number)}: só se retoma um card bloqueado.` });
       case "child_not_in_factory": return reply.status(409).send({ code: "CARD_CHILD_NOT_IN_FACTORY", childStatus: r.childStatus, message: "O filho ainda não voltou à fábrica (status " + r.childStatus + "). Reinicie-o (POST /api/projects/:id/run) e retome o card." });
