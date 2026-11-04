@@ -14,6 +14,16 @@
     "area": "geral",
     "message": "Esta ação não é permitida para a sua conta."
   },
+  "INVALID_ID": {
+    "http": 400,
+    "area": "geral",
+    "message": "O identificador informado não é válido. Recarregue a página e tente de novo."
+  },
+  "CARD_ACTION_NOT_ALLOWED": {
+    "http": 403,
+    "area": "geral",
+    "message": "Só o autor do card ou um administrador do tenant pode fazer isto."
+  },
   "MANAGEMENT_ACCOUNT_READONLY_CREATE": {
     "http": 403,
     "area": "geral",
@@ -99,6 +109,16 @@
     "area": "promocao",
     "message": "Este pedido é um card: promova-o pelo próprio card."
   },
+  "USE_CARD_DELETE": {
+    "http": 409,
+    "area": "estado",
+    "message": "Este projeto é o rascunho de um card: exclua ou recuse o card, não o projeto."
+  },
+  "USE_CARDS": {
+    "http": 409,
+    "area": "promocao",
+    "message": "Este tenant usa cards: abra um card para pedir a evolução, em vez de evoluir direto."
+  },
   "CARD_SPEC_LOCKED": {
     "http": 409,
     "area": "spec",
@@ -108,6 +128,26 @@
     "http": 400,
     "area": "spec",
     "message": "O card só escreve na própria pasta e no RFC/ADR dele. A spec da versão corrente é somente leitura."
+  },
+  "CARD_PATH_COLLIDES_WITH_BASE": {
+    "http": 409,
+    "area": "spec",
+    "message": "Este arquivo já existe na versão corrente e não pode ser reescrito pelo card. Use outro nome ou número."
+  },
+  "GLOBS_UNVERIFIED": {
+    "http": 409,
+    "area": "gate",
+    "message": "A versão corrente avançou e o escopo do RFC não foi conferido com o código. Confira e revalide o card."
+  },
+  "CARD_SPEC_CHANGED": {
+    "http": 409,
+    "area": "spec",
+    "message": "A spec mudou durante a validação. Valide o card de novo."
+  },
+  "CARD_ATTACHMENT_CONVERSION_PENDING": {
+    "http": 409,
+    "area": "anexo",
+    "message": "Ainda há anexo sendo convertido em texto. Aguarde o fim da conversão e valide de novo."
   },
   "CARD_OPERATION_UNSUPPORTED": {
     "http": 409,
