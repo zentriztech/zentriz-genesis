@@ -36,6 +36,14 @@ describe("errorDetail — frase extra montada do corpo", () => {
     expect(errorDetail(err(400, "SERVICE_REQUIRED", "x", { services: [{ projectId: "p", title: "API", versionNumber: 3 }, { projectId: "q", title: null, versionNumber: 1 }] }))).toBe("Serviços: API (v3), q (v1).");
     expect(errorDetail(err(409, "CARD_INVALID_TRANSITION", "x", { from: "ready", to: "ready" }))).toMatch(/De “ready” para “ready”/);
   });
+  it("base não mergeada (4.5c): cita o card e o PR bloqueantes e a ação; busca do código falhou explica que nada veio do disco", () => {
+    const d = errorDetail(err(409, "CARD_PREVIOUS_UNMERGED", "x", { blockingCardCode: "TK-0006", blockingPrNumber: 8, action: "Mergeie o PR do TK-0006 em dev e promova de novo." }));
+    expect(d).toContain("TK-0006 · PR #8");
+    expect(d).toContain("Mergeie o PR");
+    expect(tableMessage("CARD_PREVIOUS_UNMERGED")).toMatch(/ainda não foi integrado/);
+    expect(errorDetail(err(500, "MATERIALIZATION_FAILED", "x", { reason: "CODE_BASE_FETCH_FAILED" }))).toMatch(/nada foi copiado do disco/);
+    expect(errorDetail(err(500, "MATERIALIZATION_FAILED", "x", {}))).toBe("");
+  });
   it("Retry-After só aparece quando o servidor manda", () => {
     expect(errorDetail(err(409, "EVOLUTION_BUSY", "x", {}, 2))).toBe("Tente de novo em 2 s.");
     expect(errorDetail(err(409, "EVOLUTION_BUSY"))).toBe("");

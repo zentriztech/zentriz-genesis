@@ -62,7 +62,17 @@ export interface CardSummary {
   updatedAt: string;
   promotedAt: string | null;
   deliveredAt: string | null;
+  /** Saúde da Fábrica derivada dos 5 gates reais do aceite (null = filho ainda não aceito / sem gates registrados). */
+  factoryHealth: FactoryHealth | null;
+  factoryGates: FactoryGates | null;
+  /** Código-base do filho veio do DISCO (não do repositório): pode conter código aceito e NÃO mergeado. */
+  codeBaseWarning: string | null;
 }
+
+export type FactoryHealth = "ok" | "attention" | "failed";
+export type FactoryGateStatus = "passed" | "failed" | "not_run";
+export type FactoryGateKey = "scope" | "symbols" | "qa" | "fullTest" | "baseline";
+export type FactoryGates = Record<FactoryGateKey, { status: FactoryGateStatus; detail: string }>;
 
 export interface CardListResponse { items: CardSummary[]; total: number; limit: number; offset: number }
 

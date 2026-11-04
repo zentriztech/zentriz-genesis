@@ -38,6 +38,7 @@ export function CardsA11yTheme({ children }: { children: React.ReactNode }) {
         // No tema claro o texto dos chips de contorno (verde/âmbar/azul) fica abaixo de 4,5:1: usa a variante escura.
         outlinedInfo: ({ theme }: { theme: Theme }) => (theme.palette.mode === "light" ? { color: theme.palette.info.dark } : {}),
         outlinedWarning: ({ theme }: { theme: Theme }) => (theme.palette.mode === "light" ? { color: theme.palette.warning.dark } : {}),
+        outlinedError: ({ theme }: { theme: Theme }) => (theme.palette.mode === "light" ? { color: theme.palette.error.dark } : {}),
         outlinedSuccess: ({ theme }: { theme: Theme }) => (theme.palette.mode === "light" ? { color: theme.palette.success.dark } : {}),
         filledPrimary: ({ theme }: { theme: Theme }) => ({ backgroundColor: theme.palette.primary.dark, color: "#fff" }),
       } },

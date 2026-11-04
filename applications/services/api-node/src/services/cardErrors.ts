@@ -66,6 +66,7 @@ export const CARD_ERRORS = {
 
   // ── promoção / base ───────────────────────────────────────────────────────────────────────
   CARD_BASE_STALE: { http: 409, area: "promocao", message: "A versão-base mudou desde a validação. Revalide o card e valide de novo antes de promover." },
+  CARD_PREVIOUS_UNMERGED: { http: 409, area: "promocao", message: "O card anterior desta versão ainda não foi integrado (o PR dele não foi mergeado). Mergeie o PR ou recuse o card anterior antes de promover este." },
   EVOLUTION_IN_FLIGHT: { http: 409, area: "promocao", message: "Já existe outra evolução em andamento neste serviço. Aguarde ela terminar." },
   EVOLUTION_BUSY: { http: 409, area: "promocao", message: "O serviço está ocupado com outra promoção. Tente de novo em instantes." },
   MATERIALIZATION_IN_PROGRESS: { http: 409, area: "promocao", message: "A promoção deste card já está em andamento. Aguarde alguns instantes." },

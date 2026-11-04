@@ -103,6 +103,9 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
       return reply.send({
         projectId: proj.id,
         factoryGates,
+        // 4.5c: o veredito do gate de escopo gravado no aceite (com os arquivos fora do `files_allowed`) e a confirmação de escopo já registrada.
+        scopeGate: (ex.evolution_scope_gate as Record<string, unknown> | undefined) ?? null,
+        scopeConfirmation: (ex.evolution_merge_scope_confirmation as Record<string, unknown> | undefined) ?? null,
         checkpoint: !!checkpoint,
         checkpointSavedAt: pick<string | null>("saved_at", null),
         scope: (ex.evolution_scope as string[] | undefined) ?? pick<string[]>("evolution_scope", []),
@@ -253,6 +256,7 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
       if (scopeFail && (request.body?.confirmScope ?? "") !== "OUT_OF_SCOPE") {
         return reply.status(400).send({
           code: "CONFIRM_REQUIRED", state: "blocked_scope", blockedBy: "blocked_scope", detail: scopeFail,
+          files: Array.isArray((ex.evolution_scope_gate as { files?: unknown } | undefined)?.files) ? ((ex.evolution_scope_gate as { files: unknown[] }).files).map(String) : [],
           explanation: "O diff real da evolução tem arquivo(s) fora do `files_allowed` do RFC (o que o card disse que mudaria). Mergear leva essa mudança não prevista para `dev`; a decisão fica registrada com o seu nome.",
           message: `Esta evolução exige confirmação de escopo: ${scopeFail}. Revise o diff do PR e reenvie com { confirmScope: "OUT_OF_SCOPE" } (e, se quiser, "reason") para assumir o risco.`,
         });

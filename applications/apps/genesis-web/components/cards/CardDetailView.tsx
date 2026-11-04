@@ -23,6 +23,7 @@ import { KindChip, StateChip } from "./KindChip";
 import { PromotePanel } from "./PromotePanel";
 import { CardsA11yTheme } from "./CardsA11yTheme";
 import { CardStatusPanel } from "./CardStatusPanel";
+import { FactoryHealthChip, FactoryHealthPanel } from "./FactoryHealth";
 import { useCardRunner } from "./useCardRunner";
 
 export const CARD_TABS = ["request", "spec", "versions", "state"] as const;
@@ -67,7 +68,7 @@ function CardDetailViewInner({ cardId, initialTab = "request" }: { cardId: strin
       <Link component={NextLink} href={`/products/${card.productId}/cards`} variant="body2">← Quadro de cards</Link>
       <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mt: 1, mb: 1 }}>
         <Typography variant="h5" component="h1" fontWeight={700} sx={{ overflowWrap: "anywhere" }}>{card.code} · {card.title}</Typography>
-        <StateChip state={card.state} /><KindChip kind={card.kind} />
+        <StateChip state={card.state} /><KindChip kind={card.kind} /><FactoryHealthChip health={card.factoryHealth} />
       </Stack>
       {(reloadError ?? (journey ? journeyError : null)) && (
         <Alert severity="warning" role="status" data-testid="reload-warning" sx={{ mb: 1 }} action={<Button color="inherit" size="small" onClick={() => void load()}>Atualizar</Button>}>
@@ -75,6 +76,7 @@ function CardDetailViewInner({ cardId, initialTab = "request" }: { cardId: strin
         </Alert>
       )}
       <CardStatusPanel card={card} journey={journey} journeyError={journeyError} runner={runner} onTab={setTab} onGenerateRfc={() => { setTab("spec"); setPlanRequested(true); }} onReloadJourney={() => void loadJourney()} />
+      <FactoryHealthPanel card={card} />
       <CardActionsBar card={card} runner={runner} planBusy={planBusy} />
       <Box sx={{ mt: 2 }}><PromotePanel card={card} journey={journey} runner={runner} journeyLoading={journey === null && journeyError === null} /></Box>
       <Tabs value={tab} onChange={(_, v: CardTab) => setTab(v)} variant="scrollable" scrollButtons="auto" aria-label="Seções do card" sx={{ mt: 2, borderBottom: 1, borderColor: "divider" }}>

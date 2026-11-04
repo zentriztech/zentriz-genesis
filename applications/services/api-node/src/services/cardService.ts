@@ -41,6 +41,7 @@ import {
   evaluateRevalidation, listRepoTree, listSpecSnapshot, type GlobCheck, type RevalidateOutcome, type RevalidateReason, type RevalidateVerdict,
 } from "./cardRevalidate.js";
 import { budgetPreflight, resolveBudgetAnchor } from "./evolveClaim.js";
+import { FACTORY_GATE_KEYS, factoryHealthOf } from "./factoryHealth.js";
 import {
   CARD_CONTRACT_VERSION, recordCardEvent, transitionCard, type CardState, type CardTransitionResult,
 } from "./cardState.js";
@@ -712,15 +713,23 @@ export interface CardSummary {
   state: CardState | null; status: string; origin: string; externalRef: string | null; blockedReason: string | null;
   draftProjectId: string | null; childProjectId: string | null; executionStatus: string | null; executionTitle: string | null;
   prUrl: string | null; attachmentsCount: number; createdAt: Date; updatedAt: Date; promotedAt: Date | null; deliveredAt: Date | null;
+  /** 4.5c: saúde da Fábrica derivada dos 5 gates reais do aceite (`null` = filho ainda não aceito/sem gates registrados). */
+  factoryHealth: "ok" | "attention" | "failed" | null;
+  factoryGates: Record<"scope" | "symbols" | "qa" | "fullTest" | "baseline", { status: "passed" | "failed" | "not_run"; detail: string }> | null;
+  /** 4.5c (D-4): o código-base do filho veio do DISCO e não do repositório (pode conter código não mergeado). */
+  codeBaseWarning: string | null;
 }
 
 /** Resumo de cards (lista/detalhe): junta o estado de EXECUÇÃO do filho (derivado, nunca copiado) e a contagem de anexos. */
 export async function summarizeCards(db: Db, rows: CardRow[]): Promise<CardSummary[]> {
   const childIds = rows.map((r) => r.child_project_id).filter((v): v is string => !!v);
-  const exec = new Map<string, { status: string; title: string; pr: string | null }>();
+  type Gates = NonNullable<CardSummary["factoryGates"]>;
+  const exec = new Map<string, { status: string; title: string; pr: string | null; gates: Gates | null; warn: string | null }>();
   if (childIds.length > 0) {
-    for (const r of (await db.query("SELECT id, status, title, extra->>'evolution_pr_url' AS pr FROM projects WHERE id = ANY($1::uuid[])", [childIds])).rows as Array<{ id: string; status: string; title: string; pr: string | null }>) {
-      exec.set(r.id, { status: r.status, title: r.title, pr: r.pr });
+    for (const r of (await db.query("SELECT id, status, title, extra->>'evolution_pr_url' AS pr, extra->'evolution_factory_gates' AS gates, extra->>'evolution_code_base_warning' AS warn FROM projects WHERE id = ANY($1::uuid[])", [childIds])).rows as Array<{ id: string; status: string; title: string; pr: string | null; gates: Record<string, { status?: string; detail?: string }> | null; warn: string | null }>) {
+      const g = r.gates && typeof r.gates === "object" ? r.gates : null;
+      const clean = g ? Object.fromEntries(FACTORY_GATE_KEYS.map((k) => [k, { status: g[k]?.status ?? "not_run", detail: String(g[k]?.detail ?? "") }])) as Gates : null;
+      exec.set(r.id, { status: r.status, title: r.title, pr: r.pr, gates: clean, warn: r.warn });
     }
   }
   const counts = new Map<string, number>();
@@ -737,6 +746,7 @@ export async function summarizeCards(db: Db, rows: CardRow[]): Promise<CardSumma
       draftProjectId: r.draft_project_id, childProjectId: r.child_project_id, executionStatus: e?.status ?? null, executionTitle: e?.title ?? null,
       prUrl: e?.pr ?? null, attachmentsCount: counts.get(r.id) ?? 0, createdAt: r.created_at, updatedAt: r.updated_at,
       promotedAt: r.promoted_at, deliveredAt: r.delivered_at,
+      factoryHealth: factoryHealthOf(e?.gates ?? null), factoryGates: e?.gates ?? null, codeBaseWarning: e?.warn ?? null,
     };
   });
 }

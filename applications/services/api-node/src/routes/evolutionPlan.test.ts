@@ -224,6 +224,17 @@ describe("POST /api/projects/:id/evolution/merge (M1)", () => {
     expect(merge.tryAutoMergeEvolution).toHaveBeenCalledWith(expect.anything(), PROJ, { force: true, actorUserId: USER_ID });
   });
 
+  it("4.5c: o 400 de escopo lista os arquivos fora do `files_allowed` e o evolution-state expõe `scopeGate` e `scopeConfirmation`", async () => {
+    const conf = { by_user_id: USER_ID, by_email: "ana@t.test", at: "2026-11-04T12:00:00Z", detail: "x", reason: "revisei" };
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_origin: "card", evolution_merge_scope_confirmation: conf,
+      evolution_scope_gate: { status: "failed", detail: "2 arquivo(s) FORA", files: ["apps/api/src/a.ts", "pnpm-lock.yaml"] } } };
+    let r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(400);
+    expect(JSON.parse(r.body)).toMatchObject({ state: "blocked_scope", files: ["apps/api/src/a.ts", "pnpm-lock.yaml"] });
+    r = await app.inject({ method: "GET", url: `/api/projects/${PROJ}/evolution-state` });
+    expect(JSON.parse(r.body)).toMatchObject({ scopeGate: { status: "failed", files: ["apps/api/src/a.ts", "pnpm-lock.yaml"] }, scopeConfirmation: conf });
+  });
+
   it("AV / M-4: trilha de escopo indisponível ⇒ 503 e NENHUM merge (fail-closed)", async () => {
     project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_origin: "card", evolution_scope_gate: { status: "failed", detail: "x" } } };
     {

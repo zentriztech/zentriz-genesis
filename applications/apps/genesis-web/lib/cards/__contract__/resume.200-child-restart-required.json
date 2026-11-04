@@ -26,7 +26,10 @@
       "createdAt": "2026-11-04T12:00:00.000Z",
       "updatedAt": "2026-11-04T12:00:00.000Z",
       "promotedAt": "2026-11-04T12:00:00.000Z",
-      "deliveredAt": null
+      "deliveredAt": null,
+      "factoryHealth": null,
+      "factoryGates": null,
+      "codeBaseWarning": null
     },
     "childRestartRequired": true,
     "next": "POST /api/projects/00000000-0000-4000-8000-000000000005/run",

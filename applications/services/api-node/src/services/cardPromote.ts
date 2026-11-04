@@ -20,6 +20,8 @@ import { runEvolveWithClaim, type EvolveLog, type EvolveResult } from "./evolveC
 import { transitionCard, isSupersededChild, type CardState, type CardTransitionResult } from "./cardState.js";
 import { loadCard, specHashOf, type CardRow, type CardReadySnapshot } from "./cardService.js";
 import { PRE_FACTORY_CHILD_STATUSES } from "./cardsBackfill.js";
+import { verifyChildPrMerged, type DeliveryDeps } from "./cardDelivery.js";
+import { ticketCode } from "./tickets.js";
 
 type Json = Record<string, unknown>;
 
@@ -44,9 +46,43 @@ async function backToRefining(pool: Pool, card: CardRow, reason: string): Promis
   await transitionCard(pool, { ticketId: card.id, to: "refining", actorKind: "system", reason }).catch(() => undefined);
 }
 
+/**
+ * Regra de linhagem (rodada 4.5c, D-4): um card só é promovido sobre uma base cujo filho-de-card anterior foi ENTREGUE (PR mergeado),
+ * rejeitado ou dispensado. O HEAD da linhagem é o filho de um card ainda `promoted|in_factory|blocked` cujo código NÃO está em `dev`
+ * (sem prova de merge) ⇒ o novo filho herdaria código não revisado (TK-0007 herdou o build quebrado do PR do TK-0006).
+ * Só vale para HEAD que é filho de CARD (ticket legado e raiz ficam intactos). Linhagem sem repositório: o aceite do filho já é a entrega
+ * (prova `no_repo`). A prova de merge usa a MESMA função da entrega (`verifyChildPrMerged`: fail-closed). Devolve o 409 ou `null`.
+ */
+export async function previousCardUnmergedBlock(pool: Pool, headId: string, selfTicketId: string, deps: DeliveryDeps = {}): Promise<EvolveResult | null> {
+  const prev = (await pool.query(
+    `SELECT t.id, t.number, t.card_state, p.extra, p.version_number
+       FROM tickets t JOIN projects p ON p.id = t.child_project_id
+      WHERE t.child_project_id = $1 AND t.id <> $2 AND t.card_state IN ('promoted', 'in_factory', 'blocked')
+      ORDER BY t.number LIMIT 1`, [headId, selfTicketId])).rows[0] as
+    { id: string; number: number; card_state: string; extra: Json | null; version_number: number } | undefined;
+  if (!prev) return null;
+  const proof = await verifyChildPrMerged(pool, headId, deps);
+  if (proof.merged) return null;
+  const ex = prev.extra ?? {};
+  const prNumber = typeof ex.evolution_pr_number === "number" ? ex.evolution_pr_number : null;
+  const prUrl = typeof ex.evolution_pr_url === "string" ? ex.evolution_pr_url : null;
+  const code = ticketCode(prev.number);
+  const pr = prNumber ? `PR #${prNumber}${prUrl ? ` (${prUrl})` : ""}` : "PR ainda não publicado/registrado";
+  return {
+    status: 409,
+    body: {
+      code: "CARD_PREVIOUS_UNMERGED",
+      message: `A versão-base (v${prev.version_number}) é o resultado do card ${code}, que ainda NÃO foi entregue (${pr}; motivo: ${proof.detail}). Promover agora herdaria código não mergeado.`,
+      blockingCardId: prev.id, blockingCardCode: code, blockingCardState: prev.card_state,
+      blockingProjectId: headId, blockingPrNumber: prNumber, blockingPrUrl: prUrl, mergeProof: proof.detail,
+      action: `Mergeie o PR do ${code} em dev (ou rejeite o card ${code} e descarte o filho) e promova de novo. Esta chamada é segura de repetir.`,
+    },
+  };
+}
+
 export const REVALIDATE_HINT = (cardId: string) => `POST /api/cards/${cardId}/revalidate`;
 
-export async function promoteCard(pool: Pool, card: CardRow, user: AuthUser, log: EvolveLog): Promise<EvolveResult> {
+export async function promoteCard(pool: Pool, card: CardRow, user: AuthUser, log: EvolveLog, deps: DeliveryDeps = {}): Promise<EvolveResult> {
   const state = card.card_state;
 
   // Já promovido (ou adiante): repetir é seguro. Filho vivo ⇒ 200 replayed; materialização vencida ⇒ retoma.
@@ -107,6 +143,10 @@ export async function promoteCard(pool: Pool, card: CardRow, user: AuthUser, log
     await backToRefining(pool, card, "base_stale");
     return staleResult(card.id, ready.base_head_project_id, head?.id ?? null);
   }
+
+  // A base precisa estar ENTREGUE (ou ser dispensada): o card continua `ready` (nada é revertido); basta mergear o PR anterior e repetir.
+  const blocked = await previousCardUnmergedBlock(pool, head.id, card.id, deps);
+  if (blocked) return blocked;
 
   const r = await runEvolveWithClaim(pool, {
     parentId: ready.base_head_project_id, user, ticketId: card.id, evolutionRequest: "", workMode: "copy", idempotencyKey: null, log,

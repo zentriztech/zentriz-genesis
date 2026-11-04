@@ -189,6 +189,11 @@
     "area": "promocao",
     "message": "A versão-base mudou desde a validação. Revalide o card e valide de novo antes de promover."
   },
+  "CARD_PREVIOUS_UNMERGED": {
+    "http": 409,
+    "area": "promocao",
+    "message": "O card anterior desta versão ainda não foi integrado (o PR dele não foi mergeado). Mergeie o PR ou recuse o card anterior antes de promover este."
+  },
   "EVOLUTION_IN_FLIGHT": {
     "http": 409,
     "area": "promocao",
@@ -243,6 +248,11 @@
     "http": 402,
     "area": "orcamento",
     "message": "O saldo de IA não comporta a próxima atividade. Aumente o orçamento."
+  },
+  "CARD_BUDGET_CAP": {
+    "http": 402,
+    "area": "orcamento",
+    "message": "O card atingiu o teto de orçamento definido para ele. Aumente o orçamento da versão ou o percentual por card."
   },
   "BUDGET_FREE_BELOW_MIN": {
     "http": 402,
