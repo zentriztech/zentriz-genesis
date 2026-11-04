@@ -21,8 +21,8 @@ const cardMotion = {
 
 function LoginPageInner() {
   const router = useRouter();
-  const [email, setEmail] = useState("user@tenant.com");
-  const [password, setPassword] = useState("#User@2026!");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
 
   const [submitting, setSubmitting] = useState(false);
   const handleSubmit = async (e: React.FormEvent) => {

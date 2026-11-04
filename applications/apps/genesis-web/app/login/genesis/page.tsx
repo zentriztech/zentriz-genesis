@@ -21,8 +21,8 @@ const cardMotion = {
 
 function LoginGenesisPageInner() {
   const router = useRouter();
-  const [email, setEmail] = useState("admin@zentriz.com");
-  const [password, setPassword] = useState("#Jean@2026!");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
 
   const [submitting, setSubmitting] = useState(false);
   const handleSubmit = async (e: React.FormEvent) => {
