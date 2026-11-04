@@ -40,8 +40,11 @@
     "bcrypt": "^6.0.0",
     "fastify": "^4.28.1",
     "jsonwebtoken": "^9.0.3",
+    "mammoth": "^1.13.0",
+    "pdfjs-dist": "~5.5.207",
     "pg": "^8.18.0",
-    "tweetsodium": "^0.0.4"
+    "tweetsodium": "^0.0.4",
+    "word-extractor": "^1.0.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
