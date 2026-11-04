@@ -71,12 +71,28 @@ export async function createScratchDb(prefix = "evo_scratch"): Promise<{ pool: p
   await admin.query(`CREATE DATABASE ${name}`);
   const url = PG_URL.replace(/\/[^/?]*(\?.*)?$/, `/${name}$1`);
   const pool = new pg.Pool({ connectionString: url, max: 24 });
+  // M-10: backends encerrados (pelo servidor ou pelo fim do teste) não podem virar "Unhandled error" do vitest.
+  pool.on("error", () => { /* ignorado de propósito */ });
+  admin.on("error", () => { /* idem */ });
   pgHolder.pool = pool;
   return {
     pool, name,
     async drop() {
-      await pool.end();
-      await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+      // M-10: `pool.end()` resolve antes de os sockets fecharem e o `DROP … WITH (FORCE)` matava backends cujos clientes
+      // já não tinham listener (57P01). Agora: encerra o pool, ESPERA o banco ficar sem conexões e só então dropa (sem FORCE).
+      await pool.end().catch(() => undefined);
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        const r = await admin.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", [name]);
+        if ((r.rows[0]?.n as number) === 0) break;
+        if (Date.now() > deadline) {
+          await admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", [name]);
+          await new Promise((res) => setTimeout(res, 200));
+          break;
+        }
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      await admin.query(`DROP DATABASE IF EXISTS ${name}`);
       await admin.end();
     },
   };
