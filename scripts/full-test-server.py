@@ -27,6 +27,35 @@ CLAUDE_BIN   = os.environ.get("CLAUDE_BIN", str(Path.home() / ".local/bin/claude
 PORT         = int(os.environ.get("FULL_TEST_PORT", "7878"))
 CYBORG_DIR   = Path(__file__).parent.parent / "project" / "cyborg"
 
+
+def resolve_bind_addresses(env=None) -> list:
+    """AV/A-6: endereço(s) em que o FTS escuta. `FTS_BIND` (um IP ou vários separados por vírgula); padrão `127.0.0.1`.
+
+    O padrão anterior era `0.0.0.0` (todas as interfaces). Os containers do compose chegam aqui por `host.docker.internal` (= `host-gateway`),
+    que é o IP da bridge do Docker (`172.17.0.1` no padrão): para eles, use `FTS_BIND=172.17.0.1` (ou `127.0.0.1,172.17.0.1` para
+    atender também o próprio host). `0.0.0.0`/`::` só com `FTS_ALLOW_ANY_BIND=1` explícito (e firewall: `scripts/dev/fts-firewall.sh`).
+    Valor inválido derruba o boot (fail-closed) em vez de cair em um padrão mais aberto."""
+    import ipaddress
+    env = os.environ if env is None else env
+    raw = (env.get("FTS_BIND") or "").strip() or "127.0.0.1"
+    out = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ip = ipaddress.ip_address(part)
+        except ValueError:
+            raise SystemExit(f"FTS_BIND invalido: {part!r} (use um IP, ex.: 127.0.0.1 ou 172.17.0.1)")
+        if ip.is_unspecified and (env.get("FTS_ALLOW_ANY_BIND") or "").strip() not in ("1", "true", "yes"):
+            raise SystemExit("FTS_BIND=0.0.0.0/:: recusado: escutar em todas as interfaces exige FTS_ALLOW_ANY_BIND=1 "
+                             "(e o firewall de scripts/dev/fts-firewall.sh). Prefira 127.0.0.1 ou o IP da bridge do Docker (172.17.0.1).")
+        if str(ip) not in out:
+            out.append(str(ip))
+    if not out:
+        raise SystemExit("FTS_BIND vazio")
+    return out
+
 # T09/FT-17: Semaphore global compartilhado entre Cyborg e S3 static deploy.
 # Limita concorrência total no host (2 vCPU no EC2 t3.large). Sem isso, um Cyborg
 # de 60min + build de Vite paralelos causam OOM kill. Ajustar via env HEAVY_JOBS_MAX.
@@ -1994,11 +2023,16 @@ def _assert_untrusted_host_has_no_secrets() -> None:
 
 if __name__ == "__main__":
     _assert_untrusted_host_has_no_secrets()
-    server = ThreadedHTTPServer(("0.0.0.0", PORT), Handler)
-    log.info("full-test-server ouvindo em http://0.0.0.0:%d", PORT)
+    binds = resolve_bind_addresses()
+    servers = [ThreadedHTTPServer((addr, PORT), Handler) for addr in binds]
+    for addr in binds:
+        log.info("full-test-server ouvindo em http://%s:%d", addr, PORT)
     log.info("Claude CLI: %s", CLAUDE_BIN)
     log.info("CYBORG RUNBOOKs em: %s", CYBORG_DIR)
     log.info("Ctrl+C para encerrar")
+    for extra in servers[:-1]:
+        threading.Thread(target=extra.serve_forever, daemon=True).start()
+    server = servers[-1]
     try:
         server.serve_forever()
     except KeyboardInterrupt:
