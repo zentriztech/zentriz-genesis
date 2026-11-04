@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { useCardsEnabled } from "@/lib/cards/useCardsEnabled";
 import { observer } from "mobx-react-lite";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
@@ -406,6 +407,9 @@ function ProjectDetailPageInner() {
   const params = useParams();
   const router = useRouter();
   const id     = params.id as string;
+  // Cards da Bancada (plano EVOLUIR-PROJETO 3.6): com a flag CARDS_BANCADA do tenant, "Evoluir" leva ao
+  // quadro de cards do produto; sem a flag (ou sem produto) o diálogo abaixo segue exatamente como era.
+  const cardsEnabled = useCardsEnabled(projectsStore.getById(id)?.productId);
 
   // UI state
   const [triedLoad, setTriedLoad] = useState(false);
@@ -1377,7 +1381,7 @@ function ProjectDetailPageInner() {
         {project.status === "accepted" && (
           <Button variant="outlined" color="secondary" size="small"
             startIcon={<span style={{ fontSize: "1rem" }}>🔄</span>}
-            onClick={() => setEvolveOpen(true)}>
+            onClick={() => (cardsEnabled && project.productId ? router.push(`/products/${project.productId}/cards`) : setEvolveOpen(true))}>
             {openTickets.length > 0 ? `Evoluir (${openTickets.length} pedido${openTickets.length > 1 ? "s" : ""})` : "Evoluir"}
           </Button>
         )}
