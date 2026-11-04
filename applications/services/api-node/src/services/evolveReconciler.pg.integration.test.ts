@@ -117,7 +117,7 @@ describePg("Fase 1' / 1.8 — reconciliador do /evolve (banco descartável)", ()
     expect(resolveReconcilerParams({})).toEqual({ claimGraceS: 300, stuckHours: 72, orphanGraceS: 300 });
   });
 
-  it("off: nada roda, nada é lido nem escrito (pool que explode ao ser tocado) e o worker nem agenda timer", async () => {
+  it("off: nada roda nem é escrito nas tabelas do /evolve (pool que explode ao ser tocado cai no default `off`) e o worker agenda o timer (M-03: o modo vem da config a cada passada)", async () => {
     const c = await mkClaim();
     const before = await totalFindings();
     const boom = new Proxy({}, { get() { throw new Error("off não pode tocar o banco"); } }) as unknown as pg.Pool;
@@ -131,7 +131,8 @@ describePg("Fase 1' / 1.8 — reconciliador do /evolve (banco descartável)", ()
       const prev = process.env.EVOLVE_RECONCILER;
       delete process.env.EVOLVE_RECONCILER;
       startReconcilerWorker(() => boom);
-      expect(vi.getTimerCount()).toBe(0);
+      expect(vi.getTimerCount()).toBe(1); // M-03: sempre agenda; cada passada resolve o modo efetivo (config > env)
+      stopReconcilerWorker();
       if (prev !== undefined) process.env.EVOLVE_RECONCILER = prev;
     } finally { vi.useRealTimers(); }
     ev("off", { findingsAntes: before, depois: await totalFindings(), filho: "materializing", ticket: "promoted" });

@@ -27,6 +27,7 @@ import { recomputeProductLifecycle } from "./productLifecycle.js";
 import { UNIQUENESS_INDEXES, getUniquenessCounters } from "./evolutionUniqueness.js";
 import { isSesConfigured, sendEmail } from "./emailSender.js";
 import { readRuntimeNumber } from "./runtimeTunables.js";
+import { resolveReconcilerMode } from "./featureFlags.js";
 
 export type ReconcilerMode = "off" | "shadow" | "on";
 export function reconcilerMode(env: NodeJS.ProcessEnv = process.env): ReconcilerMode {
@@ -337,7 +338,8 @@ function logFinding(f: Finding, mode: string): void {
  * dedicado; quem não obtém o lock devolve `skipped: "locked"`). Nunca lança.
  */
 export async function runReconcilerPass(pool: Pool, env: NodeJS.ProcessEnv = process.env): Promise<ReconcilerResult> {
-  const configured = reconcilerMode(env);
+  // M-03: o modo vem de `genesis_runtime_config` (tenant explícito > global) com o env só como default de plataforma.
+  const configured = await resolveReconcilerMode(pool, env).catch(() => reconcilerMode(env));
   if (configured === "off") return empty(configured, "off");
   // M-15: `on` sem os dois volumes verificáveis rebaixa para `shadow` (detecta, NÃO limpa) e registra o achado.
   const diskBad = reconcilerDiskProblems(env);
@@ -453,7 +455,8 @@ async function nextDelayMs(pool: Pool): Promise<number> {
 }
 
 export function startReconcilerWorker(getPool: () => Pool): void {
-  if (reconcilerMode() === "off") return; // byte-idêntico: nenhum timer, nenhuma consulta
+  // M-03: sem o atalho de env. O worker sempre agenda; cada passada consulta o modo efetivo (1 leitura de config a cada
+  // intervalo) e, com `off`, retorna sem tocar nas tabelas do /evolve. Assim ligar/desligar por config não exige reinício.
   if (!stopped) return;
   stopped = false;
   const loop = async () => {
@@ -463,7 +466,7 @@ export function startReconcilerWorker(getPool: () => Pool): void {
     const delay = await nextDelayMs(getPool()).catch(() => RECONCILER_DEFAULTS.intervalMin * 60_000);
     timer = setTimeout(() => { void loop(); }, delay);
   };
-  console.info(`[reconciler] iniciado (modo=${reconcilerMode()}, intervalo padrão=${RECONCILER_DEFAULTS.intervalMin}min)`);
+  console.info(`[reconciler] iniciado (modo efetivo resolvido a cada passada; intervalo padrão=${RECONCILER_DEFAULTS.intervalMin}min)`);
   timer = setTimeout(() => { void loop(); }, 90_000);
 }
 
