@@ -1,0 +1,17 @@
+{
+  "tela": "dialogo-criacao-320",
+  "tema": "dark",
+  "escopo": ".MuiDialog-paper",
+  "axe": {
+    "name": "axe-core",
+    "version": "4.14.0"
+  },
+  "regrasAprovadas": 24,
+  "violacoes": [],
+  "incompletas": [
+    {
+      "id": "color-contrast",
+      "nodes": 5
+    }
+  ]
+}

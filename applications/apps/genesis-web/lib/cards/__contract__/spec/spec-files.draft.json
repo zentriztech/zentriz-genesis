@@ -1,0 +1,16 @@
+{
+  "request": "GET /api/projects/:draftId/spec-files",
+  "status": 200,
+  "body": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "filename": "request.md",
+      "filePath": "<tmp>",
+      "mimeType": "text/markdown",
+      "relDir": "tickets/TK-0001",
+      "isPrimary": false,
+      "contentSha256": "0000000000000000000000000000000000000000000000000000000000000001",
+      "createdAt": "2026-11-04T12:00:00.000Z"
+    }
+  ]
+}

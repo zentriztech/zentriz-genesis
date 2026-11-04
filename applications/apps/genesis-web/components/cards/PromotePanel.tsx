@@ -10,6 +10,7 @@ import RadioButtonUncheckedIcon from "@mui/icons-material/RadioButtonUnchecked";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import NextLink from "next/link";
 import type { CardDetail, CardJourney } from "@/lib/cards/types";
+import { safeHttpsUrl } from "@/lib/cards/safeUrl";
 import { VisuallyHidden } from "./VisuallyHidden";
 import type { CardRunner } from "./useCardRunner";
 
@@ -25,6 +26,7 @@ function Item({ state, children }: { state: Check; children: React.ReactNode }) 
   );
 }
 
+const BASE_CODES = /(GLOB|REPO_UNAVAILABLE|REVALIDAT)/;
 const BUDGET_CODES = /^(BUDGET_|CARD_BUDGET_BLOCKED|KILL_SWITCH|GLOBAL_|GUARD_ERROR|REPEAT_PAYLOAD|UNATTRIBUTED_|TENANT_LLM_|PROJECT_NOT_FOUND)/;
 
 /** Pré-requisitos da promoção, lidos dos `blockers` do servidor (a tela não recalcula saldo nem base). */
@@ -34,12 +36,13 @@ export function promoteChecks(card: CardDetail, journey: CardJourney | null): { 
   return {
     spec: card.state === "ready" && !codes.includes("CARD_NOT_READY") ? "ok" : "pending",
     budget: codes.some((c) => BUDGET_CODES.test(c)) ? "pending" : "ok",
-    base: journey.base?.stale || codes.includes("CARD_BASE_STALE") ? "pending" : "ok",
+    // base vencida OU globs de files_allowed não conferidos contra a versão corrente (bloqueador novo do backend): ambos pedem revalidar.
+    base: journey.base?.stale || codes.some((c) => c === "CARD_BASE_STALE" || BASE_CODES.test(c)) ? "pending" : "ok",
   };
 }
 
 /** Promover (3.5): pré-requisitos visíveis (do servidor), base vencida com “Revalidar”, clique duplo sem duplicar, ligação com o filho e o PR. */
-export function PromotePanel({ card, journey, runner }: { card: CardDetail; journey: CardJourney | null; runner: CardRunner }) {
+export function PromotePanel({ card, journey, runner, journeyLoading = false }: { card: CardDetail; journey: CardJourney | null; runner: CardRunner; journeyLoading?: boolean }) {
   const { busy, run, error, promoted: done } = runner;
   const promotedState = ["promoted", "in_factory", "delivered"].includes(card.state);
   const ready = card.state === "ready";
@@ -48,7 +51,7 @@ export function PromotePanel({ card, journey, runner }: { card: CardDetail; jour
 
   if (promotedState) {
     const childId = done?.childProjectId ?? card.childProjectId;
-    const prUrl = journey?.execution?.prUrl ?? card.prUrl;
+    const prUrl = safeHttpsUrl(journey?.execution?.prUrl ?? card.prUrl);
     return (
       <Alert severity="success" role="status" data-testid="promote-done">
         {card.state === "delivered" ? "Card entregue." : "Card promovido à fábrica."}{" "}
@@ -76,7 +79,7 @@ export function PromotePanel({ card, journey, runner }: { card: CardDetail; jour
   }
   return (
     <Box component="section" aria-labelledby="promote-title" sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, p: 1.5 }}>
-      <Typography id="promote-title" variant="subtitle2" component="h3" sx={{ mb: 1 }}>Promover à fábrica</Typography>
+      <Typography id="promote-title" variant="subtitle2" component="h2" sx={{ mb: 1 }}>Promover à fábrica</Typography>
       <Box component="ul" sx={{ m: 0, p: 0, mb: 1.5, display: "grid", gap: 0.5 }} aria-label="Pré-requisitos da promoção">
         <Item state={checks.spec}>especificação do card validada e pronta.</Item>
         <Item state={checks.budget}>saldo livre do orçamento da versão corrente, conforme o servidor.</Item>
@@ -84,13 +87,14 @@ export function PromotePanel({ card, journey, runner }: { card: CardDetail; jour
       </Box>
       {banners}
       <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-        <Button variant="contained" color="success" disabled={!card.actions.promote || busy !== null || blocked} onClick={() => void run("promote")} aria-describedby="promote-title">
+        <Button variant="contained" color="success" disabled={!card.actions.promote || busy !== null || blocked || journeyLoading} onClick={() => void run("promote")} aria-describedby="promote-title">
           {busy === "promote" ? "Promovendo…" : "Promover à fábrica"}
         </Button>
         {card.actions.revalidate && (
           <Button variant="outlined" disabled={busy !== null} onClick={() => void run("revalidate")}>{busy === "revalidate" ? "Revalidando…" : "Revalidar"}</Button>
         )}
       </Stack>
+      {journeyLoading && <Typography variant="caption" component="p" color="text.secondary" role="status" sx={{ mt: 0.75 }}>Conferindo a situação do card no servidor…</Typography>}
       {blocked && <Typography variant="caption" component="p" color="text.secondary" sx={{ mt: 0.75 }}>A promoção está indisponível enquanto houver bloqueio na situação do card (acima).</Typography>}
     </Box>
   );

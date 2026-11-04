@@ -15,10 +15,22 @@ export const PORTAL_ONLY: Record<string, string> = {
   TENANT_INACTIVE: "O tenant está suspenso. Fale com o administrador.",
 };
 
-/** Mensagem de tabela para um código (backend primeiro, depois os do portal). */
+/**
+ * Códigos que o backend da Fase 3 (correções da revisão adversarial) passa a enviar: o portal já tem a mensagem PT-BR. A mensagem do
+ * servidor (`userMessage`, ou a tabela dele quando o código entrar em `error-codes.json`) sempre vence esta.
+ */
+export const PREPARED: Record<string, string> = {
+  USE_CARDS: "Este produto usa cards: abra um card em vez de evoluir direto pelo projeto.",
+  INVALID_ID: "O identificador informado é inválido.",
+  USE_CARD_DELETE: "Este projeto é o rascunho de um card. Exclua ou recuse o card em vez de apagar o rascunho.",
+  CARD_PATH_COLLIDES_WITH_BASE: "Esse arquivo já existe na spec da versão corrente, que é somente leitura. Use outro nome em docs/rfc ou docs/adr.",
+  CARD_NOT_READY: "O card ainda não está pronto para promover. Valide a especificação do card primeiro.",
+};
+
+/** Mensagem de tabela para um código (backend primeiro, depois os do portal e os preparados para a próxima versão do backend). */
 export function tableMessage(code: string | undefined): string | undefined {
   if (!code) return undefined;
-  return BACKEND_ERRORS[code]?.message ?? PORTAL_ONLY[code];
+  return BACKEND_ERRORS[code]?.message ?? PORTAL_ONLY[code] ?? PREPARED[code];
 }
 
 const FALLBACK = "Não foi possível concluir a ação. Tente novamente.";
@@ -77,6 +89,7 @@ export function cardErrorMessage(err: unknown): string {
     if (!base) {
       if (err.status === 402) base = err.message || "Orçamento insuficiente para esta ação.";
       else if (err.status === 401) base = "Sessão expirada. Entre novamente.";
+      else if (err.status === 403) base = "Seu papel neste tenant não permite esta ação. Fale com o administrador.";
       else base = err.message || FALLBACK;
     }
     const detail = errorDetail(err);
@@ -96,5 +109,31 @@ export function blockedReasonLabel(reason: string | null | undefined): string {
   if (reason.startsWith("budget:")) { const code = reason.slice("budget:".length); return `orçamento — ${tableMessage(code) ?? code}`; }
   if (reason.startsWith("child_")) return `a execução não está mais ativa (${reason.slice("child_".length)})`;
   if (reason.startsWith("materialization_failed")) return tableMessage("MATERIALIZATION_FAILED") ?? reason;
+  return reason;
+}
+
+const EVENT_REASON: Record<string, string> = {
+  validated: "especificação validada",
+  user_refine: "refinamento iniciado",
+  user_reject: "recusado pelo usuário",
+  user_reopen: "reaberto para edição",
+  revalidate_base: "base atualizada na revalidação",
+  manual_patch: "pedido alterado manualmente",
+  spec_write: "especificação alterada",
+  evolve_claim: "promoção à fábrica",
+  resume: "execução retomada",
+  resume_budget: "retomado após liberar o orçamento",
+  budget_released: "orçamento liberado",
+  child_in_factory: "execução em andamento",
+  child_accepted_pr_merged: "versão aceita e PR integrado",
+  child_discarded: "execução descartada",
+};
+
+/** Motivo (`reason`) de um evento do histórico em texto para pessoas (Y-20); desconhecido volta como veio, sem inventar. */
+export function eventReasonLabel(reason: string | null | undefined): string {
+  if (!reason) return "";
+  if (EVENT_REASON[reason]) return EVENT_REASON[reason];
+  if (reason.startsWith("budget:") || reason.startsWith("materialization_failed")) return blockedReasonLabel(reason);
+  if (reason.startsWith("child_")) return `a execução não está mais ativa (${reason.slice("child_".length)})`;
   return reason;
 }

@@ -1,0 +1,11 @@
+{
+  "request": "POST /api/spec-chat",
+  "status": 202,
+  "body": {
+    "jobId": "00000000-0000-4000-8000-000000000001",
+    "status": "pending",
+    "filePath": "docs/rfc/RFC-0001-exportar-csv.md",
+    "baseSha": "0000000000000000000000000000000000000000000000000000000000000001",
+    "deadlineAt": "2026-11-04T12:00:00.000Z"
+  }
+}

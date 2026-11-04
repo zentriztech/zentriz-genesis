@@ -20,3 +20,15 @@ export function fixture<T = unknown>(name: string): Fixture<T> {
 
 /** Só o corpo da fixture. */
 export const body = <T = unknown>(name: string): T => fixture<T>(name).body;
+
+// ── Fixtures das rotas de spec/chat/planner do rascunho (`__contract__/spec/`, teste `cards.contract.spec.pg.integration.test.ts`) ──
+export const SPEC_CONTRACT_DIR = path.join(CONTRACT_DIR, "spec");
+export function specFixtureNames(): string[] {
+  return fs.readdirSync(SPEC_CONTRACT_DIR).filter((f) => f.endsWith(".json") && f !== "index.json").map((f) => f.replace(/\.json$/, "")).sort();
+}
+export function specFixture<T = unknown>(name: string): Fixture<T> {
+  const file = path.join(SPEC_CONTRACT_DIR, `${name}.json`);
+  if (!fs.existsSync(file)) throw new Error(`Fixture de spec ausente: ${name}. Rode \`npm run contract:gen:spec\` no api-node.`);
+  return JSON.parse(fs.readFileSync(file, "utf-8")) as Fixture<T>;
+}
+export const specBody = <T = unknown>(name: string): T => specFixture<T>(name).body;

@@ -88,17 +88,16 @@ export function CardCreateDialog({ open, productId, onClose, onCreated }: {
           <TextField label="Descrição do pedido" value={body} onChange={(e) => setBody(e.target.value)} multiline minRows={5} fullWidth required
             error={!!fieldError.body} helperText={fieldError.body ?? `${body.length.toLocaleString("pt-BR")} / ${BODY_MAX.toLocaleString("pt-BR")} caracteres`} />
           <Box>
-            <Typography variant="subtitle2" component="h3">Anexos (opcional)</Typography>
+            <Typography variant="subtitle2" component="h2">Anexos (opcional)</Typography>
             <Typography variant="caption" color="text.secondary" component="p" id="card-attach-help">
               Tipos permitidos: {allowed.join(", ")}
               {" · quantidade e tamanho máximos são conferidos pelo servidor"}.
               Arquivos txt e md entram na especificação; pdf, doc e docx ficam guardados no card (convertidos para .md automaticamente quando a conversão está habilitada).
             </Typography>
-            <Button component="label" variant="outlined" size="small" sx={{ mt: 1 }}>
-              Escolher arquivos
-              <input ref={fileInput} hidden type="file" multiple accept={allowed.map((e) => `.${e}`).join(",")} aria-describedby="card-attach-help"
-                onChange={(e) => addFiles(e.target.files)} />
-            </Button>
+            {/* Botão de verdade (alcançável por Tab e Enter/Espaço) que aciona o seletor; o <input type=file> fica oculto. Um <label> estilizado como botão não recebe foco do teclado. */}
+            <Button variant="outlined" size="small" sx={{ mt: 1 }} onClick={() => fileInput.current?.click()} aria-describedby="card-attach-help">Escolher arquivos</Button>
+            <input ref={fileInput} hidden type="file" multiple accept={allowed.map((e) => `.${e}`).join(",")} tabIndex={-1} aria-hidden="true"
+              onChange={(e) => addFiles(e.target.files)} />
             {fieldError.files && <Alert severity="warning" sx={{ mt: 1 }} role="alert">{fieldError.files}</Alert>}
             {files.length > 0 && (
               <Box component="ul" aria-label="Arquivos escolhidos" sx={{ m: 0, mt: 1, pl: 2 }}>

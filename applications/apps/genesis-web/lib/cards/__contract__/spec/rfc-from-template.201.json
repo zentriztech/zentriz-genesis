@@ -1,0 +1,9 @@
+{
+  "request": "POST /api/projects/:draftId/rfc-from-template",
+  "status": 201,
+  "body": {
+    "ok": true,
+    "path": "docs/rfc/RFC-0001-exportar-entregas-em-csv.md",
+    "number": 1
+  }
+}

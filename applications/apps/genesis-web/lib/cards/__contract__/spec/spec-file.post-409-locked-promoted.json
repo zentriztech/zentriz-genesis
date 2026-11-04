@@ -1,0 +1,12 @@
+{
+  "request": "POST /api/projects/:draftId/spec-file",
+  "status": 409,
+  "body": {
+    "code": "CARD_SPEC_LOCKED",
+    "message": "A spec de TK-0001 está travada: o card está em 'promoted' e o rascunho virou histórico.",
+    "userMessage": "A spec do card está travada. Reabra o card para voltar a editar.",
+    "state": "promoted",
+    "canReopen": false,
+    "cardId": "00000000-0000-4000-8000-000000000001"
+  }
+}

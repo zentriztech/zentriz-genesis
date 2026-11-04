@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { useCardsEnabled } from "@/lib/cards/useCardsEnabled";
+import { EvolveButton } from "@/components/cards/EvolveButton";
 import { observer } from "mobx-react-lite";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
@@ -409,7 +409,7 @@ function ProjectDetailPageInner() {
   const id     = params.id as string;
   // Cards da Bancada (plano EVOLUIR-PROJETO 3.6): com a flag CARDS_BANCADA do tenant, "Evoluir" leva ao
   // quadro de cards do produto; sem a flag (ou sem produto) o diálogo abaixo segue exatamente como era.
-  const cardsEnabled = useCardsEnabled(projectsStore.getById(id)?.productId);
+  // (a flag CARDS_BANCADA é consultada dentro do <EvolveButton>, que trata carregando/erro sem cair no diálogo legado — Y-10)
 
   // UI state
   const [triedLoad, setTriedLoad] = useState(false);
@@ -1379,11 +1379,7 @@ function ProjectDetailPageInner() {
         {/* FT-10: Botão Evoluir — só aparece em projetos aceitos.
             RFC-0009: o contador diz, sem abrir nada, quantos pedidos estão esperando. */}
         {project.status === "accepted" && (
-          <Button variant="outlined" color="secondary" size="small"
-            startIcon={<span style={{ fontSize: "1rem" }}>🔄</span>}
-            onClick={() => (cardsEnabled && project.productId ? router.push(`/products/${project.productId}/cards`) : setEvolveOpen(true))}>
-            {openTickets.length > 0 ? `Evoluir (${openTickets.length} pedido${openTickets.length > 1 ? "s" : ""})` : "Evoluir"}
-          </Button>
+          <EvolveButton productId={project.productId} openTickets={openTickets.length} onCards={(pid) => router.push(`/products/${pid}/cards`)} onLegacy={() => setEvolveOpen(true)} />
         )}
         {/* Menu Ações */}
         <Tooltip title="Ações">

@@ -1,0 +1,13 @@
+{
+  "request": "POST /api/spec-chat",
+  "status": 409,
+  "body": {
+    "code": "CARD_SPEC_LOCKED",
+    "message": "A spec de TK-0001 está travada: o card está pronto (ready). Reabra o card (POST /api/cards/00000000-0000-4000-8000-000000000001/reopen) para voltar a editar.",
+    "userMessage": "A spec do card está travada. Reabra o card para voltar a editar.",
+    "state": "ready",
+    "canReopen": true,
+    "cardId": "00000000-0000-4000-8000-000000000001",
+    "reopen": "POST /api/cards/00000000-0000-4000-8000-000000000001/reopen"
+  }
+}

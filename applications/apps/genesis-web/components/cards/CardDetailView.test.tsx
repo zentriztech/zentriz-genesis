@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { apiErrorFrom, detailOf, journeyOf, makeDetail } from "@/lib/cards/cardFixtures";
-import { body } from "@/lib/cards/contractFixtures";
+import { apiErrorFrom, detailOf, journeyOf, makeDetail, specApiErrorFrom } from "@/lib/cards/cardFixtures";
+import { body, specBody } from "@/lib/cards/contractFixtures";
 import { resetCardsCapabilitiesCache } from "@/lib/cards/useCardsEnabled";
 import type { BaseSpec, CardAttachmentsResponse, CardDetail, CardJourney } from "@/lib/cards/types";
 
@@ -27,6 +27,9 @@ const put = apiPut as unknown as ReturnType<typeof vi.fn>;
 const del = apiDelete as unknown as ReturnType<typeof vi.fn>;
 
 const BASE = body<BaseSpec>("base-spec.200");
+const RFC = "docs/rfc/RFC-0001-exportar-csv.md";
+const REQ = "tickets/TK-0001/request.md";
+const RFC_FILE = specBody<{ content: string; contentSha256: string }>("spec-file.get-200");
 const ID = detailOf("draft").id;
 const DRAFT = detailOf("draft").draftProjectId;
 
@@ -38,8 +41,12 @@ function route(card: CardDetail, journey: CardJourney | Error | null, extra: Rec
     if (url === `/api/cards/${card.id}/journey`) { if (journey instanceof Error) throw journey; return journey; }
     if (url === `/api/cards/${card.id}/base-spec`) return BASE;
     if (url === `/api/cards/${card.id}/attachments`) return { items: [], strict: false, conversionEnabled: false, summary: {} };
-    if (url.endsWith("/spec-files")) return [{ id: "f1", filename: "spec.md", filePath: "/x/spec.md", relDir: "", isPrimary: false }, { id: "f2", filename: "request.md", filePath: "/x", relDir: "tickets/TK-0001", isPrimary: false }];
-    if (url.includes("/spec-file?path=")) return { path: "spec.md", content: "# Spec do card", contentSha256: "sha1", isPrimary: false };
+    // Rotas de spec do rascunho: as RESPOSTAS REAIS gravadas pelo backend (`__contract__/spec/`). `onlyRequest` = rascunho novo (só o pedido).
+    if (url.endsWith("/spec-tree")) return specBody(extra.__onlyRequest ? "spec-tree.draft" : "spec-tree.with-rfc");
+    if (url.includes("/spec-file?path=")) {
+      const p = decodeURIComponent(url.split("path=")[1]);
+      return p === REQ ? specBody("spec-file.get-request") : { ...specBody<object>("spec-file.get-200"), path: p };
+    }
     throw new Error(`GET inesperado ${url}`);
   });
 }
@@ -320,35 +327,66 @@ describe("CardDetailView — ações, tipo e erros do gate", () => {
 });
 
 describe("CardDetailView — aba da especificação", () => {
-  it("distingue 'Spec inicial' (somente leitura) de 'Spec deste card' (editável) e não altera nada ao abrir", async () => {
+  it("distingue 'Spec inicial' (somente leitura) de 'Spec deste card' (editável), abre o RFC do card e não altera nada ao abrir", async () => {
     route(detailOf("refining"), journeyOf("refining"));
     render_({ initialTab: "spec" });
     expect(await screen.findByText("Spec inicial · somente leitura")).toBeInTheDocument();
     expect(screen.getByText("Spec deste card")).toBeInTheDocument();
     expect(await screen.findByLabelText("Conteúdo somente leitura de spec.md")).toHaveTextContent("O app lista entregas. Prazo de 48h.");
     const editor = await screen.findByLabelText("Editor da spec");
-    await waitFor(() => expect(editor).toHaveValue("# Spec do card"));
+    await waitFor(() => expect(editor).toHaveValue(RFC_FILE.content));
     expect(editor).not.toHaveAttribute("readonly");
-    expect(screen.queryByText("tickets/TK-0001/request.md")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Arquivo do card")).toHaveTextContent(RFC);
+    expect(screen.getByTestId("writable-scope")).toHaveTextContent("tickets/TK-0001/**, docs/rfc/**, docs/adr/**");
     expect(post).not.toHaveBeenCalled();
-    expect(get.mock.calls.map((c) => c[0] as string).some((u) => /evolve|promote|clone/.test(u))).toBe(false);
+    expect(get.mock.calls.map((c) => c[0] as string).some((u) => /evolve|promote|clone|spec-files/.test(u))).toBe(false);
     expect(await screen.findByTestId("gaps-panel")).toHaveTextContent(`GAPs de ${DRAFT}`);
   });
 
-  it("salva o arquivo com baseSha (If-Match) e mostra confirmação", async () => {
+  it("Y-03: rascunho NOVO (só tickets/TK-0001/request.md) mostra o pedido, não 'sem arquivos'; o pedido é imutável e o Chat explica o que fazer", async () => {
+    route(detailOf("draft"), journeyOf("draft-no-rfc"), { __onlyRequest: true });
+    render_({ initialTab: "spec" });
+    expect(await screen.findByLabelText("Arquivo do card")).toHaveTextContent(REQ);
+    expect(screen.queryByText(/ainda não tem arquivos/)).not.toBeInTheDocument();
+    const editor = await screen.findByLabelText("Editor da spec");
+    await waitFor(() => expect((editor as HTMLTextAreaElement).value).toContain("Quero baixar a lista de entregas em CSV."));
+    expect(editor).toHaveAttribute("readonly");
+    expect(screen.getByRole("button", { name: "Salvar" })).toBeDisabled();
+    expect(screen.getByText(/O card ainda não tem RFC/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Gerar RFC com a IA" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Novo RFC a partir do modelo" })).toBeEnabled();
+    expect(screen.getByLabelText("Mensagem para o assistente")).toBeDisabled();
+    expect(screen.getByText(/O pedido original é imutável\. Selecione ou crie um RFC/)).toBeInTheDocument();
+  });
+
+  it("salva o RFC com baseSha (If-Match) pelo caminho em docs/rfc e mostra confirmação", async () => {
     route(detailOf("refining"), journeyOf("refining"));
-    put.mockResolvedValue({ ok: true, contentSha256: "sha2" });
+    put.mockResolvedValue(specBody("spec-file.put-200"));
     const user = userEvent.setup();
     render_({ initialTab: "spec" });
     const editor = await screen.findByLabelText("Editor da spec");
-    await waitFor(() => expect(editor).toHaveValue("# Spec do card"));
+    await waitFor(() => expect(editor).toHaveValue(RFC_FILE.content));
     await user.type(editor, " mais");
     await user.click(screen.getByRole("button", { name: "Salvar" }));
-    await waitFor(() => expect(put).toHaveBeenCalledWith(`/api/projects/${DRAFT}/spec-file?path=spec.md`, { content: "# Spec do card mais", baseSha: "sha1" }));
+    await waitFor(() => expect(put).toHaveBeenCalledWith(`/api/projects/${DRAFT}/spec-file?path=${encodeURIComponent(RFC)}`, { content: `${RFC_FILE.content} mais`, baseSha: RFC_FILE.contentSha256 }));
     expect(await screen.findByText(/Salvo\. Valide o card/)).toBeInTheDocument();
   });
 
-  it("card pronto (spec.locked + canReopen do servidor): editor somente leitura e 'Reabrir para edição' usa /reopen", async () => {
+  it("conflito de edição (CONFLICT real do servidor): mostra a mensagem e oferece 'Recarregar'", async () => {
+    route(detailOf("refining"), journeyOf("refining"));
+    put.mockRejectedValue(specApiErrorFrom("spec-file.put-409-conflict"));
+    const user = userEvent.setup();
+    render_({ initialTab: "spec" });
+    const editor = await screen.findByLabelText("Editor da spec");
+    await waitFor(() => expect(editor).toHaveValue(RFC_FILE.content));
+    await user.type(editor, "x");
+    await user.click(screen.getByRole("button", { name: "Salvar" }));
+    expect(await screen.findByText(/O arquivo mudou desde a sua leitura/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Recarregar" }));
+    await waitFor(() => expect(editor).toHaveValue(RFC_FILE.content));
+  });
+
+  it("card pronto (spec.locked + canReopen do servidor): editor somente leitura, sem geradores, e 'Reabrir para edição' usa /reopen", async () => {
     route(detailOf("ready"), journeyOf("ready"));
     post.mockResolvedValue(body("reopen.200"));
     const user = userEvent.setup();
@@ -357,6 +395,7 @@ describe("CardDetailView — aba da especificação", () => {
     expect(lock).toHaveTextContent("está travada");
     expect(await screen.findByLabelText("Editor da spec")).toHaveAttribute("readonly");
     expect(screen.queryByRole("button", { name: "Salvar" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Gerar RFC com a IA" })).not.toBeInTheDocument();
     await user.click(within(lock).getByRole("button", { name: "Reabrir para edição" }));
     await waitFor(() => expect(post).toHaveBeenCalledWith(`/api/cards/${ID}/reopen`, {}));
   });
@@ -383,20 +422,142 @@ describe("CardDetailView — aba da especificação", () => {
     const user = userEvent.setup();
     render_({ initialTab: "spec" });
     const editor = await screen.findByLabelText("Editor da spec");
-    await waitFor(() => expect(editor).toHaveValue("# Spec do card"));
+    await waitFor(() => expect(editor).toHaveValue(RFC_FILE.content));
     await user.type(editor, "x");
     await user.click(screen.getByRole("button", { name: "Salvar" }));
     expect(await screen.findByText("A spec do card está travada. Reabra o card para voltar a editar.")).toBeInTheDocument();
   });
 
-  it("CARD_PATH_OUT_OF_SCOPE ao criar arquivo: mensagem + pastas permitidas do servidor", async () => {
+  it("Y-03(b): o campo 'Novo arquivo' sugere um caminho VÁLIDO (docs/rfc/RFC-NNNN-…) e recusa no cliente o que o backend recusa (spec.md, rfc/RFC-001.md)", async () => {
     route(detailOf("refining"), journeyOf("refining"));
-    (apiPost as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(apiErrorFrom("spec-write.400-path-out-of-scope"));
     const user = userEvent.setup();
     render_({ initialTab: "spec" });
-    await user.type(await screen.findByLabelText(/Novo arquivo/), "spec.md");
+    const field = await screen.findByLabelText(/Novo arquivo/);
+    await waitFor(() => expect(field).toHaveValue("docs/rfc/RFC-0002-exportar-entregas-em-csv.md"));
+    expect(screen.getByRole("button", { name: "Criar arquivo" })).toBeEnabled();
+    for (const ruim of ["spec.md", "rfc/RFC-001.md", "docs/rfc/../../x.md", "docs/regras.md"]) {
+      await user.clear(field); await user.type(field, ruim);
+      expect(screen.getByRole("button", { name: "Criar arquivo" }), ruim).toBeDisabled();
+      expect(screen.getByText(/O card só escreve em tickets\/TK-0001\/\*\*, docs\/rfc\/\*\*, docs\/adr\/\*\*\./), ruim).toBeInTheDocument();
+    }
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("cria o arquivo em docs/rfc (corpo da fixture real), recarrega a árvore e abre o novo arquivo", async () => {
+    route(detailOf("refining"), journeyOf("refining"));
+    post.mockResolvedValue(specBody("spec-file.post-201"));
+    const user = userEvent.setup();
+    render_({ initialTab: "spec" });
+    const field = await screen.findByLabelText(/Novo arquivo/);
+    await waitFor(() => expect(field).toHaveValue("docs/rfc/RFC-0002-exportar-entregas-em-csv.md"));
+    await user.click(screen.getByRole("button", { name: "Criar arquivo" }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith(`/api/projects/${DRAFT}/spec-file`, expect.objectContaining({ path: "docs/rfc/RFC-0002-exportar-entregas-em-csv.md" })));
+    await waitFor(() => expect(get.mock.calls.filter((c) => String(c[0]).endsWith("/spec-tree")).length).toBeGreaterThanOrEqual(2));
+  });
+
+  it("CARD_PATH_OUT_OF_SCOPE vindo do servidor (caminho que passou na checagem do cliente): mensagem + pastas permitidas", async () => {
+    route(detailOf("refining"), journeyOf("refining"));
+    post.mockRejectedValue(apiErrorFrom("spec-write.400-path-out-of-scope"));
+    const user = userEvent.setup();
+    render_({ initialTab: "spec" });
+    const field = await screen.findByLabelText(/Novo arquivo/);
+    await user.clear(field); await user.type(field, "docs/adr/ADR-001-x.md");
     await user.click(screen.getByRole("button", { name: "Criar arquivo" }));
     expect(await screen.findByText(/O card só escreve na própria pasta e no RFC\/ADR dele.*Pastas permitidas: tickets\/TK-0003\/\*\*, docs\/rfc\/\*\*, docs\/adr\/\*\*\./)).toBeInTheDocument();
+  });
+
+  it("Y-03(c): 'Gerar RFC com a IA' chama o planner (evolution-plan), mostra o progresso e o resultado, abre o RFC gerado e recarrega o card", async () => {
+    route(detailOf("draft"), journeyOf("draft-no-rfc"), { __onlyRequest: true });
+    post.mockResolvedValue(specBody("evolution-plan.post-202"));
+    const user = userEvent.setup();
+    render_({ initialTab: "spec" });
+    await user.type(await screen.findByLabelText(/Instruções para o arquiteto/), "Exportar em CSV com ponto e vírgula");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const base = get.getMockImplementation()!;
+    get.mockImplementation(async (url: string) => {
+      if (url.includes("/evolution-plan/")) { await gate; return specBody("evolution-plan.get-done"); }
+      return base(url);
+    });
+    await user.click(screen.getByRole("button", { name: "Gerar RFC com a IA" }));
+    expect(await screen.findByRole("button", { name: "Gerando o RFC…" })).toBeDisabled();
+    expect(screen.getByText(/O arquiteto está escrevendo o RFC/)).toBeInTheDocument();
+    expect(post).toHaveBeenCalledWith(`/api/projects/${DRAFT}/evolution-plan`, { request: "Exportar em CSV com ponto e vírgula" });
+    release();
+    const done = await screen.findByTestId("plan-done");
+    expect(done).toHaveTextContent("Exportar entregas em CSV");
+    expect(done).toHaveTextContent("docs/rfc/RFC-0002-exportar-csv.md");
+    expect(within(done).getByLabelText("Perguntas do arquiteto")).toHaveTextContent("O CSV deve incluir entregas canceladas?");
+    expect(within(done).getByLabelText("Avisos do arquiteto")).toBeInTheDocument();
+    expect(get.mock.calls.filter((c) => String(c[0]).endsWith("/spec-tree")).length).toBeGreaterThanOrEqual(2);   // recarregou a árvore
+    expect(get.mock.calls.filter((c) => c[0] === `/api/cards/${ID}`).length).toBeGreaterThanOrEqual(2);              // e o card (o RFC move o rascunho para 'Refinando')
+  });
+
+  it("planner: 402 de orçamento (corpo real) e job em erro (fixture real) viram mensagens claras, sem travar a tela", async () => {
+    route(detailOf("draft"), journeyOf("draft-no-rfc"), { __onlyRequest: true });
+    post.mockRejectedValueOnce(apiErrorFrom("promote.402-budget-paused"));
+    const user = userEvent.setup();
+    render_({ initialTab: "spec" });
+    await user.click(await screen.findByRole("button", { name: "Gerar RFC com a IA" }));
+    expect(await screen.findByTestId("plan-error")).toHaveTextContent("O orçamento de IA está pausado");
+    post.mockResolvedValueOnce(specBody("evolution-plan.post-202"));
+    const base = get.getMockImplementation()!;
+    get.mockImplementation(async (url: string) => (url.includes("/evolution-plan/") ? specBody("evolution-plan.get-error") : base(url)));
+    await user.click(screen.getByRole("button", { name: "Gerar RFC com a IA" }));
+    await waitFor(() => expect(screen.getByTestId("plan-error")).toHaveTextContent("EMPTY_RESPONSE"));
+    expect(screen.getByRole("button", { name: "Gerar RFC com a IA" })).toBeEnabled();
+  });
+
+  it("a ação sugerida 'Gerar o RFC com a IA' da situação do card abre a aba e dispara o planner", async () => {
+    route(makeDetail(), journeyOf("draft-no-rfc"));
+    post.mockResolvedValue(specBody("evolution-plan.post-202"));
+    get.mockImplementation(((impl) => async (url: string) => (url.includes("/evolution-plan/") ? specBody("evolution-plan.get-done") : impl(url)))(get.getMockImplementation()!));
+    const user = userEvent.setup();
+    render_();
+    await user.click(await screen.findByRole("button", { name: "Gerar o RFC com a IA" }));
+    expect(await screen.findByText("Spec inicial · somente leitura")).toBeInTheDocument();
+    await waitFor(() => expect(post).toHaveBeenCalledWith(`/api/projects/${DRAFT}/evolution-plan`, {}));
+    expect(await screen.findByTestId("plan-done")).toBeInTheDocument();
+  });
+
+  it("'Novo RFC a partir do modelo' cria docs/rfc/RFC-NNNN pelo servidor e abre o arquivo", async () => {
+    route(detailOf("draft"), journeyOf("draft-no-rfc"), { __onlyRequest: true });
+    post.mockResolvedValue(specBody("rfc-from-template.201"));
+    const user = userEvent.setup();
+    render_({ initialTab: "spec" });
+    await user.click(await screen.findByRole("button", { name: "Novo RFC a partir do modelo" }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith(`/api/projects/${DRAFT}/rfc-from-template`, { title: "Exportar entregas em CSV" }));
+    await waitFor(() => expect(get.mock.calls.filter((c) => String(c[0]).endsWith("/spec-tree")).length).toBeGreaterThanOrEqual(2));
+  });
+
+  it("Y-03: o Chat funciona sobre o arquivo selecionado (RFC), com as respostas reais do spec-chat, e só aplica no editor quando o usuário manda", async () => {
+    route(detailOf("refining"), journeyOf("refining"));
+    post.mockResolvedValue(specBody("spec-chat.post-202"));
+    const base = get.getMockImplementation()!;
+    get.mockImplementation(async (url: string) => (/^\/api\/spec-chat\//.test(url) ? specBody("spec-chat.get-done") : base(url)));
+    const user = userEvent.setup();
+    render_({ initialTab: "spec" });
+    const editor = await screen.findByLabelText("Editor da spec");
+    await waitFor(() => expect(editor).toHaveValue(RFC_FILE.content));
+    await user.click(screen.getByText("Chat IA sobre o arquivo do card"));
+    await user.type(screen.getByLabelText("Mensagem para o assistente"), "Acrescente o separador do CSV.");
+    await user.click(screen.getByRole("button", { name: "Enviar" }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith("/api/spec-chat", expect.objectContaining({ projectId: DRAFT, filePath: RFC, baseSha: RFC_FILE.contentSha256 })));
+    await user.click(await screen.findByRole("button", { name: "Aplicar no editor" }));
+    expect((editor as HTMLTextAreaElement).value).toContain("ponto e vírgula como separador");
+    expect(put).not.toHaveBeenCalled();   // nada é salvo sem o usuário salvar
+  });
+
+  it("Chat com o card pronto: a trava do servidor (CARD_SPEC_LOCKED real do spec-chat) aparece como mensagem", async () => {
+    route(detailOf("refining"), journeyOf("refining"));
+    post.mockRejectedValue(specApiErrorFrom("spec-chat.post-409-locked"));
+    const user = userEvent.setup();
+    render_({ initialTab: "spec" });
+    await waitFor(() => expect(screen.getByLabelText("Editor da spec")).toHaveValue(RFC_FILE.content));
+    await user.click(screen.getByText("Chat IA sobre o arquivo do card"));
+    await user.type(screen.getByLabelText("Mensagem para o assistente"), "oi");
+    await user.click(screen.getByRole("button", { name: "Enviar" }));
+    expect(await screen.findByText("A spec do card está travada. Reabra o card para voltar a editar.")).toBeInTheDocument();
   });
 
   it("base-spec truncada (content null) não quebra a tela", async () => {
@@ -410,6 +571,67 @@ describe("CardDetailView — aba da especificação", () => {
     route(detailOf("refining"), journeyOf("refining"));
     render_({ initialTab: "versions" });
     expect(await screen.findByTestId("versions-panel")).toHaveTextContent(`Versões de ${DRAFT}`);
+  });
+});
+
+describe("CardDetailView — Y-20 (recarga, carregamento e histórico legível) e Y-18", () => {
+  it("falha na RECARGA com o card já na tela: aviso não bloqueante, o card continua visível e 'Atualizar' tenta de novo", async () => {
+    route(detailOf("draft"), journeyOf("draft-ready-to-validate"));
+    post.mockResolvedValue(body("ready.200"));
+    const base = get.getMockImplementation()!;
+    let falhar = false;
+    get.mockImplementation(async (url: string) => { if (falhar && url === `/api/cards/${ID}`) throw new Error("Failed to fetch"); return base(url); });
+    const user = userEvent.setup();
+    render_();
+    await user.click(await screen.findByRole("button", { name: "Validar o card" }));
+    falhar = true;
+    await user.click(screen.getByRole("button", { name: "Validar o card" }));
+    const warn = await screen.findByTestId("reload-warning");
+    expect(warn).toHaveTextContent("Não foi possível atualizar o card: Failed to fetch");
+    expect(warn).toHaveTextContent("podem estar desatualizados");
+    expect(screen.getByRole("heading", { name: /TK-0001 · Exportar entregas em CSV/ })).toBeInTheDocument();
+    falhar = false;
+    await user.click(within(warn).getByRole("button", { name: "Atualizar" }));
+    await waitFor(() => expect(screen.queryByTestId("reload-warning")).not.toBeInTheDocument());
+  });
+
+  it("enquanto a jornada carrega: 'Promover' desabilitado e spinner na aba Estado; quando chega, habilita", async () => {
+    route(detailOf("ready"), journeyOf("ready"));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const base = get.getMockImplementation()!;
+    get.mockImplementation(async (url: string) => { if (url === `/api/cards/${ID}/journey`) { await gate; } return base(url); });
+    render_();
+    const btn = await screen.findByRole("button", { name: "Promover à fábrica" });
+    expect(btn).toBeDisabled();
+    expect(screen.getByText(/Conferindo a situação do card/)).toBeInTheDocument();
+    release();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Promover à fábrica" })).toBeEnabled());
+  });
+
+  it("aba Estado: spinner enquanto a jornada carrega e motivos do histórico em português (sem 'spec_write'/'budget:…' crus)", async () => {
+    const d = detailOf("ready");
+    const comMotivos = { ...d, events: [
+      { ...d.events[0], reason: "spec_write" }, { ...d.events[0], reason: "budget:BUDGET_PAUSED" }, { ...d.events[0], reason: "validated" }, { ...d.events[0], reason: "motivo_novo_do_backend" },
+    ] };
+    route(comMotivos, journeyOf("ready"));
+    render_({ initialTab: "state" });
+    expect(await screen.findByTestId("journey-ready")).toBeInTheDocument();
+    const lista = screen.getByText("Histórico").parentElement!;
+    expect(lista).toHaveTextContent("(especificação alterada)");
+    expect(lista).toHaveTextContent("(orçamento — O orçamento de IA está pausado");
+    expect(lista).toHaveTextContent("(especificação validada)");
+    expect(lista).toHaveTextContent("(motivo_novo_do_backend)");   // desconhecido volta como veio
+    expect(lista).not.toHaveTextContent("(spec_write)");
+    expect(lista).not.toHaveTextContent("(budget:");
+  });
+
+  it("Y-18: PR com javascript: na situação do card não vira link", async () => {
+    const j = journeyOf("delivered");
+    route({ ...detailOf("delivered"), prUrl: "javascript:alert(1)" }, { ...j, execution: j.execution ? { ...j.execution, prUrl: "javascript:alert(1)" } : null });
+    render_();
+    await screen.findByTestId("journey-headline");
+    expect(screen.queryByTestId("pr-link")).not.toBeInTheDocument();
   });
 });
 

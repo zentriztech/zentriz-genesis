@@ -1,0 +1,17 @@
+{
+  "tela": "card-320",
+  "tema": "light",
+  "escopo": "main",
+  "axe": {
+    "name": "axe-core",
+    "version": "4.14.0"
+  },
+  "regrasAprovadas": 32,
+  "violacoes": [],
+  "incompletas": [
+    {
+      "id": "color-contrast",
+      "nodes": 10
+    }
+  ]
+}

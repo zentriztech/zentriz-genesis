@@ -9,6 +9,7 @@ import Typography from "@mui/material/Typography";
 import NextLink from "next/link";
 import type { CardDetail, CardJourney, JourneyAction, RevalidateResponse } from "@/lib/cards/types";
 import { blockedReasonLabel } from "@/lib/cards/cardErrors";
+import { safeHttpsUrl } from "@/lib/cards/safeUrl";
 import { VisuallyHidden } from "./VisuallyHidden";
 import type { CardRunner, RunKey } from "./useCardRunner";
 import type { CardTab } from "./CardDetailView";
@@ -16,7 +17,7 @@ import type { CardTab } from "./CardDetailView";
 /** Ações sugeridas pelo servidor (`journey.action.key`) que o portal executa direto pela API de cards. */
 const RUNNABLE: Partial<Record<string, RunKey>> = { ready: "ready", promote: "promote", revalidate: "revalidate", reopen: "reopen", resume: "resume" };
 /** Ações que levam o usuário a outra aba (editar o RFC com a IA, corrigir o RFC). */
-const GO_SPEC = new Set(["generate_rfc", "edit_rfc"]);
+const GO_SPEC = new Set(["edit_rfc"]);
 
 /** `/api/projects/<id>/budget` → página do projeto dono do orçamento. */
 export function budgetProjectHref(action: JourneyAction): string | null {
@@ -24,7 +25,7 @@ export function budgetProjectHref(action: JourneyAction): string | null {
   return m ? `/projects/${m[1]}` : null;
 }
 
-function SuggestedAction({ action, runner, onTab }: { action: JourneyAction; runner: CardRunner; onTab: (t: CardTab) => void }) {
+function SuggestedAction({ action, runner, onTab, onGenerateRfc }: { action: JourneyAction; runner: CardRunner; onTab: (t: CardTab) => void; onGenerateRfc?: () => void }) {
   // “Promover à fábrica” já tem o botão próprio do painel de promoção (com os pré-requisitos): aqui só o apontamento em texto.
   if (action.key === "promote") return <Typography variant="body2">{action.label} (botão abaixo)</Typography>;
   const key = RUNNABLE[action.key];
@@ -32,7 +33,11 @@ function SuggestedAction({ action, runner, onTab }: { action: JourneyAction; run
   if (key) {
     return <Button size="small" variant="outlined" color="inherit" disabled={!action.enabled || !!runner.busy} onClick={() => void runner.run(key)} sx={{ minHeight: 32 }}>{action.label}</Button>;
   }
-  if (GO_SPEC.has(action.key)) {
+  // “Gerar o RFC com a IA”: chama o planner de RFC (evolution-plan) na aba Especificação, que mostra o progresso e o resultado.
+  if (action.key === "generate_rfc" && onGenerateRfc) {
+    return <Button size="small" variant="outlined" color="inherit" disabled={!action.enabled || !!runner.busy} onClick={onGenerateRfc} sx={{ minHeight: 32 }}>{action.label}</Button>;
+  }
+  if (GO_SPEC.has(action.key) || action.key === "generate_rfc") {
     return <Button size="small" variant="outlined" color="inherit" disabled={!action.enabled} onClick={() => onTab("spec")} sx={{ minHeight: 32 }}>{action.label}</Button>;
   }
   if (href) {
@@ -65,8 +70,8 @@ export function RevalidateResult({ r }: { r: RevalidateResponse }) {
  * Situação do card segundo o SERVIDOR (`GET /api/cards/:id/journey`): `headline` + `detail`, `blockers` (o que impede a próxima etapa),
  * `action` (próxima ação sugerida), PR/execução e base vencida. A tela não recalcula nada disso.
  */
-export function CardStatusPanel({ card, journey, journeyError, runner, onTab, onReloadJourney }: {
-  card: CardDetail; journey: CardJourney | null; journeyError: string | null; runner: CardRunner; onTab: (t: CardTab) => void; onReloadJourney: () => void;
+export function CardStatusPanel({ card, journey, journeyError, runner, onTab, onGenerateRfc, onReloadJourney }: {
+  card: CardDetail; journey: CardJourney | null; journeyError: string | null; runner: CardRunner; onTab: (t: CardTab) => void; onGenerateRfc?: () => void; onReloadJourney: () => void;
 }) {
   if (!journey) {
     return journeyError
@@ -74,7 +79,7 @@ export function CardStatusPanel({ card, journey, journeyError, runner, onTab, on
       : null;
   }
   const exec = journey.execution;
-  const prUrl = exec?.prUrl ?? card.prUrl;
+  const prUrl = safeHttpsUrl(exec?.prUrl ?? card.prUrl);
   return (
     <Box component="section" aria-label="Situação do card" data-testid="card-status" sx={{ mb: 1 }}>
       <Alert severity={journey.severity} role="status" sx={{ alignItems: "flex-start", "& .MuiAlert-message": { minWidth: 0, overflowWrap: "anywhere" } }}>
@@ -98,7 +103,7 @@ export function CardStatusPanel({ card, journey, journeyError, runner, onTab, on
             </Box>
           </Box>
         )}
-        {journey.action && <Box sx={{ mt: 1 }} data-testid="journey-action"><SuggestedAction action={journey.action} runner={runner} onTab={onTab} /></Box>}
+        {journey.action && <Box sx={{ mt: 1 }} data-testid="journey-action"><SuggestedAction action={journey.action} runner={runner} onTab={onTab} onGenerateRfc={onGenerateRfc} /></Box>}
         {journey.action && !journey.action.enabled && <Typography variant="caption" component="p" sx={{ mt: 0.5 }}>Próxima ação sugerida (indisponível agora): {journey.action.label}</Typography>}
       </Alert>
       {(exec || prUrl) && (

@@ -1,0 +1,8 @@
+{
+  "request": "POST /api/projects/:draftId/spec-file",
+  "status": 409,
+  "body": {
+    "code": "EXISTS",
+    "message": "Já existe arquivo com esse caminho"
+  }
+}

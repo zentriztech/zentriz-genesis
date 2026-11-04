@@ -74,7 +74,7 @@ export function CardRequestTab({ card, onChanged }: { card: CardDetail; onChange
       {saved && <Alert severity="success" role="status">Pedido salvo.</Alert>}
       {error && <Alert severity="error" role="alert">{error}</Alert>}
       <Box component="section" aria-labelledby="card-attachments-title">
-        <Typography id="card-attachments-title" variant="subtitle2" component="h3">Anexos ({card.attachments.length})</Typography>
+        <Typography id="card-attachments-title" variant="subtitle2" component="h2">Anexos ({card.attachments.length})</Typography>
         {card.attachments.length === 0
           ? <Typography variant="body2" color="text.secondary">Este card não tem anexos.</Typography>
           : (

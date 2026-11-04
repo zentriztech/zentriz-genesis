@@ -9,11 +9,14 @@ import NextLink from "next/link";
 import { NEXT_ACTION, ORIGIN_LABEL, STATE_LABEL, type CardSummary } from "@/lib/cards/types";
 import { blockedReasonLabel } from "@/lib/cards/cardErrors";
 import { KindChip } from "./KindChip";
+import { safeHttpsUrl } from "@/lib/cards/safeUrl";
+import { errorTextColor } from "./CardsA11yTheme";
 import { VisuallyHidden } from "./VisuallyHidden";
 
 /** Cartão do quadro. Um único link (o título) leva ao card; ligações com spec/filho/PR são links próprios. */
 export function CardTile({ card }: { card: CardSummary }) {
   const blocked = card.state === "blocked";
+  const prHref = safeHttpsUrl(card.prUrl);
   return (
     <Box component="article" aria-label={`${card.code}: ${card.title}`} data-testid={`card-tile-${card.code}`}
       sx={{ border: "1px solid", borderColor: blocked ? "error.main" : "divider", borderLeftWidth: blocked ? 4 : 1, borderRadius: 1, p: 1.25, bgcolor: "background.paper", minWidth: 0 }}>
@@ -27,9 +30,9 @@ export function CardTile({ card }: { card: CardSummary }) {
         {card.title || "(sem título)"}
       </Link>
       {blocked && (
-        <Stack direction="row" spacing={0.5} alignItems="flex-start" role="status" sx={{ mt: 0.75, color: "error.main" }}>
+        <Stack direction="row" spacing={0.5} alignItems="flex-start" role="status" sx={{ mt: 0.75, color: errorTextColor }}>
           <BlockIcon sx={{ fontSize: "1rem", mt: "2px" }} aria-hidden />
-          <Typography variant="caption" fontWeight={700} color="error">
+          <Typography variant="caption" fontWeight={700} sx={{ color: errorTextColor }}>
             Bloqueado{card.blockedReason ? `: ${blockedReasonLabel(card.blockedReason)}` : ""}
           </Typography>
         </Stack>
@@ -46,9 +49,9 @@ export function CardTile({ card }: { card: CardSummary }) {
             {card.executionStatus ? ` (${card.executionStatus})` : ""}
           </Typography>
         )}
-        {card.prUrl && (
+        {prHref && (
           <Typography variant="caption" color="text.secondary">
-            PR: <Link href={card.prUrl} target="_blank" rel="noopener noreferrer">abrir no GitHub<VisuallyHidden> (abre em nova aba)</VisuallyHidden></Link>
+            PR: <Link href={prHref} target="_blank" rel="noopener noreferrer">abrir no GitHub<VisuallyHidden> (abre em nova aba)</VisuallyHidden></Link>
           </Typography>
         )}
         <Typography variant="caption" color="text.secondary">

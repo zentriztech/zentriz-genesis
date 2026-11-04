@@ -1,0 +1,126 @@
+{
+  "tela": "card-spec",
+  "largura": 1280,
+  "tema": "dark",
+  "escopo": "main",
+  "alvos": {
+    "total": 18,
+    "menoresQue24px": []
+  },
+  "foco": {
+    "passos": 20,
+    "noEscopo": 17,
+    "visiveisNoEscopo": 17,
+    "semFoco": [],
+    "sequencia": [
+      {
+        "name": "← Quadro de cards",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Validar o card",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Validar",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Revalidar",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Rejeitar",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Especificação do card",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "spec.md",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Conteúdo somente leitura de spec.md",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "TEXTAREA",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Gerar RFC com a IA",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Novo RFC a partir do modelo",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "docs/rfc/RFC-0001-exportar-csv.md",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Editor de docs/rfc/RFC-0001-exportar-csv",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "INPUT",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Criar arquivo",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "Chat IA sobre o arquivo do card",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "GAPs e validação da spec do card",
+        "visible": true,
+        "inScope": true
+      },
+      {
+        "name": "(corpo)",
+        "visible": true,
+        "inScope": false
+      },
+      {
+        "name": "Recolher menu",
+        "visible": false,
+        "inScope": false
+      },
+      {
+        "name": "Tema claro",
+        "visible": false,
+        "inScope": false
+      }
+    ]
+  },
+  "contraste": {
+    "amostras": 55,
+    "minimo": 5.09,
+    "abaixoDoMinimo": []
+  },
+  "reflow": {
+    "excessoHorizontalPx": 0
+  }
+}

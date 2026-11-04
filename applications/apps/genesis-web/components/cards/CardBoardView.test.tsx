@@ -23,6 +23,15 @@ const CARDS = [
 
 beforeEach(() => { vi.clearAllMocks(); resetCardsCapabilitiesCache(); api.capabilities.mockResolvedValue({ cardsBancada: true }); });
 
+describe("CardBoardView — Y-18", () => {
+  it("prUrl com esquema perigoso não vira link no cartão", async () => {
+    api.list.mockResolvedValue({ items: [makeCard({ id: "x", code: "TK-0009", title: "PR ruim", state: "in_factory", prUrl: "javascript:alert(1)" })], total: 1, limit: 100, offset: 0 });
+    render(<CardBoardView productId="p1" />);
+    const tile = await screen.findByTestId("card-tile-TK-0009");
+    expect(within(tile).queryByRole("link", { name: /abrir no GitHub/ })).not.toBeInTheDocument();
+  });
+});
+
 describe("CardBoardView", () => {
   it("mostra uma coluna por estado com contagem e cartões com código, tipo, ligação e próxima ação", async () => {
     api.list.mockResolvedValue({ items: CARDS, total: 4, limit: 100, offset: 0 });

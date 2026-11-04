@@ -36,16 +36,19 @@ function CardDetailViewInner({ cardId, initialTab = "request" }: { cardId: strin
   const [journey, setJourney] = useState<CardJourney | null>(null);
   const [journeyError, setJourneyError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reloadError, setReloadError] = useState<string | null>(null);   // recarga que falhou com o card já na tela: aviso não bloqueante (Y-20)
   const [tab, setTab] = useState<CardTab>(initialTab);
   const [baseSpecStale, setBaseSpecStale] = useState<boolean | null>(null);
+  const [planRequested, setPlanRequested] = useState(false);   // ação sugerida “Gerar o RFC com a IA”: abre a aba e dispara o planner (uma vez)
+  const onPlanStarted = useCallback(() => setPlanRequested(false), []);
 
   const loadJourney = useCallback(async () => {
     try { setJourney(await cardsApi.journey(cardId)); setJourneyError(null); }
     catch (e) { setJourneyError(`Não foi possível carregar a situação do card: ${cardErrorMessage(e)}`); }
   }, [cardId]);
   const load = useCallback(async () => {
-    try { setCard(await cardsApi.get(cardId)); setError(null); }
-    catch (e) { setError(cardErrorMessage(e)); }
+    try { setCard(await cardsApi.get(cardId)); setError(null); setReloadError(null); }
+    catch (e) { const m = cardErrorMessage(e); setError(m); setReloadError(m); }
     await loadJourney();
   }, [cardId, loadJourney]);
   useEffect(() => { void load(); }, [load]);
@@ -65,19 +68,24 @@ function CardDetailViewInner({ cardId, initialTab = "request" }: { cardId: strin
         <Typography variant="h5" component="h1" fontWeight={700} sx={{ overflowWrap: "anywhere" }}>{card.code} · {card.title}</Typography>
         <StateChip state={card.state} /><KindChip kind={card.kind} />
       </Stack>
-      <CardStatusPanel card={card} journey={journey} journeyError={journeyError} runner={runner} onTab={setTab} onReloadJourney={() => void loadJourney()} />
+      {(reloadError ?? (journey ? journeyError : null)) && (
+        <Alert severity="warning" role="status" data-testid="reload-warning" sx={{ mb: 1 }} action={<Button color="inherit" size="small" onClick={() => void load()}>Atualizar</Button>}>
+          {reloadError ? `Não foi possível atualizar o card: ${reloadError}` : journeyError} Os dados abaixo podem estar desatualizados.
+        </Alert>
+      )}
+      <CardStatusPanel card={card} journey={journey} journeyError={journeyError} runner={runner} onTab={setTab} onGenerateRfc={() => { setTab("spec"); setPlanRequested(true); }} onReloadJourney={() => void loadJourney()} />
       <CardActionsBar card={card} runner={runner} />
-      <Box sx={{ mt: 2 }}><PromotePanel card={card} journey={journey} runner={runner} /></Box>
+      <Box sx={{ mt: 2 }}><PromotePanel card={card} journey={journey} runner={runner} journeyLoading={journey === null && journeyError === null} /></Box>
       <Tabs value={tab} onChange={(_, v: CardTab) => setTab(v)} variant="scrollable" scrollButtons="auto" aria-label="Seções do card" sx={{ mt: 2, borderBottom: 1, borderColor: "divider" }}>
         {CARD_TABS.map((t) => <Tab key={t} value={t} label={TAB_LABEL[t]} id={`card-tab-${t}`} aria-controls={`card-panel-${t}`} />)}
       </Tabs>
       <Box role="tabpanel" id={`card-panel-${tab}`} aria-labelledby={`card-tab-${tab}`} sx={{ pt: 2 }}>
         {tab === "request" && <CardRequestTab card={card} onChanged={load} />}
-        {tab === "spec" && <CardSpecTab card={card} locked={locked} canReopen={canReopen} runner={runner} onChanged={load} onStale={setBaseSpecStale} baseStale={journey?.base?.stale ?? baseSpecStale} />}
+        {tab === "spec" && <CardSpecTab card={card} locked={locked} canReopen={canReopen} runner={runner} onChanged={load} onStale={setBaseSpecStale} baseStale={journey?.base?.stale ?? baseSpecStale} planRequested={planRequested} onPlanStarted={onPlanStarted} />}
         {tab === "versions" && (card.draftProjectId
           ? <SpecVersionsPanel projectId={card.draftProjectId} onRestored={() => void load()} />
           : <Alert severity="info">Sem rascunho de especificação para este card.</Alert>)}
-        {tab === "state" && <CardJourneyTab card={card} journey={journey} error={journeyError} />}
+        {tab === "state" && <CardJourneyTab card={card} journey={journey} error={journeyError} loading={journey === null && journeyError === null} />}
       </Box>
     </Box>
   );
