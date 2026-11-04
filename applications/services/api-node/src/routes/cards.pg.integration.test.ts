@@ -530,7 +530,13 @@ describePg("Fase 2 / 2.6 — API de cards (Postgres real)", () => {
     const s = await mk();
     const c = await readyCard(s);
     as(s);
-    // texto em 'ready' ⇒ refining (H §4.4); resposta no formato do ticket (code, execution_status, attachments_count)
+    // Fase 3 (3.3): texto em 'ready' NÃO reabre mais sozinho — 409 CARD_SPEC_LOCKED até o `reopen` explícito (antes: ready → refining automático).
+    const locked = await app.inject({ method: "PATCH", url: `/api/tickets/${c.id}`, payload: { title: "Novo título", body: "Texto revisado." } });
+    expect(locked.statusCode, locked.body).toBe(409);
+    expect(locked.json()).toMatchObject({ code: "CARD_SPEC_LOCKED", state: "ready", canReopen: true });
+    expect((await stateOf(c.id)).card_state).toBe("ready");
+    expect((await post(s, `/api/cards/${c.id}/reopen`)).statusCode).toBe(200);
+    // resposta no formato do ticket (code, execution_status, attachments_count)
     const e = await app.inject({ method: "PATCH", url: `/api/tickets/${c.id}`, payload: { title: "Novo título", body: "Texto revisado." } });
     expect(e.statusCode, e.body).toBe(200);
     expect(e.json()).toMatchObject({ id: c.id, title: "Novo título", body: "Texto revisado.", code: "TK-0001", status: "open", execution_status: null, attachments_count: 0, card_state: "refining" });

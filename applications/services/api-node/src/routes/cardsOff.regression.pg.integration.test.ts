@@ -108,6 +108,8 @@ describe("Fase 2 — guarda estática: só o código novo da Fase 2 menciona as 
     "routes/tickets.ts", "routes/projects.ts", "services/tickets.ts", "services/evolveClaim.ts", "services/evolveReconciler.ts",
     "services/evolutionUniqueness.ts",                                                 // índice de boot uq_tickets_draft
     "services/featureFlags.ts", "services/ticketTransitions.ts", "routes/runtimeConfig.ts", // só comentários
+    // Fase 3 (3.3/3.5): jornada do card, guarda da spec do rascunho (lê o estado do card dono do `card_draft`) e veredito do `card_draft`.
+    "services/cardJourney.ts", "services/cardSpecGuard.ts", "services/promotability.ts",
     "services/specChatJobs.ts", // homônimo: chave `blocked_reason` do JSON de erro do job (não é a coluna de tickets)
   ]);
   function walk(dir: string, out: string[] = []): string[] {
