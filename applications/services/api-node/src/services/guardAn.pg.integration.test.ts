@@ -211,9 +211,33 @@ describePg("AO — correções AN do Guard (Postgres real)", () => {
     const svc = await app.inject({ method: "POST", url: "/api/internal/llm-guard/advisor-gate", payload: { projectId: B.parentId, projectedUsd: 0.5 }, headers: { "x-internal-token": "tok-plataforma" } });
     expect(svc.statusCode).toBe(200);
     expect(svc.json()).toMatchObject({ allow: true, mode: "policy" });
-    // token de máquina do run (svc:"runner") segue amarrado ao PRÓPRIO projeto, também em outro tenant
-    const runner = signToken({ sub: "r", email: "r@r", role: "tenant_admin", tenantId: A.tenantId, svc: "runner", projectId: B.parentId });
-    expect((await call("advisor-gate", runner, { projectId: A.parentId, projectedUsd: 0.5 })).json()).toMatchObject({ allow: true, mode: "policy" }); // debita em B (forçado), não em A
+    // token de máquina do run (svc:"runner") segue amarrado ao PRÓPRIO projeto (claim) quando o claim é do tenant do token
+    const runnerB = signToken({ sub: "r", email: "r@r", role: "tenant_admin", tenantId: B.tenantId, svc: "runner", projectId: B.parentId });
+    expect((await call("advisor-gate", runnerB, { projectId: A.parentId, projectedUsd: 0.5 })).json()).toMatchObject({ allow: true, mode: "policy" }); // debita em B (forçado), não em A
+  });
+
+  // ═══ AV / M-5 ═════════════════════════════════════════════════════════════════════════════════
+  it("AV/M-5: token svc:runner de um tenant com `projectId` de OUTRO tenant não lê nem grava (404 igual); sem claim de projeto ⇒ 403", async () => {
+    const A = await mk(50);
+    const B = await mk(50);
+    await put({ key: "advisor_pct", scopeType: "global", pct: 10 });
+    const call = (path: string, token: string, payload: Record<string, unknown>) => app.inject({
+      method: "POST", url: `/api/internal/llm-guard/${path}`, payload, headers: { authorization: `Bearer ${token}` },
+    });
+    const crossTenant = signToken({ sub: "r", email: "r@r", role: "tenant_admin", tenantId: A.tenantId, svc: "runner", projectId: B.parentId });
+    const gate = await call("advisor-gate", crossTenant, { projectId: B.parentId, projectedUsd: 1 });
+    expect(gate.statusCode).toBe(404);
+    expect(gate.body).not.toMatch(/baseUsd|capUsd|policyAuthor/);
+    expect((await call("preflight", crossTenant, { projectId: B.parentId, model: "claude-opus-4", estInputTokens: 10, maxOutputTokens: 10, purpose: "t" })).statusCode).toBe(404);
+    const rec = await call("record", crossTenant, { projectId: B.parentId, model: "claude-opus-4", inputTokens: 1_000_000, outputTokens: 100_000, llmRole: "advisor" });
+    expect(rec.statusCode).toBe(404);
+    expect(await advisorSpentUsd(pool, B.parentId)).toBe(0);
+    // sem claim de projeto: sem amarra ⇒ 403 (o corpo escolheria o projeto)
+    const unbound = signToken({ sub: "r", email: "r@r", role: "tenant_admin", tenantId: B.tenantId, svc: "runner" });
+    const u = await call("record", unbound, { projectId: B.parentId, model: "claude-opus-4", inputTokens: 1_000_000, outputTokens: 100_000 });
+    expect(u.statusCode).toBe(403);
+    expect(u.json()).toMatchObject({ code: "RUNNER_TOKEN_UNBOUND" });
+    expect(await advisorSpentUsd(pool, B.parentId)).toBe(0);
   });
 
   // ═══ A4 ═══════════════════════════════════════════════════════════════════════════════════════

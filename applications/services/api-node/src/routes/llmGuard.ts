@@ -64,7 +64,24 @@ function runnerProjectOf(request: FastifyRequest): string | null {
  */
 async function denyForeignTenant(request: FastifyRequest, reply: FastifyReply, projectId: string | null, shape: Record<string, unknown>): Promise<boolean> {
   const auth = authenticateInternal(request);
-  const pl = auth.ok ? (auth.payload as { role?: string; svc?: string; tenantId?: string | null } | null) : null;
+  const pl = auth.ok ? (auth.payload as { role?: string; svc?: string; tenantId?: string | null; projectId?: string } | null) : null;
+  // AV/M-5: o token de MÁQUINA do run (`svc:"runner"`) é amarrado ao projeto E ao tenant do claim — como `internalLlm.ts`. Sem `projectId`
+  // no claim não há amarra (⇒ 403); com `projectId` de projeto que não é do tenant do próprio token (token forjado/trocado) ⇒ o MESMO 404.
+  if (pl?.svc === "runner") {
+    if (!pl.projectId) {
+      await reply.status(403).send({ ...shape, code: "RUNNER_TOKEN_UNBOUND", message: "Token de serviço sem escopo de projeto." });
+      return true;
+    }
+    let bound = false;
+    if (UUID_ANY.test(pl.projectId)) {
+      const r = await pool.query("SELECT tenant_id FROM projects WHERE id = $1", [pl.projectId]);
+      const owner = r.rows[0] ? ((r.rows[0].tenant_id as string | null) ?? null) : undefined;
+      bound = owner !== undefined && owner === (pl.tenantId ?? null);
+    }
+    if (bound) return false;
+    await reply.status(404).send({ ...shape, code: "PROJECT_NOT_FOUND", message: "Projeto não encontrado." });
+    return true;
+  }
   if (!pl || pl.role !== "tenant_admin" || pl.svc) return false;
   if (!projectId) return false; // sem projeto não há dado de outro tenant a vazar nem a alterar
   let owned = false;
@@ -76,6 +93,8 @@ async function denyForeignTenant(request: FastifyRequest, reply: FastifyReply, p
   await reply.status(404).send({ ...shape, code: "PROJECT_NOT_FOUND", message: "Projeto não encontrado." });
   return true;
 }
+
+const UUID_ANY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Deadpool conhece systemId/serviceId, não o projeto: resolve pelo vínculo de monitoramento. */
 async function resolveProjectId(body: GuardBody, forced: string | null = null): Promise<string | null> {
