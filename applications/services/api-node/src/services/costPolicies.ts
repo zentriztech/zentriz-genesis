@@ -36,6 +36,8 @@ export interface CostPolicy {
   version: number;
   author: string;
   updatedAt: string;
+  /** AN/M3: a linha do tenant era mais permissiva que a global e foi limitada a ela na leitura. */
+  clampedByGlobal?: boolean;
 }
 
 export interface PolicyInput {
@@ -212,21 +214,40 @@ export async function policyHistory(db: Queryable, scopeType: string, scopeId: s
 }
 
 /**
- * Política efetiva para um tenant: a linha do tenant vence a global. `null` se não houver nenhuma OU se a leitura falhar
- * (tabela ausente etc.) — nesse caso o Guard segue como antes (a leitura de política nunca derruba nem endurece a chamada).
+ * Política efetiva para um tenant: a linha do tenant vence a global, MAS nunca é mais permissiva que ela (AN/M3, "o mais restritivo
+ * vence": pct = menor dos dois; `abs_cap_usd` = menor dos existentes — vale mesmo se a global for baixada depois do PUT do tenant).
+ *
+ * `null` SOMENTE quando não há linha (nem global nem do tenant): é o único caso em que o Guard segue o comportamento anterior.
+ * Erro de leitura (conexão, timeout, tabela ausente após rollback) LANÇA (AN/A1, desenho 27 §5): não se sabe se a linha existe, então
+ * quem consome decide fail-closed (Advisor negado com evento; card negado como `GUARD_ERROR`; disjuntor nunca afrouxa).
  */
 export async function getEffectivePolicy(db: Queryable, key: PolicyKey, tenantId: string | null): Promise<CostPolicy | null> {
-  try {
-    const r = await db.query(
-      `SELECT * FROM cost_policies
-        WHERE policy_key = $1 AND (scope_type = 'global' OR (scope_type = 'tenant' AND scope_id = COALESCE($2::text, '-')))
-        ORDER BY (scope_type = 'tenant') DESC LIMIT 1`,
-      [key, tenantId],
-    );
-    return r.rows[0] ? toPolicy(r.rows[0]) : null;
-  } catch {
-    return null;
+  const r = await db.query(
+    `SELECT * FROM cost_policies
+      WHERE policy_key = $1 AND (scope_type = 'global' OR (scope_type = 'tenant' AND scope_id = COALESCE($2::text, '-')))
+      ORDER BY (scope_type = 'tenant') DESC LIMIT 2`,
+    [key, tenantId],
+  );
+  const winner = r.rows[0] ? toPolicy(r.rows[0]) : null;
+  const glob = r.rows[1] ? toPolicy(r.rows[1]) : null;
+  if (!winner || !glob || winner.scopeType !== "tenant" || glob.scopeType !== "global") return winner;
+  const pct = winner.pct != null && glob.pct != null ? Math.min(winner.pct, glob.pct) : winner.pct;
+  const absCapUsd = winner.absCapUsd != null && glob.absCapUsd != null ? Math.min(winner.absCapUsd, glob.absCapUsd) : (winner.absCapUsd ?? glob.absCapUsd);
+  const clamped = pct !== winner.pct || absCapUsd !== winner.absCapUsd;
+  return clamped ? { ...winner, pct, absCapUsd, clampedByGlobal: true } : winner;
+}
+
+/** AN/M3: motivo da recusa se a política de TENANT for mais permissiva que a global (ou `null` se pode gravar). */
+export function tenantExceedsGlobal(tenant: { pct: number | null; absCapUsd: number | null }, glob: CostPolicy | null): string | null {
+  if (!glob) return null;
+  if (tenant.pct != null && glob.pct != null && tenant.pct > glob.pct) {
+    return `A política do tenant (${tenant.pct} %) não pode ser mais permissiva que a global (${glob.pct} %): o mais restritivo vence.`;
   }
+  // Sem `absCapUsd` o tenant HERDA o da global na leitura (`getEffectivePolicy`); informado, não pode ser maior.
+  if (glob.absCapUsd != null && tenant.absCapUsd != null && tenant.absCapUsd > glob.absCapUsd) {
+    return `O teto absoluto do tenant (US$ ${tenant.absCapUsd}) não pode ser maior que o da global (US$ ${glob.absCapUsd}): o mais restritivo vence.`;
+  }
+  return null;
 }
 
 export interface AdvisorPolicyView {
@@ -237,10 +258,9 @@ export interface AdvisorPolicyView {
   author: string; updatedAt: string;
 }
 
-/** Exposição do Advisor: X % do orçamento total do dono, limitado pelo teto absoluto quando houver. Sem política ⇒ `null`. */
-export async function advisorPolicyView(db: Queryable, tenantId: string | null, budgetUsd: number | null): Promise<AdvisorPolicyView | null> {
+/** Monta a visão do Advisor a partir de uma política JÁ lida (evita reler `cost_policies` na mesma chamada). */
+export function advisorViewFromPolicy(p: CostPolicy | null, budgetUsd: number | null): AdvisorPolicyView | null {
   if (budgetUsd == null || !(budgetUsd > 0)) return null;
-  const p = await getEffectivePolicy(db, "advisor_pct", tenantId);
   if (!p || p.pct == null) return null;
   let cap = budgetUsd * (p.pct / 100);
   if (p.absCapUsd != null) cap = Math.min(cap, p.absCapUsd);
@@ -251,15 +271,20 @@ export async function advisorPolicyView(db: Queryable, tenantId: string | null, 
   };
 }
 
+/** Exposição do Advisor: X % do orçamento total do dono, limitado pelo teto absoluto quando houver. Sem política ⇒ `null`. Erro de leitura LANÇA (A1). */
+export async function advisorPolicyView(db: Queryable, tenantId: string | null, budgetUsd: number | null): Promise<AdvisorPolicyView | null> {
+  if (budgetUsd == null || !(budgetUsd > 0)) return null;
+  return advisorViewFromPolicy(await getEffectivePolicy(db, "advisor_pct", tenantId), budgetUsd);
+}
+
 export interface CardBudgetPolicyView {
   pct: number; baseUsd: number; capUsd: number; absCapUsd: number | null; calibrated: boolean; version: number;
   scopeType: "global" | "tenant"; author: string; updatedAt: string;
 }
 
-/** F5 (5.1): teto do card = pct % do orçamento total do dono (limitado por `abs_cap_usd`). Sem política (ou pct inválido) ⇒ `null`. */
-export async function cardBudgetPolicyView(db: Queryable, tenantId: string | null, budgetUsd: number | null): Promise<CardBudgetPolicyView | null> {
+/** Monta a visão do card a partir de uma política JÁ lida. */
+export function cardViewFromPolicy(p: CostPolicy | null, budgetUsd: number | null): CardBudgetPolicyView | null {
   if (budgetUsd == null || !(budgetUsd > 0)) return null;
-  const p = await getEffectivePolicy(db, "card_budget_pct", tenantId);
   if (!p || p.pct == null) return null;
   let cap = budgetUsd * (p.pct / 100);
   if (p.absCapUsd != null) cap = Math.min(cap, p.absCapUsd);
@@ -267,8 +292,22 @@ export async function cardBudgetPolicyView(db: Queryable, tenantId: string | nul
     version: p.version, scopeType: p.scopeType, author: p.author, updatedAt: p.updatedAt };
 }
 
-/** Disjuntor: valores em vigor vindos da política global (se existirem). */
-export async function breakerOverrides(db: Queryable): Promise<{ hour: number | null; day: number | null }> {
+/** F5 (5.1): teto do card = pct % do orçamento total do dono (limitado por `abs_cap_usd`). Sem política (ou pct inválido) ⇒ `null`. Erro de leitura LANÇA (A1). */
+export async function cardBudgetPolicyView(db: Queryable, tenantId: string | null, budgetUsd: number | null): Promise<CardBudgetPolicyView | null> {
+  if (budgetUsd == null || !(budgetUsd > 0)) return null;
+  return cardViewFromPolicy(await getEffectivePolicy(db, "card_budget_pct", tenantId), budgetUsd);
+}
+
+/** Últimos valores do disjuntor LIDOS com sucesso (por processo): base do "nunca afrouxar" quando a leitura falha. */
+let lastKnownBreaker: { hour: number | null; day: number | null } | null = null;
+/** Só para testes. */
+export function resetBreakerCache(): void { lastKnownBreaker = null; }
+
+/**
+ * Disjuntor: valores em vigor vindos da política global (se existirem). AN/A1: se a LEITURA falha, devolve `readFailed: true` com os
+ * últimos valores conhecidos (se houver) — o chamador usa o MENOR entre eles e o setting (`effectiveBreakerCap`), nunca afrouxa.
+ */
+export async function breakerOverrides(db: Queryable): Promise<{ hour: number | null; day: number | null; readFailed: boolean }> {
   try {
     const r = await db.query(
       `SELECT policy_key, value_usd FROM cost_policies WHERE scope_type = 'global' AND policy_key IN ('breaker_hour_usd', 'breaker_day_usd')`,
@@ -280,8 +319,20 @@ export async function breakerOverrides(db: Queryable): Promise<{ hour: number | 
       if (row.policy_key === "breaker_hour_usd") out.hour = n;
       if (row.policy_key === "breaker_day_usd") out.day = n;
     }
-    return out;
-  } catch {
-    return { hour: null, day: null };
+    lastKnownBreaker = { ...out };
+    return { ...out, readFailed: false };
+  } catch (e) {
+    console.error(`[costPolicies] leitura do disjuntor falhou — mantendo o valor MAIS RESTRITIVO conhecido: ${e instanceof Error ? e.message : String(e)}`);
+    return { hour: lastKnownBreaker?.hour ?? null, day: lastKnownBreaker?.day ?? null, readFailed: true };
   }
+}
+
+/**
+ * Teto efetivo (0 = sem teto): política vence o setting quando a leitura funcionou; se a leitura FALHOU, vale o menor positivo entre
+ * o último valor conhecido da política e o setting (nunca sobe em silêncio).
+ */
+export function effectiveBreakerCap(policy: number | null, setting: number, readFailed: boolean): number {
+  if (!readFailed) return policy ?? setting;
+  const c = [policy, setting].filter((x): x is number => x != null && x > 0);
+  return c.length ? Math.min(...c) : setting;
 }

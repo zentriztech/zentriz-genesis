@@ -66,6 +66,7 @@ const EXCEPTIONS: Record<string, string> = {
   "routes/deadpool.ts:0caa06ec": "Busca por id de projeto já resolvido (join por project_id/id); não lista projetos do produto/tenant, então o rascunho só aparece para quem já tem o id",
   "routes/products.ts:355ad236": "Lista de permissão por constante (SPEC_DECOMPOSABLE_STATUSES = draft, spec_submitted, pending_conversion): exclui card_draft por construção",
   "routes/products.ts:43eb1506": "Posse do projeto por id + tenant (autorização), não lista",
+  "routes/llmGuard.ts:fe692380": "Posse do projeto por id + tenant (autorização do tenant_admin nas rotas internas do Guard, AN/A3), não lista",
   "routes/products.ts:ab5f2b33": "pipeline_runs em andamento: só projeto executável tem run (o rascunho nunca roda pipeline)",
   "routes/products.ts:68d61b97": "DELETE do produto: DEVE contar o rascunho (excluir o produto com rascunho vivo apagaria o card por cascata)",
   "routes/products.ts:4cb0cde2": "Relações entre projetos por par de ids (project_links); o rascunho não tem relações",

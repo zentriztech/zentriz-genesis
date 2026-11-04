@@ -89,9 +89,9 @@ describePg("F5 — teto percentual do card no Guard + métricas (Postgres real)"
     expect(validatePolicy({ key: "card_budget_pct", pct: 20, valueUsd: 1 })).toMatchObject({ ok: false, code: "INVALID_VALUE" });
     const s = await mk();
     expect((await put({ key: "card_budget_pct", scopeType: "global", pct: 20, calibrated: false })).statusCode).toBe(200);
-    expect((await put({ key: "card_budget_pct", scopeType: "tenant", scopeId: s.tenantId, pct: 30 })).statusCode).toBe(200);
-    const r = await put({ key: "card_budget_pct", scopeType: "tenant", scopeId: s.tenantId, pct: 35 });
-    expect(r.json().policy).toMatchObject({ key: "card_budget_pct", pct: 35, calibrated: false, version: 2, base: "project_total_budget" });
+    expect((await put({ key: "card_budget_pct", scopeType: "tenant", scopeId: s.tenantId, pct: 15 })).statusCode).toBe(200); // AN/M3: tenant ≤ global (20)
+    const r = await put({ key: "card_budget_pct", scopeType: "tenant", scopeId: s.tenantId, pct: 18 });
+    expect(r.json().policy).toMatchObject({ key: "card_budget_pct", pct: 18, calibrated: false, version: 2, base: "project_total_budget" });
     admin();
     const h = await app.inject({ method: "GET", url: `/api/cost-policies/history?scopeType=tenant&scopeId=${s.tenantId}&key=card_budget_pct` });
     expect(h.json().history.map((x: { action: string }) => x.action)).toEqual(["update", "create"]);
@@ -114,8 +114,9 @@ describePg("F5 — teto percentual do card no Guard + métricas (Postgres real)"
     const child2 = await mkChild(s);
     const card2 = await mkCard(s, { state: "in_factory", child: child2 });
     expect((await put({ key: "card_budget_pct", scopeType: "global", pct: 10 })).statusCode).toBe(200); // teto = US$ 10
-    await ledger(s, draft, 4);   // refino (rascunho) conta para o card
-    await ledger(s, child, 5);
+    // refino (rascunho) conta para o card. Chamadas de US$ 1 (AN/A4: o gate usa a mediana das chamadas como folga da próxima)
+    for (let i = 0; i < 4; i++) await ledger(s, draft, 1);
+    for (let i = 0; i < 5; i++) await ledger(s, child, 1);
     expect(await cardBudgetCheck(pool, child)).toMatchObject({ applies: true, ok: true, capUsd: 10, spentUsd: 9 });
     expect(await pf(child)).toMatchObject({ allow: true });
     expect(await checkProjectBudgetGate(pool, child)).toEqual({ ok: true });

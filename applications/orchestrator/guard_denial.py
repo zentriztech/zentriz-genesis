@@ -23,7 +23,8 @@ import re
 
 # Códigos reais do Guard (api-node `services/llmGuard.ts` GuardCode + `agents/llm_guard.py`).
 # Obs.: não existe `BUDGET_EXCEEDED` no código — o estouro é BUDGET_PAUSED/BUDGET_INSUFFICIENT.
-BUDGET_CODES = frozenset({"BUDGET_MISSING", "BUDGET_PAUSED", "BUDGET_INSUFFICIENT"})
+# `CARD_BUDGET_CAP` (F5, teto % do card): também é orçamento — só um humano resolve (subir orçamento/percentual), esperar não ajuda.
+BUDGET_CODES = frozenset({"BUDGET_MISSING", "BUDGET_PAUSED", "BUDGET_INSUFFICIENT", "CARD_BUDGET_CAP"})
 PLATFORM_CODES = frozenset({
     "KILL_SWITCH", "GLOBAL_HOURLY_CAP", "GLOBAL_DAILY_CAP", "UNATTRIBUTED_DAILY_CAP",
     "REPEAT_PAYLOAD", "PROJECT_NOT_FOUND",

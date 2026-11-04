@@ -145,7 +145,8 @@ try {
   // Roda AO LADO do LLM Guard; nenhum alerta altera o corte dele.
   const { pool: anomalyPool } = await import("./db/client.js");
   startAnomalyWorker(() => anomalyPool);
-  // Tarefa 1.8: reconciliador do /evolve (flag EVOLVE_RECONCILER, default off = nem agenda timer).
+  // Tarefa 1.8: reconciliador do /evolve (flag EVOLVE_RECONCILER). O worker SEMPRE agenda o timer (M-03); cada passada lê o modo
+  // efetivo e, com `off`, retorna sem tocar nas tabelas do /evolve (ver evolveReconciler.ts, startReconcilerWorker).
   startReconcilerWorker(() => anomalyPool);
   // Tarefa Q: retoma conversões pdf/doc/docx → .md pendentes (flag ATTACHMENT_CONVERSION, default off = só 1 leitura por passada, e só se houver fila).
   startAttachmentConversionWorker(() => anomalyPool);

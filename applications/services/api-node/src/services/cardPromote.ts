@@ -220,6 +220,7 @@ async function childBudgetGate(pool: Pool, childProjectId: string): Promise<{ ok
  * Reconciliador (Fase 3, 3.5): passa pelos cards com filho (`promoted|in_factory|blocked`) e aplica `syncCardWithChild` — é o que leva
  * a `blocked` (orçamento) o card cujo filho o Guard pausou, mesmo que ninguém consulte o card. Só roda com `EVOLVE_RECONCILER=on`.
  * Devolve quantas transições foram aplicadas. Nunca lança.
+ * AN/A2: também é candidato o card cujo filho VIVO (Bancada: `draft`/`spec_submitted`, que o Guard não para) levou `card_cap_reached` nas últimas 24 h.
  */
 export async function syncCardsWithChildren(pool: Pool, opts: { limit?: number } = {}): Promise<number> {
   let n = 0;
@@ -232,6 +233,9 @@ export async function syncCardsWithChildren(pool: Pool, opts: { limit?: number }
           AND ( (t.card_state IN ('promoted', 'in_factory') AND p.status IN ('failed', 'archived') AND COALESCE(p.extra->>'superseded_by', '') = '')
              OR (t.card_state IN ('promoted', 'in_factory') AND p.status = 'stopped' AND p.stopped_by = 'budget')
              OR (t.card_state = 'blocked' AND t.blocked_reason LIKE 'budget:%')
+             OR (t.card_state IN ('promoted', 'in_factory') AND EXISTS (
+                  SELECT 1 FROM llm_guard_events e WHERE e.project_id = t.child_project_id AND e.kind = 'card_cap_reached'
+                     AND e.created_at > now() - interval '24 hours'))
              OR (t.card_state = 'promoted' AND p.status <> ALL($2::text[])) )
         ORDER BY t.updated_at ASC LIMIT $1`,
       [opts.limit ?? 200, [...PRE_FACTORY_CHILD_STATUSES, "card_draft"]])).rows;

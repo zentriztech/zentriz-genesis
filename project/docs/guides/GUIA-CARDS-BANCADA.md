@@ -106,7 +106,7 @@ Abra o card e leia a **situação** e o motivo na aba Estado. As situações mai
 
 | Mensagem ou motivo | O que significa | O que fazer |
 |---|---|---|
-| **Orçamento** (`budget:…`, por exemplo "O orçamento de IA está pausado" ou "O saldo de IA não comporta a próxima atividade") | O controle de custo parou o filho. O card **não falhou**: só aguarda saldo | Peça ao dono do orçamento para **aumentar o orçamento** da versão e clique em **Retomar**. Se o card voltar a Na fábrica mas a execução continuar parada, **reinicie o projeto filho** (liberar o saldo não religa a execução sozinho) |
+| **Orçamento** (`budget:…`, por exemplo "O orçamento de IA está pausado" ou "O saldo de IA não comporta a próxima atividade") | O controle de custo parou o filho. O card **não falhou**: só aguarda saldo | Peça ao dono do orçamento para **aumentar o orçamento** da versão (ou, se o bloqueio for `CARD_BUDGET_CAP`, ao administrador para **subir o percentual por card**) e clique em **Retomar**. Se o card voltar a Na fábrica mas a execução continuar parada, **reinicie o projeto filho** (liberar o saldo não religa a execução sozinho) |
 | **Falha da fábrica** (`child_failed`, `materialization_failed:…`) | O projeto filho falhou | Veja o porquê no histórico do projeto filho. Corrigida a causa, clique em **Retomar**: o card volta a **Pronto** (se o filho morreu) e você **promove de novo** |
 | **Filho arquivado** (`child_archived`) | O projeto filho foi arquivado fora do fluxo | **Retomar** e promover de novo, ou **Rejeitar** se o pedido foi abandonado |
 | "A versão-base mudou desde a validação" | O produto avançou de versão | **Revalidar** e depois **Validar** |
@@ -133,4 +133,4 @@ Se **Retomar** responder "Sem saldo para retomar", o orçamento ainda não foi l
 - Um card gera **um** projeto filho (lotes de cards ficam para depois).
 - Produto fabricado fora do Genesis (repositório externo) ainda não é suportado.
 - Mudanças que cruzam serviços ainda dependem de decisão (o card vale para um serviço por vez).
-- O orçamento é o do dono da versão; não há orçamento próprio por card.
+- O orçamento é o do dono da versão. O administrador pode, opcionalmente, definir um **teto percentual por card** (`card_budget_pct`): quando o gasto do card (rascunho de refino + projeto filho) chega a esse percentual do orçamento da versão, o card fica **Bloqueado** (`budget:CARD_BUDGET_CAP`) sem pausar a versão nem os outros cards. Sem essa política, o card compartilha o orçamento do dono.

@@ -10,7 +10,7 @@
  * Admin (zentriz_admin):
  *   GET/PUT /api/admin/llm-guard/settings — chave geral e tetos globais; GET .../events
  */
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
@@ -34,11 +34,13 @@ type GuardBody = Partial<RecordInput> & { systemId?: string; serviceId?: string 
  */
 const CARD_SYNC_THROTTLE_MS = 15_000;
 const lastCardSync = new Map<string, number>();
-function scheduleCardSync(projectId: string | null): void {
+/** `kind`: o throttle é por projeto E origem — um registro de chamada (`record`) não pode "gastar" o intervalo de uma NEGATIVA logo em seguida. */
+function scheduleCardSync(projectId: string | null, kind: "record" | "denied" = "record"): void {
   if (!projectId) return;
   const now = Date.now();
-  if (now - (lastCardSync.get(projectId) ?? 0) < CARD_SYNC_THROTTLE_MS) return;
-  lastCardSync.set(projectId, now);
+  const key = `${kind}:${projectId}`;
+  if (now - (lastCardSync.get(key) ?? 0) < CARD_SYNC_THROTTLE_MS) return;
+  lastCardSync.set(key, now);
   if (lastCardSync.size > 5_000) lastCardSync.clear();
   setImmediate(() => {
     void import("../services/cardPromote.js").then((m) => m.syncCardForChildProject(pool, projectId)).catch(() => undefined);
@@ -50,6 +52,28 @@ function runnerProjectOf(request: FastifyRequest): string | null {
   const auth = authenticateInternal(request);
   const p = auth.ok ? (auth.payload as { svc?: string; projectId?: string } | null) : null;
   return p?.svc === "runner" && p.projectId ? String(p.projectId) : null;
+}
+
+/**
+ * AN/A3: o JWT de `tenant_admin` (portal) também autentica as rotas internas (`authenticateInternal`), e o nginx publica `/api`. Sem esta
+ * amarra, um admin do tenant A lia o gate do Advisor de B (PII + dólar) ou parava o filho de um card de B por estimativa inflada.
+ * Regra (a mesma de `internalLlm.ts`): tenant_admin só opera projeto do PRÓPRIO tenant; token estático, zentriz_admin e `svc` de
+ * plataforma/runner (este já amarrado ao próprio projeto por `runnerProjectOf`) operam qualquer um. Projeto de outro tenant,
+ * inexistente ou id inválido ⇒ a MESMA resposta 404 (sem vazar existência). Devolve `true` se já respondeu.
+ */
+async function denyForeignTenant(request: FastifyRequest, reply: FastifyReply, projectId: string | null, shape: Record<string, unknown>): Promise<boolean> {
+  const auth = authenticateInternal(request);
+  const pl = auth.ok ? (auth.payload as { role?: string; svc?: string; tenantId?: string | null } | null) : null;
+  if (!pl || pl.role !== "tenant_admin" || pl.svc) return false;
+  if (!projectId) return false; // sem projeto não há dado de outro tenant a vazar nem a alterar
+  let owned = false;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId) && pl.tenantId) {
+    const r = await pool.query("SELECT 1 FROM projects WHERE id = $1 AND tenant_id = $2", [projectId, pl.tenantId]);
+    owned = (r.rowCount ?? r.rows.length) > 0;
+  }
+  if (owned) return false;
+  await reply.status(404).send({ ...shape, code: "PROJECT_NOT_FOUND", message: "Projeto não encontrado." });
+  return true;
 }
 
 /** Deadpool conhece systemId/serviceId, não o projeto: resolve pelo vínculo de monitoramento. */
@@ -83,11 +107,13 @@ export async function llmGuardInternalRoutes(app: FastifyInstance): Promise<void
     if (body.source === "deadpool" && !projectId) {
       return reply.send({ allow: false, code: "PROJECT_NOT_FOUND", message: "Serviço monitorado sem projeto vinculado — sem orçamento para debitar." });
     }
+    if (await denyForeignTenant(request, reply, projectId, { allow: false })) return reply;
     const input: PreflightInput = { ...body, projectId };
     const decision = await preflight(pool, input);
     if (!decision.allow) {
       request.log.warn({ projectId, purpose: body.purpose, source: body.source, code: decision.code }, "[llm-guard] chamada NEGADA");
-      if (String(decision.code ?? "").startsWith("BUDGET")) scheduleCardSync(projectId);
+      // AN/A2: `CARD_BUDGET_CAP` (teto % do card) também alinha o card — sem ele o card só virava `blocked` quando alguém abrisse a jornada.
+      if (String(decision.code ?? "").startsWith("BUDGET") || decision.code === "CARD_BUDGET_CAP") scheduleCardSync(projectId, "denied");
     }
     return reply.send({ ...decision, projectId });
   });
@@ -97,6 +123,7 @@ export async function llmGuardInternalRoutes(app: FastifyInstance): Promise<void
     if (!authenticateInternal(request).ok) return reply.status(401).send({ allow: false, code: "UNAUTHORIZED" });
     const body = request.body ?? {};
     const projectId = await resolveProjectId(body, runnerProjectOf(request)).catch(() => null);
+    if (await denyForeignTenant(request, reply, projectId, { allow: false, mode: "policy" })) return reply;
     if (!projectId) {
       return reply.send({ allow: false, mode: "policy", code: "advisor_denied_no_base", message: "Sem projeto: sem base para o teto do Advisor." });
     }
@@ -107,6 +134,7 @@ export async function llmGuardInternalRoutes(app: FastifyInstance): Promise<void
     if (!authenticateInternal(request).ok) return reply.status(401).send({ code: "UNAUTHORIZED" });
     const body = request.body ?? {};
     const projectId = await resolveProjectId(body, runnerProjectOf(request)).catch(() => null);
+    if (await denyForeignTenant(request, reply, projectId, {})) return reply;
     const out = await recordCall(pool, {
       ...body, projectId,
       inputTokens: Number(body.inputTokens ?? 0), outputTokens: Number(body.outputTokens ?? 0),

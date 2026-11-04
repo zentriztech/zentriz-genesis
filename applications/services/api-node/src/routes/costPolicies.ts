@@ -13,7 +13,7 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { advisorFloorViolation } from "../lib/advisorFloor.js";
 import {
-  deletePolicy, listPolicies, policyHistory, upsertPolicy, validatePolicy, type PolicyInput,
+  deletePolicy, getPolicy, listPolicies, policyHistory, tenantExceedsGlobal, upsertPolicy, validatePolicy, type PolicyInput,
 } from "../services/costPolicies.js";
 
 function getUser(request: FastifyRequest): AuthUser {
@@ -83,6 +83,11 @@ export async function costPolicyRoutes(app: FastifyInstance): Promise<void> {
         ? advisorFloorViolation(v.pct as number, base, v.floorUsd)
         : "baseBudgetUsd deve ser um valor em US$ maior que zero.";
       if (why) return reply.status(400).send({ code: "ADVISOR_BELOW_FLOOR", message: why });
+    }
+    // AN/M3 (decisão do orquestrador): "o mais restritivo vence" — a política de TENANT nunca é mais permissiva que a global.
+    if (v.scopeType === "tenant" && (v.key === "advisor_pct" || v.key === "card_budget_pct")) {
+      const why = tenantExceedsGlobal(v, await getPolicy(pool, "global", "", v.key));
+      if (why) return reply.status(400).send({ code: "TENANT_POLICY_EXCEEDS_GLOBAL", message: why });
     }
     const saved = await upsertPolicy(pool, v, user.email, user.role === "zentriz_admin");
     await pool.query(

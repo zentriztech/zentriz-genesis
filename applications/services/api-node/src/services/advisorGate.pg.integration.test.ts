@@ -39,7 +39,9 @@ describePg("C4' — teto percentual do Advisor no Guard (Postgres real)", () => 
   const events = async (kind: string, projectId?: string) =>
     (await pool.query("SELECT detail, project_id FROM llm_guard_events WHERE kind = $1 AND ($2::uuid IS NULL OR project_id = $2) ORDER BY id", [kind, projectId ?? null])).rows;
 
+  const prevRolesMode = process.env.LLM_ROLES_MODE;
   beforeAll(async () => {
+    process.env.LLM_ROLES_MODE = "on"; // AN/M1: com política, o gate exige o registro de papéis ligado nesta API
     scratch = await createScratchDb("evo_c4");
     pool = scratch.pool;
     const { initDb } = await import("../db/init.js");
@@ -51,6 +53,7 @@ describePg("C4' — teto percentual do Advisor no Guard (Postgres real)", () => 
     admin();
   }, 120_000);
   afterAll(async () => {
+    if (prevRolesMode === undefined) delete process.env.LLM_ROLES_MODE; else process.env.LLM_ROLES_MODE = prevRolesMode;
     await app?.close();
     A?.cleanup(); C?.cleanup();
     await scratch?.drop();

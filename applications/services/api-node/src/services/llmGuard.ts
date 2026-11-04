@@ -30,7 +30,9 @@ import { dailyTokenQuotaMode } from "../lib/costSource.js";
 import { PRE_FACTORY_STATUSES } from "./projectStatus.js";
 import { isSesConfigured, sendEmail } from "./emailSender.js";
 import { buildEstimator, fetchHistoryBuckets } from "./specEnrichment.js";
-import { advisorPolicyView, breakerOverrides, cardBudgetPolicyView, getEffectivePolicy, type AdvisorPolicyView } from "./costPolicies.js";
+import {
+  advisorPolicyView, advisorViewFromPolicy, breakerOverrides, cardViewFromPolicy, effectiveBreakerCap, getEffectivePolicy, type AdvisorPolicyView,
+} from "./costPolicies.js";
 import { effectiveAdvisorFloorUsd } from "../lib/advisorFloor.js";
 
 export interface Queryable {
@@ -361,6 +363,19 @@ export async function checkDailyTokenQuota(
   }
 }
 
+/**
+ * Tetos do disjuntor global em vigor (0 = sem teto): política `breaker_*` vence o setting; se a leitura da política falha, vale o MENOR
+ * entre o último valor conhecido e o setting (AN/A1: nunca afrouxa). Usado no preflight E no pós-registro (AN/M4), para os dois
+ * avaliarem o MESMO teto.
+ */
+async function breakerCaps(db: Queryable, s: Record<string, string>): Promise<{ hourCap: number; dayCap: number }> {
+  const bo = await breakerOverrides(db);
+  return {
+    hourCap: effectiveBreakerCap(bo.hour, num(s.global_max_usd_per_hour), bo.readFailed),
+    dayCap: effectiveBreakerCap(bo.day, num(s.global_max_usd_per_day), bo.readFailed),
+  };
+}
+
 export async function preflight(db: Queryable, input: PreflightInput): Promise<GuardDecision> {
   try {
     const s = await getGuardSettings(db);
@@ -369,9 +384,7 @@ export async function preflight(db: Queryable, input: PreflightInput): Promise<G
     }
     const g = await globalSpend(db);
     // C3': a política `cost_policies` (breaker_*) vence o valor de llm_guard_settings/env; sem linha, nada muda.
-    const bo = await breakerOverrides(db);
-    const hourCap = bo.hour ?? num(s.global_max_usd_per_hour);
-    const dayCap = bo.day ?? num(s.global_max_usd_per_day);
+    const { hourCap, dayCap } = await breakerCaps(db, s);
     if (hourCap > 0 && g.hour >= hourCap) {
       await tripKillSwitch(db, "GLOBAL_HOURLY_CAP", { gastoUltimaHoraUsd: g.hour.toFixed(2), tetoUsd: hourCap });
       return { allow: false, code: "GLOBAL_HOURLY_CAP", message: `Teto global de US$ ${hourCap}/hora atingido — LLM bloqueado.` };
@@ -433,7 +446,7 @@ export async function preflight(db: Queryable, input: PreflightInput): Promise<G
     }
     // F5 (5.1): teto do card em %. NÃO pausa o dono (os outros cards seguem): só para o filho deste card (`stopped_by='budget'`),
     // que o reconciliador/`syncCardWithChild` leva a `blocked` (`budget:CARD_BUDGET_CAP`). Sem política ⇒ nada muda (D-E10).
-    const cardCap = await cardBudgetCheck(db, pid, est);
+    const cardCap = await cardBudgetCheck(db, pid, est, owner);
     if (cardCap.applies && !cardCap.ok) {
       await logEvent(db, "card_cap_reached", pid, { ownerId: owner.ownerId, ticketId: cardCap.ticketId, capUsd: cardCap.capUsd, spentUsd: cardCap.spentUsd, estUsd: est });
       await db.query(
@@ -445,7 +458,12 @@ export async function preflight(db: Queryable, input: PreflightInput): Promise<G
     const quotaDenied = await checkDailyTokenQuota(db, owner.tenantId, pid);
     if (quotaDenied) return { ...quotaDenied, budgetProjectId: owner.ownerId };
     // C3'': exposição do teto do Advisor lido de cost_policies; ausente sem política. A APLICAÇÃO é `advisorGate` (C4').
-    const advisorPolicy = await advisorPolicyView(db, owner.tenantId, owner.budgetUsd);
+    // A1: é só EXPOSIÇÃO (informativa). Se a leitura da política falhar, a exposição some e a chamada comum segue; quem APLICA o
+    // teto do Advisor é `advisorGate`, que nega (fail-closed) quando não consegue ler a política.
+    const advisorPolicy = await advisorPolicyView(db, owner.tenantId, owner.budgetUsd).catch((e) => {
+      console.warn(`[llmGuard] exposição da política do Advisor indisponível (gate segue fail-closed): ${msg(e)}`);
+      return null;
+    });
     return { allow: true, remainingUsd: remaining, budgetProjectId: owner.ownerId, ...(advisorPolicy ? { advisorPolicy } : {}) };
   } catch (e) {
     // FAIL-CLOSED: a lição do incidente é que gasto sem controle é pior do que trabalho parado.
@@ -458,12 +476,14 @@ export async function preflight(db: Queryable, input: PreflightInput): Promise<G
 
 export type AdvisorGateDecision =
   | { allow: true; mode: "legacy" | "policy"; capUsd?: number; spentUsd?: number; baseUsd?: number; pct?: number; policyVersion?: number; policyAuthor?: string; policyUpdatedAt?: string }
-  | { allow: false; mode: "policy"; code: "advisor_denied_no_base" | "advisor_cap_reached"; message: string; capUsd?: number; spentUsd?: number; baseUsd?: number };
+  | { allow: false; mode: "policy"; code: "advisor_denied_no_base" | "advisor_cap_reached" | "advisor_denied_policy_error"; message: string; capUsd?: number; spentUsd?: number; baseUsd?: number };
 
 /** Gasto do Advisor do projeto-dono: SOMA DO LEDGER (sobrevive a reinício de qualquer processo). */
 export async function advisorSpentUsd(db: Queryable, ownerId: string): Promise<number> {
+  // AN/M2: conta o papel que de fato SERVIU. Escalada negada grava `llm_role=advisor, effective_role=orchestrator` (o custo é do
+  // Orchestrator) e não pode consumir o teto do Advisor. Linhas antigas sem `effective_role` caem no `llm_role`.
   const r = await db.query(
-    "SELECT COALESCE(SUM(cost_usd), 0) AS s FROM llm_call_ledger WHERE budget_project_id = $1 AND llm_role = 'advisor'",
+    "SELECT COALESCE(SUM(cost_usd), 0) AS s FROM llm_call_ledger WHERE budget_project_id = $1 AND COALESCE(effective_role, llm_role) = 'advisor'",
     [ownerId],
   );
   return num(r.rows[0]?.s);
@@ -478,12 +498,15 @@ export async function advisorSpentUsd(db: Queryable, ownerId: string): Promise<n
  *   · SEM política `advisor_pct` (e com orçamento) ⇒ `mode:"legacy"` (o chamador usa o teto em memória/env, fallback explícito e documentado).
  * Negar aqui NUNCA falha a task: o chamador segue no Orchestrator do slot. `BUDGET_MISSING` para o resto das chamadas
  * continua no `preflight` (inalterado). Erro de leitura ⇒ nega o Advisor (fail-closed), nunca libera.
+ *   · AN/A1: "sem linha" (⇒ legacy) é diferente de "erro ao ler `cost_policies`" (⇒ `advisor_denied_policy_error` + evento);
+ *   · AN/M1: o gasto do Advisor vem de `llm_role` no ledger, que só é gravado com `LLM_ROLES_MODE != off` NESTA API. Com política e
+ *     modo `off` o teto nunca seria atingido (gasto sempre 0) ⇒ nega com evento (`advisor_denied_no_base`, `reason: roles_off`).
  */
 export async function advisorGate(
   db: Queryable, input: { projectId: string; projectedUsd?: number; inflightUsd?: number },
 ): Promise<AdvisorGateDecision> {
   let knownProject = false;
-  const deny = async (code: "advisor_denied_no_base" | "advisor_cap_reached", message: string, detail: Record<string, unknown>) => {
+  const deny = async (code: "advisor_denied_no_base" | "advisor_cap_reached" | "advisor_denied_policy_error", message: string, detail: Record<string, unknown>) => {
     // `project_id` do evento tem FK: projeto inexistente vai só no detalhe.
     await logEvent(db, code, knownProject ? input.projectId : null, { ...detail, requestedProjectId: input.projectId, message });
     return { allow: false as const, mode: "policy" as const, code, message,
@@ -495,7 +518,14 @@ export async function advisorGate(
     const owner = await resolveBudgetOwner(db, input.projectId);
     knownProject = !!owner;
     if (!owner) return await deny("advisor_denied_no_base", "Projeto não encontrado: sem base para o teto do Advisor.", { reason: "project_not_found" });
-    const p = await getEffectivePolicy(db, "advisor_pct", owner.tenantId);
+    let p: Awaited<ReturnType<typeof getEffectivePolicy>>;
+    try {
+      p = await getEffectivePolicy(db, "advisor_pct", owner.tenantId);
+    } catch (e) {
+      console.error(`[llmGuard] advisorGate: leitura de cost_policies falhou — NEGANDO o Advisor (fail-closed): ${msg(e)}`);
+      return await deny("advisor_denied_policy_error", "Não foi possível ler a política do Advisor: Advisor negado por segurança (a chamada segue no Orchestrator).",
+        { ownerId: owner.ownerId, reason: "policy_read_error", error: msg(e).slice(0, 300) });
+    }
     const detailBase = { ownerId: owner.ownerId, policyVersion: p?.version ?? null, policyAuthor: p?.author ?? null, policyUpdatedAt: p?.updatedAt ?? null, pct: p?.pct ?? null };
     if (owner.budgetUsd == null || !(owner.budgetUsd > 0)) {
       return await deny("advisor_denied_no_base", "Projeto sem orçamento total: sem base para o teto do Advisor (a chamada segue no Orchestrator).",
@@ -504,7 +534,11 @@ export async function advisorGate(
     // Sem política (mas com orçamento) o Guard não impõe teto de Advisor — comportamento anterior à C4': o chamador usa o
     // fallback em env (`ADVISOR_MAX_USD_PER_RUN`, em memória). Explícito: `mode:"legacy"`.
     if (!p) return { allow: true, mode: "legacy" };
-    const view = await advisorPolicyView(db, owner.tenantId, owner.budgetUsd);
+    if (llmRolesMode() === "off") {
+      return await deny("advisor_denied_no_base", "Há política do Advisor, mas o registro de papéis está desligado nesta API (LLM_ROLES_MODE=off): o gasto do Advisor não seria contabilizado ⇒ Advisor negado.",
+        { ...detailBase, reason: "roles_off", baseUsd: owner.budgetUsd });
+    }
+    const view = advisorViewFromPolicy(p, owner.budgetUsd);
     if (!view || !(view.pct >= 1 && view.pct <= 100)) {
       return await deny("advisor_denied_no_base", "Política do Advisor inválida (percentual fora de 1–100).", { ...detailBase, reason: "invalid_pct", baseUsd: owner.budgetUsd });
     }
@@ -551,18 +585,24 @@ export async function cardSpentUsd(db: Queryable, projectIds: string[]): Promise
  *   · gasto (ledger do card) + `estUsd` > teto ⇒ `ok:false` (o chamador nega com `CARD_BUDGET_CAP` e o card vira `blocked`, nunca `failed`);
  *   · erro de leitura ⇒ lança (o chamador é fail-closed: `preflight` → `GUARD_ERROR`; `checkProjectBudgetGate` → `GUARD_ERROR`).
  */
-export async function cardBudgetCheck(db: Queryable, projectId: string, estUsd = 0): Promise<CardBudgetCheck> {
+export async function cardBudgetCheck(db: Queryable, projectId: string, estUsd = 0, ownerHint?: BudgetOwner | null): Promise<CardBudgetCheck> {
   if (!UUID_RE.test(projectId)) return { applies: false };
+  // M7: dono já resolvido pelo chamador (preflight) não é relido; e a política é lida ANTES do vínculo com o card, de modo que o
+  // caminho sem política (hoje, todo o tráfego) não consulta `tickets` nem o ledger.
+  const owner = ownerHint ?? await resolveBudgetOwner(db, projectId);
+  if (!owner) return { applies: false };
+  // A1: sem linha ⇒ `null` ⇒ sem teto (comportamento anterior). Erro de leitura LANÇA ⇒ o chamador nega (`GUARD_ERROR`).
+  let p: Awaited<ReturnType<typeof getEffectivePolicy>> = null;
+  let policyError: unknown = null;
+  try { p = await getEffectivePolicy(db, "card_budget_pct", owner.tenantId); } catch (e) { policyError = e; }
+  if (!policyError && !p) return { applies: false };
   const t = (await db.query(
     `SELECT id, draft_project_id, child_project_id FROM tickets
       WHERE card_state IS NOT NULL AND (child_project_id = $1 OR draft_project_id = $1) LIMIT 1`, [projectId])).rows[0];
-  if (!t) return { applies: false };
-  const owner = await resolveBudgetOwner(db, projectId);
-  if (!owner) return { applies: false };
-  const p = await getEffectivePolicy(db, "card_budget_pct", owner.tenantId);
-  if (!p) return { applies: false };
+  if (!t) return { applies: false }; // não é card: uma falha ao ler a política não o afeta
+  if (policyError) throw policyError; // É card e não sei se há teto ⇒ fail-closed (o chamador nega: GUARD_ERROR)
   if (owner.budgetUsd == null || !(owner.budgetUsd > 0)) return { applies: false }; // BUDGET_MISSING é do preflight
-  const view = await cardBudgetPolicyView(db, owner.tenantId, owner.budgetUsd);
+  const view = cardViewFromPolicy(p, owner.budgetUsd);
   if (!view || !(view.pct >= 1 && view.pct <= 100)) {
     throw new Error("política card_budget_pct inválida (percentual fora de 1–100)");
   }
@@ -646,10 +686,13 @@ export async function recordCall(pool: Queryable, input: RecordInput): Promise<{
     // Disjuntor global avaliado também DEPOIS: a chamada que estoura o teto liga a chave na hora.
     const s = await getGuardSettings(pool);
     const g = await globalSpend(pool);
-    if (num(s.global_max_usd_per_hour) > 0 && g.hour >= num(s.global_max_usd_per_hour)) {
-      await tripKillSwitch(pool, "GLOBAL_HOURLY_CAP", { gastoUltimaHoraUsd: g.hour.toFixed(2), tetoUsd: s.global_max_usd_per_hour });
-    } else if (num(s.global_max_usd_per_day) > 0 && g.day >= num(s.global_max_usd_per_day)) {
-      await tripKillSwitch(pool, "GLOBAL_DAILY_CAP", { gasto24hUsd: g.day.toFixed(2), tetoUsd: s.global_max_usd_per_day });
+    // AN/M4: o MESMO teto do preflight (política `breaker_*` vence o setting) — sem isso, política acima do setting ligava o
+    // KILL_SWITCH nos 40/h do setting e política abaixo só disparava na chamada seguinte.
+    const { hourCap, dayCap } = await breakerCaps(pool, s);
+    if (hourCap > 0 && g.hour >= hourCap) {
+      await tripKillSwitch(pool, "GLOBAL_HOURLY_CAP", { gastoUltimaHoraUsd: g.hour.toFixed(2), tetoUsd: hourCap });
+    } else if (dayCap > 0 && g.day >= dayCap) {
+      await tripKillSwitch(pool, "GLOBAL_DAILY_CAP", { gasto24hUsd: g.day.toFixed(2), tetoUsd: dayCap });
     }
 
     if (owner && owner.budgetUsd != null) await evaluateBudget(pool, owner);
@@ -848,7 +891,7 @@ export async function budgetSummary(db: Queryable, projectId: string) {
   const spend = await getBudgetSpend(db, owner.ownerId);
   const forecast = await computeForecast(db, owner, spend);
   const budget = owner.budgetUsd;
-  const advisorPolicy = await advisorPolicyView(db, owner.tenantId, budget);
+  const advisorPolicy = await advisorPolicyView(db, owner.tenantId, budget).catch(() => null); // informativo (A1): o gate é quem aplica
   return {
     ...(advisorPolicy ? { advisorPolicy } : {}),
     projectId, ownerProjectId: owner.ownerId, inherited: owner.ownerId !== projectId,
@@ -926,7 +969,10 @@ export async function checkProjectBudgetGate(db: Queryable, projectId: string): 
     if (remaining < minNextActivityUsd(spend)) {
       return { ok: false, code: "BUDGET_INSUFFICIENT", message: `Saldo de US$ ${remaining.toFixed(2)} não comporta a próxima atividade. Aumente o orçamento.` };
     }
-    const cardCap = await cardBudgetCheck(db, projectId); // F5 (5.1): gasto do card já no teto ⇒ nega (fail-closed no catch)
+    // F5 (5.1): gasto do card já no teto ⇒ nega (fail-closed no catch). AN/A4: com a estimativa da PRÓXIMA chamada (mediana das chamadas
+    // do dono, mesma ordem de grandeza do `est` que o preflight usa), não com 0 — senão o preflight nega (gasto + est > teto) e o gate
+    // libera (gasto ≤ teto), e o card volta a `in_factory`/retomável só para ser negado na primeira chamada (laço de retomadas).
+    const cardCap = await cardBudgetCheck(db, projectId, spend.medianCallUsd, owner);
     if (cardCap.applies && !cardCap.ok) return { ok: false, code: "CARD_BUDGET_CAP", message: cardCap.message };
     return { ok: true };
   } catch (e) {

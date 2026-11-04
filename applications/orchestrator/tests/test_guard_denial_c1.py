@@ -377,6 +377,16 @@ class TestClassificador:
                 assert is_guard_denial(e), (make.__name__, code)
                 assert guard_denial_code(e) == code, (make.__name__, code)
 
+    def test_card_budget_cap_e_negativa_de_orcamento(self):
+        """AN/A2: o teto do card (`CARD_BUDGET_CAP`) é negativa de ORÇAMENTO — não se resolve com o tempo, então
+        o runner NÃO pode reverificar 10x (~40 min); vale nos dois formatos."""
+        from orchestrator.guard_denial import is_guard_denial, guard_denial_code, is_budget_denial
+        for make in (denial_inproc, denial_http):
+            e = make("CARD_BUDGET_CAP")
+            assert is_guard_denial(e), make.__name__
+            assert guard_denial_code(e) == "CARD_BUDGET_CAP", make.__name__
+            assert is_budget_denial(e), make.__name__
+
     def test_nao_confunde_outros_erros(self):
         from orchestrator.guard_denial import is_guard_denial
         assert not is_guard_denial(RuntimeError("boom"))
