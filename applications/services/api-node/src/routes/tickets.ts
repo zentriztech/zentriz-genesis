@@ -388,7 +388,17 @@ export async function ticketRoutes(app: FastifyInstance) {
         message: `${ticketCode(ticket.number)} já foi promovido — recuse (status 'rejected') em vez de apagar o histórico.`,
       });
     }
-    await pool.query("DELETE FROM tickets WHERE id = $1", [ticket.id]);
+    // M-07: CAS no BANCO (não na memória): em corrida com o claim do /evolve (que promove com `WHERE status='open'`),
+    // só um dos dois vence — nunca se apaga um ticket recém-promovido (o filho ficaria citando um ticket inexistente).
+    const del = await pool.query("DELETE FROM tickets WHERE id = $1 AND status = 'open'", [ticket.id]);
+    if ((del.rowCount ?? 0) === 0) {
+      const now = await loadTicket(pool, ticket.id);
+      if (!now) return reply.status(404).send({ code: "NOT_FOUND", message: "Pedido não encontrado" });
+      return reply.status(409).send({
+        code: "TICKET_PROMOTED",
+        message: `${ticketCode(now.number)} já foi promovido — recuse (status 'rejected') em vez de apagar o histórico.`,
+      });
+    }
     return reply.status(204).send();
   });
 

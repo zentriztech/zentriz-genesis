@@ -5,7 +5,8 @@
  * Só roda com PG_TEST_URL (localhost:55432|55440|55441). Sem ele: skip.
  */
 import { it, expect, beforeAll, afterAll, vi } from "vitest";
-import { rmSync, mkdirSync } from "fs";
+import { rmSync, mkdirSync, mkdtempSync } from "fs";
+import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
 
@@ -40,6 +41,7 @@ vi.mock("../middleware/auth.js", () => ({
 import { hashId } from "./anomalyDetectors.js";
 import { ensureEvolutionUniqueness, UNIQUENESS_INDEXES } from "./evolutionUniqueness.js";
 import { NS_EVOLVE } from "./evolveClaim.js";
+import { RECONCILER_LOCK_NS, reconcilerDiskProblems } from "./evolveReconciler.js";
 import {
   runReconcilerPass, cleanExpiredClaim, reconcilerMode, resolveReconcilerParams, startReconcilerWorker, stopReconcilerWorker,
 } from "./evolveReconciler.js";
@@ -54,7 +56,9 @@ describePg("Fase 1' / 1.8 — reconciliador do /evolve (banco descartável)", ()
   const seeds: Seed[] = [];
   // O env é montado NA HORA: seedAcceptedProduct troca process.env.UPLOAD_DIR a cada semente (o diretório em disco do filho
   // precisa ser o que o job enxerga).
-  const envOf = (m: string) => ({ ...process.env, EVOLVE_RECONCILER: m }) as NodeJS.ProcessEnv;
+  // M-15: `on` exige PROJECT_FILES_ROOT e UPLOAD_DIR existentes — o seed zera o primeiro, então o job recebe um tmp de verdade.
+  const filesTmp = mkdtempSync(join(tmpdir(), "genesis-recon-files-"));
+  const envOf = (m: string) => ({ ...process.env, EVOLVE_RECONCILER: m, PROJECT_FILES_ROOT: filesTmp }) as NodeJS.ProcessEnv;
   const run = (m: "on" | "shadow") => runReconcilerPass(pool, envOf(m));
 
   beforeAll(async () => {
@@ -336,12 +340,12 @@ describePg("Fase 1' / 1.8 — reconciliador do /evolve (banco descartável)", ()
     const d = await mkClaim();
     const holder = await pool.connect();
     try {
-      await holder.query("SELECT pg_advisory_lock($1::int, 0)", [NS_EVOLVE]);
+      await holder.query("SELECT pg_advisory_lock($1::int, 0)", [RECONCILER_LOCK_NS]);
       const r = await run("on");
       expect(r.skipped).toBe("locked");
       expect((await childRow(d.childId)).status).toBe("materializing");
     } finally {
-      await holder.query("SELECT pg_advisory_unlock($1::int, 0)", [NS_EVOLVE]);
+      await holder.query("SELECT pg_advisory_unlock($1::int, 0)", [RECONCILER_LOCK_NS]);
       holder.release();
     }
     // 6 chamadas diretas de limpeza em paralelo (sem o lock do job): o WHERE garante exatamente uma
@@ -380,5 +384,52 @@ describePg("Fase 1' / 1.8 — reconciliador do /evolve (banco descartável)", ()
     const byKind = JSON.parse((await app.inject({ method: "GET", url: `${url}?kind=uniqueness_index_missing&open=false`, headers: { authorization: "Bearer x", "x-test-role": "zentriz_admin" } })).body);
     expect(byKind.findings.every((f: { kind: string }) => f.kind === "uniqueness_index_missing")).toBe(true);
     ev("endpoint", { codes: [noAuth.statusCode, tenant.statusCode, svc.statusCode, ok.statusCode], achadosDoProjeto: body.findings.length });
+  });
+
+  it("M-22: o lock de sessão do job usa outro namespace (7342): uma linhagem com hashtext(raiz)=0 no namespace do claim (7341) NÃO bloqueia o job", async () => {
+    expect(RECONCILER_LOCK_NS).not.toBe(NS_EVOLVE);
+    const holder = await pool.connect();
+    try {
+      await holder.query("SELECT pg_advisory_lock($1::int, 0)", [NS_EVOLVE]); // o que um claim de raiz com hash 0 seguraria
+      const r = await run("shadow");
+      expect(r.skipped).not.toBe("locked");
+    } finally {
+      await holder.query("SELECT pg_advisory_unlock($1::int, 0)", [NS_EVOLVE]);
+      holder.release();
+    }
+  });
+
+  it("M-15: `on` sem PROJECT_FILES_ROOT/UPLOAD_DIR existentes ⇒ rebaixa para shadow (não limpa), registra o achado e ele some quando o ambiente é corrigido", async () => {
+    const c = await mkClaim();
+    const bad = { ...process.env, EVOLVE_RECONCILER: "on", PROJECT_FILES_ROOT: "" } as NodeJS.ProcessEnv;
+    expect(reconcilerDiskProblems(bad)).toContain("PROJECT_FILES_ROOT");
+    const r1 = await runReconcilerPass(pool, bad);
+    expect(r1.mode).toBe("shadow");
+    expect(r1.cleaned).toBe(0);
+    expect((await childRow(c.childId)).status).toBe("materializing"); // nada foi limpo
+    const f = await pool.query("SELECT severity, detail, resolved_at FROM evolve_reconciler_findings WHERE kind = 'reconciler_disk_unverifiable'");
+    expect(f.rows).toHaveLength(1);
+    expect(f.rows[0].severity).toBe("critical");
+    expect(f.rows[0].detail).toMatchObject({ configured_mode: "on", effective_mode: "shadow" });
+    expect(f.rows[0].resolved_at).toBeNull();
+    const r2 = await run("on"); // ambiente corrigido: opera em `on` e o achado é resolvido
+    expect(r2.mode).toBe("on");
+    expect(r2.cleaned).toBeGreaterThanOrEqual(1);
+    const g = await pool.query("SELECT resolved_at FROM evolve_reconciler_findings WHERE kind = 'reconciler_disk_unverifiable'");
+    expect(g.rows[0].resolved_at).not.toBeNull();
+    ev("m15", { rebaixou: r1.mode, limpouDepois: r2.cleaned });
+  });
+
+  it("M-07: a limpeza do Q1 grava o evento promoted→open (reason claim_expired_no_effects) quando TICKET_TRANSITIONS=on", async () => {
+    vi.stubEnv("TICKET_TRANSITIONS", "on");
+    try {
+      const c = await mkClaim();
+      await run("on");
+      expect(await ticketRow(c.ticketId!)).toMatchObject({ status: "open", child_project_id: null });
+      const evs = (await pool.query("SELECT from_status, to_status, actor_kind, reason, child_project_id FROM ticket_events WHERE ticket_id = $1", [c.ticketId])).rows;
+      expect(evs).toEqual([{ from_status: "promoted", to_status: "open", actor_kind: "system", reason: "claim_expired_no_effects", child_project_id: c.childId }]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

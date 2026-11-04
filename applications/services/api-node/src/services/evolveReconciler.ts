@@ -18,10 +18,12 @@
  * Sem PII: o achado guarda só hash (sha256/16 hex) de id, códigos, contagens e idades.
  */
 import type { Pool, PoolClient } from "pg";
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
 import { join } from "path";
 import { hashId } from "./anomalyDetectors.js";
 import { NS_EVOLVE } from "./evolveClaim.js";
+import { recordTicketEvent, ticketTransitionsEnabled } from "./ticketTransitions.js";
+import { recomputeProductLifecycle } from "./productLifecycle.js";
 import { UNIQUENESS_INDEXES, getUniquenessCounters } from "./evolutionUniqueness.js";
 import { isSesConfigured, sendEmail } from "./emailSender.js";
 import { readRuntimeNumber } from "./runtimeTunables.js";
@@ -46,12 +48,16 @@ export function resolveReconcilerParams(env: NodeJS.ProcessEnv = process.env): R
   };
 }
 
-/** Chave do advisory lock de sessão do job (H §7: `pg_try_advisory_lock(7341, 0)`). */
+/**
+ * Lock de sessão do job. M-22: NAMESPACE PRÓPRIO (7342) — em `(7341, 0)` ele dividia o espaço de `(7341, hashtext(raiz))`
+ * e, se `hashtext(raiz)` desse 0 (1 em 2³²), o claim dessa linhagem receberia EVOLUTION_BUSY a cada passada.
+ */
+export const RECONCILER_LOCK_NS = 7342;
 export const RECONCILER_LOCK_KEY = 0;
 
 export type FindingKind =
   | "claim_expired_no_effects" | "claim_expired_with_effects" | "ticket_promoted_without_child"
-  | "child_ticket_mismatch" | "evolution_in_flight_stuck" | "uniqueness_index_missing";
+  | "child_ticket_mismatch" | "evolution_in_flight_stuck" | "uniqueness_index_missing" | "reconciler_disk_unverifiable";
 
 export interface Finding {
   kind: FindingKind;
@@ -78,7 +84,7 @@ const empty = (mode: ReconcilerMode, skipped?: ReconcilerResult["skipped"]): Rec
 
 const ALL_KINDS: FindingKind[] = [
   "claim_expired_no_effects", "claim_expired_with_effects", "ticket_promoted_without_child",
-  "child_ticket_mismatch", "evolution_in_flight_stuck", "uniqueness_index_missing",
+  "child_ticket_mismatch", "evolution_in_flight_stuck", "uniqueness_index_missing", "reconciler_disk_unverifiable",
 ];
 
 type Json = Record<string, unknown>;
@@ -105,6 +111,21 @@ async function loadExpiredClaims(db: Pool | PoolClient, p: ReconcilerParams): Pr
     id: String(x.id), root: String(x.root), version: Number(x.version), ageS: Number(x.age_s),
     steps: (x.steps as string[]) ?? [], specFiles: Number(x.spec_files),
   }));
+}
+
+/**
+ * M-15: a classificação "sem efeitos" lê o disco da PRÓPRIA api. Para limpar (`on`) o job exige `PROJECT_FILES_ROOT` e
+ * `UPLOAD_DIR` definidos e EXISTENTES — senão um volume vazio/diferente do usado pelo executor faria uma cópia parcial
+ * parecer "sem efeitos". Devolve os nomes das variáveis que falham.
+ */
+export function reconcilerDiskProblems(env: NodeJS.ProcessEnv = process.env): string[] {
+  const bad: string[] = [];
+  const isDir = (p: string) => { try { return statSync(p).isDirectory(); } catch { return false; } };
+  const files = (env.PROJECT_FILES_ROOT ?? "").trim();
+  const upload = (env.UPLOAD_DIR ?? "/shared/uploads").trim();
+  if (!files || !isDir(files)) bad.push("PROJECT_FILES_ROOT");
+  if (!upload || !isDir(upload)) bad.push("UPLOAD_DIR");
+  return bad;
 }
 
 /** Efeitos no DISCO do filho (o reconciliador roda na api, que monta os dois volumes). */
@@ -138,16 +159,25 @@ export async function cleanExpiredClaim(pool: Pool, c: { id: string; root: strin
         WHERE id = $1 AND status = 'materializing'
           AND (extra->'materialization'->>'lease_until')::timestamptz < now() - ($2::int * interval '1 second')
           AND COALESCE(extra->'materialization'->'steps', '{}'::jsonb) = '{}'::jsonb
-          AND NOT EXISTS (SELECT 1 FROM project_spec_files f WHERE f.project_id = projects.id)`,
+          AND NOT EXISTS (SELECT 1 FROM project_spec_files f WHERE f.project_id = projects.id)
+        RETURNING product_id`,
       [c.id, Math.floor(p.claimGraceS)],
     );
     if ((up.rowCount ?? 0) === 0) { await client.query("ROLLBACK"); return false; }
-    await client.query(
+    const reopened = await client.query(
       `UPDATE tickets SET status = 'open', child_project_id = NULL, promoted_at = NULL, updated_at = now()
-        WHERE child_project_id = $1 AND status = 'promoted'`,
+        WHERE child_project_id = $1 AND status = 'promoted' RETURNING id, tenant_id`,
       [c.id],
     );
+    // M-07: com TICKET_TRANSITIONS=on a reabertura promoted → open deixa evento (ator `system`), como o failTerminal.
+    for (const t of reopened.rows) {
+      if (await ticketTransitionsEnabled(client, { tenantId: t.tenant_id ? String(t.tenant_id) : null })) {
+        await recordTicketEvent(client, { ticketId: String(t.id), from: "promoted", to: "open", actorKind: "system", reason: "claim_expired_no_effects", childProjectId: c.id });
+      }
+    }
     await client.query("COMMIT");
+    // M-06: o filho `failed` (tentativa) muda o agregado do produto — recompute best-effort depois do commit.
+    await recomputeProductLifecycle(pool, (up.rows[0]?.product_id as string | null) ?? null);
     return true;
   } catch (e) {
     try { await client.query("ROLLBACK"); } catch { /* conexão caiu */ }
@@ -307,14 +337,17 @@ function logFinding(f: Finding, mode: string): void {
  * dedicado; quem não obtém o lock devolve `skipped: "locked"`). Nunca lança.
  */
 export async function runReconcilerPass(pool: Pool, env: NodeJS.ProcessEnv = process.env): Promise<ReconcilerResult> {
-  const mode = reconcilerMode(env);
-  if (mode === "off") return empty(mode, "off");
+  const configured = reconcilerMode(env);
+  if (configured === "off") return empty(configured, "off");
+  // M-15: `on` sem os dois volumes verificáveis rebaixa para `shadow` (detecta, NÃO limpa) e registra o achado.
+  const diskBad = reconcilerDiskProblems(env);
+  const mode: ReconcilerMode = configured === "on" && diskBad.length > 0 ? "shadow" : configured;
   const p = resolveReconcilerParams(env);
   const lockClient = await pool.connect().catch(() => null);
   if (!lockClient) return empty(mode, "error");
   let locked = false;
   try {
-    const got = await lockClient.query("SELECT pg_try_advisory_lock($1::int, $2::int) AS ok", [NS_EVOLVE, RECONCILER_LOCK_KEY]);
+    const got = await lockClient.query("SELECT pg_try_advisory_lock($1::int, $2::int) AS ok", [RECONCILER_LOCK_NS, RECONCILER_LOCK_KEY]);
     locked = got.rows[0]?.ok === true;
     if (!locked) return empty(mode, "locked");
 
@@ -346,6 +379,13 @@ export async function runReconcilerPass(pool: Pool, env: NodeJS.ProcessEnv = pro
         } // rowCount 0: retomado ou já limpo por outro — não é achado
       }
     });
+    // M-15: o rebaixamento (ou volumes ausentes em shadow) vira achado visível; some sozinho quando o ambiente é corrigido.
+    await run(["reconciler_disk_unverifiable"], async () => {
+      if (diskBad.length === 0) return;
+      findings.push({ kind: "reconciler_disk_unverifiable", entityHash: hashId("reconciler_disk"), projectHash: null, ticketHash: null,
+        severity: "critical", detail: { missing_or_invalid: diskBad, configured_mode: configured, effective_mode: mode,
+          hint: "defina e monte PROJECT_FILES_ROOT e UPLOAD_DIR (os mesmos volumes do executor) antes de usar EVOLVE_RECONCILER=on" } });
+    });
     // Q2/Q3/Q4/Q5
     await run(["ticket_promoted_without_child"], async () => { findings.push(...await detectTicketsWithoutChild(pool, p)); });
     await run(["child_ticket_mismatch"], async () => { findings.push(...await detectChildTicketMismatch(pool, p)); });
@@ -372,7 +412,7 @@ export async function runReconcilerPass(pool: Pool, env: NodeJS.ProcessEnv = pro
     console.error("[reconciler] passada falhou (ignorado, nada depende dela):", e instanceof Error ? e.message : String(e));
     return empty(mode, "error");
   } finally {
-    if (locked) await lockClient.query("SELECT pg_advisory_unlock($1::int, $2::int)", [NS_EVOLVE, RECONCILER_LOCK_KEY]).catch(() => undefined);
+    if (locked) await lockClient.query("SELECT pg_advisory_unlock($1::int, $2::int)", [RECONCILER_LOCK_NS, RECONCILER_LOCK_KEY]).catch(() => undefined);
     lockClient.release();
   }
 }

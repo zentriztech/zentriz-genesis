@@ -28,7 +28,7 @@ import { notifyTelegramTenant } from "./telegram.js";
 import { dispatchProjectRun } from "../services/runnerDispatch.js";
 import { maybeNotifyBlock, maybeNotifyDone, scheduleFactoryDone } from "../services/opsNotify.js";
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
-import { ticketTransitionsEnabled } from "../services/ticketTransitions.js";
+import { ticketTransitionsEnabled, recordTicketEvent } from "../services/ticketTransitions.js";
 import { evolutionPromoteEnabled } from "../services/evolutionPromote.js";
 import { resolveInboxProductId } from "../services/inbox.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
@@ -3428,8 +3428,10 @@ export async function projectRoutes(app: FastifyInstance) {
     const workMode: "copy" | "branch" = request.body?.workMode === "branch" ? "branch" : "copy";
 
     // Fase 1' (tarefas 1.1–1.3): com EVOLVE_CLAIM=on o /evolve roda em duas etapas (claim transacional com
-    // advisory lock por linhagem + passos idempotentes) — services/evolveClaim.ts. Com `off` (padrão) NADA
-    // abaixo muda: o handler histórico segue byte a byte.
+    // advisory lock por linhagem + passos idempotentes) — services/evolveClaim.ts. Com `off` (padrão) o handler
+    // histórico segue o mesmo, COM UMA EXCEÇÃO DECIDIDA (M-02-b, relatório N): os índices parciais de unicidade são criados
+    // no boot independentemente da flag (protegem dados), então a CORRIDA do /evolve legado deixa de duplicar versão e passa
+    // a responder 409 EVOLUTION_IN_FLIGHT. Fora de corrida o corpo e o `extra` continuam idênticos.
     if (await evolveClaimEnabled(pool, { parentProjectId: parentId, userTenantId: user.tenantId ?? null })) {
       const rawKey = request.headers["idempotency-key"];
       const idemKey = (Array.isArray(rawKey) ? rawKey[0] : rawKey)?.trim() || null;
@@ -3716,13 +3718,30 @@ export async function projectRoutes(app: FastifyInstance) {
           projectTitle: String(parentRow.title ?? ""),
           versionLabel: `v${nextVersion}`,
         });
-        await client.query(
-          `UPDATE tickets SET status = 'promoted', child_project_id = $2, promoted_at = now(), updated_at = now() WHERE id = $1`,
-          [ticket.id, childId],
-        );
+        // M-07: com TICKET_TRANSITIONS=on a promoção do caminho legado também é CAS (`WHERE status='open'`, fecha o
+        // `rejected→promoted`) e grava o evento open→promoted. Com `off` o UPDATE segue exatamente o histórico.
+        let promotionConflict = false;
+        if (await ticketTransitionsEnabled(pool, { tenantId: ticket.tenant_id, userTenantId: user.tenantId ?? null })) {
+          const up = await client.query(
+            `UPDATE tickets SET status = 'promoted', child_project_id = $2, promoted_at = now(), updated_at = now()
+              WHERE id = $1 AND status = 'open' RETURNING id`,
+            [ticket.id, childId],
+          );
+          if ((up.rowCount ?? 0) > 0) {
+            await recordTicketEvent(client, { ticketId: ticket.id, from: "open", to: "promoted", actorKind: "system", actorId: user.id, reason: "evolve_legacy", childProjectId: childId });
+          } else {
+            promotionConflict = true;
+            request.log.warn({ childId, ticketId: ticket.id }, "[evolve] ticket deixou de estar 'open' durante a evolução (CAS) — não promovido");
+          }
+        } else {
+          await client.query(
+            `UPDATE tickets SET status = 'promoted', child_project_id = $2, promoted_at = now(), updated_at = now() WHERE id = $1`,
+            [ticket.id, childId],
+          );
+        }
         await client.query(
           `UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1`,
-          [childId, JSON.stringify({ ticket_files: mat.files, ticket_materialize_error: mat.ok ? null : (mat.error ?? "falhou") })],
+          [childId, JSON.stringify({ ticket_files: mat.files, ticket_materialize_error: mat.ok ? null : (mat.error ?? "falhou"), ...(promotionConflict ? { ticket_promotion_conflict: true } : {}) })],
         );
         if (!mat.ok) request.log.warn({ childId, ticketId: ticket.id, err: mat.error }, "[evolve] materialização do ticket falhou");
       }

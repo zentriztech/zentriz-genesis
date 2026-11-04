@@ -27,6 +27,9 @@ export type ProductLifecycle =
 const IN_PROGRESS = new Set<string>([
   "draft", "spec_submitted", "pending_conversion", "spec_validation_failed",
   "running", "queued", "dev_qa", "devops", "completed", "stopped", "pending_cyborg",
+  // M-06: filho de /evolve com EVOLVE_CLAIM=on reservado e ainda sendo materializado — conta como em andamento
+  // (com `accepted` + `materializing` o produto é `partially_accepted`, não `running` por acaso do fallback).
+  "materializing",
   // Migração 097: promovido à fábrica e aguardando início — não terminou, então conta como
   // "em andamento" quando CONVIVE com projetos já rodando (o caso "só promovido" é tratado antes).
   "promoted",
@@ -89,8 +92,16 @@ export async function recomputeProductLifecycle(
       [productId],
     );
     if (!prod.rows[0] || (prod.rows[0] as { is_inbox: boolean }).is_inbox === true) return null;
+    // M-06: tentativas de EVOLUÇÃO superadas não entram no agregado. Uma `failed`/`archived` que tem irmão vivo ou aceito no
+    // mesmo (pai, versão) é só histórico de uma tentativa (o número é reaproveitado de propósito: H D-B2) — se contasse, o
+    // produto ficaria `failed` para sempre mesmo com a versão em produção sã e o retry bem-sucedido.
     const res = await db.query(
-      "SELECT status FROM projects WHERE product_id = $1",
+      `SELECT p.status FROM projects p
+        WHERE p.product_id = $1
+          AND NOT ( p.status IN ('failed', 'archived') AND p.parent_project_id IS NOT NULL AND (p.extra->>'evolution') = 'true'
+                    AND EXISTS (SELECT 1 FROM projects s
+                                 WHERE s.parent_project_id = p.parent_project_id AND s.version_number = p.version_number
+                                   AND s.id <> p.id AND s.status NOT IN ('failed', 'archived')) )`,
       [productId],
     );
     const statuses = res.rows.map((r) => String((r as { status: unknown }).status));

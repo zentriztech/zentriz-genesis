@@ -60,6 +60,7 @@ function handler(opts: { product?: Record<string, unknown> | null; ticket?: Reco
     if (sql.startsWith("SELECT * FROM tickets WHERE id")) return { rows: ticket ? [ticket] : [] };
     if (sql.includes("FROM tickets WHERE product_id")) return { rows: ticket ? [ticket] : [] };
     if (sql.includes("INSERT INTO tickets")) return { rows: [ticketRow()] };
+    if (sql.startsWith("DELETE FROM tickets")) return { rows: [], rowCount: 1 };
     if (sql.includes("UPDATE tickets SET")) return { rows: [ticketRow({ status: "rejected" })], rowCount: 1 };
     if (sql.includes("FROM projects WHERE id = ANY")) return { rows: opts.child ? [opts.child] : [] };
     if (sql.includes("FROM ticket_attachments")) return { rows: [], rowCount: 0 };
@@ -287,6 +288,23 @@ describe("DELETE /api/tickets/:id — histórico não se apaga", () => {
     queryHandler = handler();
     const res = await app.inject({ method: "DELETE", url: `/api/tickets/${TICKET_ID}` });
     expect(res.statusCode).toBe(204);
+  });
+
+  it("M-07: o DELETE é CAS no banco (WHERE status='open'); se perdeu a corrida para o claim ⇒ 409 TICKET_PROMOTED, não apaga", async () => {
+    const base = handler();
+    let loads = 0;
+    queryHandler = (sql: string) => {
+      if (sql.startsWith("DELETE FROM tickets")) return { rows: [], rowCount: 0 }; // o claim promoveu entre o load e o delete
+      if (sql.startsWith("SELECT * FROM tickets WHERE id")) {
+        loads++;
+        return { rows: [ticketRow(loads === 1 ? {} : { status: "promoted", child_project_id: CHILD_ID })] }; // 1ª leitura: open; releitura: promoted
+      }
+      return base(sql);
+    };
+    const res = await app.inject({ method: "DELETE", url: `/api/tickets/${TICKET_ID}` });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe("TICKET_PROMOTED");
+    expect(captured.some((c) => c.sql.includes("DELETE FROM tickets WHERE id = $1 AND status = 'open'"))).toBe(true);
   });
 
   it("pedido promovido não se apaga — recusa-se", async () => {
