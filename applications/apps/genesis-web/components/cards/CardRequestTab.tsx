@@ -61,12 +61,12 @@ export function CardRequestTab({ card, onChanged }: { card: CardDetail; onChange
   return (
     <Stack spacing={2}>
       <Alert severity="info" icon={false} role="note" data-testid="kind-rite">{KIND_RITE[card.kind]}</Alert>
-      <TextField select size="small" label="Tipo" value={kind} onChange={(e) => setKind(e.target.value as CardKind)} disabled={!editable} sx={{ maxWidth: 260 }}
+      <TextField select size="small" label="Tipo" value={kind} onChange={(e) => setKind(e.target.value as CardKind)} SelectProps={{ readOnly: !editable }} sx={{ maxWidth: 260 }}
         helperText={kind !== card.kind ? KIND_RITE[kind] : undefined}>
         {CARD_KINDS.map((k) => <MenuItem key={k} value={k}>{KIND_LABEL[k]}</MenuItem>)}
       </TextField>
-      <TextField size="small" label="Título" value={title} onChange={(e) => setTitle(e.target.value)} disabled={!editable} fullWidth />
-      <TextField label="Pedido" value={body} onChange={(e) => setBody(e.target.value)} multiline minRows={6} disabled={!editable} fullWidth
+      <TextField size="small" label="Título" value={title} onChange={(e) => setTitle(e.target.value)} InputProps={{ readOnly: !editable }} fullWidth />
+      <TextField label="Pedido" value={body} onChange={(e) => setBody(e.target.value)} multiline minRows={6} InputProps={{ readOnly: !editable }} fullWidth
         helperText={editable ? undefined : "O texto do pedido só pode ser editado em rascunho ou refinamento."} />
       {editable && (
         <Box><Button variant="contained" size="small" disabled={busy || !dirty} onClick={() => void save()}>{busy ? "Salvando…" : "Salvar pedido"}</Button></Box>

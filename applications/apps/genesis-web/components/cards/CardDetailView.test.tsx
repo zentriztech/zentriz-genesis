@@ -204,7 +204,9 @@ describe("CardDetailView — promover, base vencida e revalidação", () => {
     expect(warn).toHaveTextContent("o produto avançou para a v2 (o card foi escrito sobre a v1)");
     expect(screen.getByRole("button", { name: "Promover à fábrica" })).toBeDisabled();
     expect(screen.getByRole("list", { name: "Pré-requisitos da promoção" })).toHaveTextContent("Pendente: base atual");
-    await user.click(within(warn).getByRole("button", { name: "Revalidar agora" }));
+    expect(within(warn).queryByRole("button")).not.toBeInTheDocument();      // a ação sugerida do servidor já é “revalidar”
+    expect(screen.getByTestId("journey-action")).toHaveTextContent("Revalidar contra a versão corrente");
+    await user.click(screen.getByRole("button", { name: "Revalidar contra a versão corrente" }));
     await waitFor(() => expect(post).toHaveBeenCalledWith(`/api/cards/${ID}/revalidate`, {}));
     const res = await screen.findByTestId("revalidate-stale");
     expect(res).toHaveTextContent("Base atualizada: valide o card de novo");

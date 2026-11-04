@@ -21,6 +21,7 @@ import { CardRequestTab } from "./CardRequestTab";
 import { CardSpecTab } from "./CardSpecTab";
 import { KindChip, StateChip } from "./KindChip";
 import { PromotePanel } from "./PromotePanel";
+import { CardsA11yTheme } from "./CardsA11yTheme";
 import { CardStatusPanel } from "./CardStatusPanel";
 import { useCardRunner } from "./useCardRunner";
 
@@ -29,7 +30,7 @@ export type CardTab = (typeof CARD_TABS)[number];
 const TAB_LABEL: Record<CardTab, string> = { request: "Pedido", spec: "Especificação do card", versions: "Versões", state: "Estado e linha do tempo" };
 
 /** Tela do card (3.3/3.4/3.5): situação (jornada do servidor), ações, promoção e as abas Pedido, Especificação do card, Versões e Estado. */
-export function CardDetailView({ cardId, initialTab = "request" }: { cardId: string; initialTab?: CardTab }) {
+function CardDetailViewInner({ cardId, initialTab = "request" }: { cardId: string; initialTab?: CardTab }) {
   const router = useRouter();
   const [card, setCard] = useState<CardDetail | null>(null);
   const [journey, setJourney] = useState<CardJourney | null>(null);
@@ -80,4 +81,8 @@ export function CardDetailView({ cardId, initialTab = "request" }: { cardId: str
       </Box>
     </Box>
   );
+}
+
+export function CardDetailView(props: { cardId: string; initialTab?: CardTab }) {
+  return <CardsA11yTheme><CardDetailViewInner {...props} /></CardsA11yTheme>;
 }

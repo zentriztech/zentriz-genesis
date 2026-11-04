@@ -66,10 +66,11 @@ export function PromotePanel({ card, journey, runner }: { card: CardDetail; jour
     <Alert severity="warning" role="alert" sx={{ mb: 1.5 }} action={revalidateBtn}>{staleError.message}</Alert>
   );
   if (!ready && !card.actions.promote) {
+    const editing = card.state === "draft" || card.state === "refining";
     return (
       <Box component="section" aria-label="Promoção">
         {banners}
-        <Typography variant="body2" color="text.secondary">Para promover, valide a especificação do card (botão “Validar”). A promoção só fica disponível com o card em “Pronto”.</Typography>
+        {editing && <Typography variant="body2" color="text.secondary">Para promover, valide a especificação do card (botão “Validar”). A promoção só fica disponível com o card em “Pronto”.</Typography>}
       </Box>
     );
   }

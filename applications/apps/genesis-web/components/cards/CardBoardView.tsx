@@ -16,9 +16,10 @@ import { useCardsCapabilities } from "@/lib/cards/useCardsEnabled";
 import { CARD_KINDS, CARD_STATES, KIND_LABEL, STATE_LABEL, type CardKind, type CardState, type CardSummary } from "@/lib/cards/types";
 import { CardTile } from "./CardTile";
 import { CardCreateDialog } from "./CardCreateDialog";
+import { CardsA11yTheme } from "./CardsA11yTheme";
 
 /** Quadro de cards de um produto (3.1): uma coluna por estado, filtros por tipo e por estado. */
-export function CardBoardView({ productId }: { productId: string }) {
+function CardBoardViewInner({ productId }: { productId: string }) {
   const router = useRouter();
   const { loading: capsLoading, caps } = useCardsCapabilities(productId);
   const [cards, setCards] = useState<CardSummary[] | null>(null);
@@ -106,4 +107,8 @@ export function CardBoardView({ productId }: { productId: string }) {
         onCreated={(card) => { setCreateOpen(false); router.push(`/cards/${card.id}`); }} />
     </Box>
   );
+}
+
+export function CardBoardView(props: { productId: string }) {
+  return <CardsA11yTheme><CardBoardViewInner {...props} /></CardsA11yTheme>;
 }

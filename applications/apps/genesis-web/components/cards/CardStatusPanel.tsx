@@ -30,13 +30,13 @@ function SuggestedAction({ action, runner, onTab }: { action: JourneyAction; run
   const key = RUNNABLE[action.key];
   const href = action.key === "increase_budget" ? budgetProjectHref(action) : null;
   if (key) {
-    return <Button size="small" variant="contained" color="inherit" disabled={!action.enabled || !!runner.busy} onClick={() => void runner.run(key)} sx={{ minHeight: 32 }}>{action.label}</Button>;
+    return <Button size="small" variant="outlined" color="inherit" disabled={!action.enabled || !!runner.busy} onClick={() => void runner.run(key)} sx={{ minHeight: 32 }}>{action.label}</Button>;
   }
   if (GO_SPEC.has(action.key)) {
-    return <Button size="small" variant="contained" color="inherit" disabled={!action.enabled} onClick={() => onTab("spec")} sx={{ minHeight: 32 }}>{action.label}</Button>;
+    return <Button size="small" variant="outlined" color="inherit" disabled={!action.enabled} onClick={() => onTab("spec")} sx={{ minHeight: 32 }}>{action.label}</Button>;
   }
   if (href) {
-    return <Button size="small" variant="contained" color="inherit" component={NextLink} href={href} disabled={!action.enabled} sx={{ minHeight: 32 }}>{action.label}<VisuallyHidden> (abre a página do projeto dono do orçamento)</VisuallyHidden></Button>;
+    return <Button size="small" variant="outlined" color="inherit" component={NextLink} href={href} disabled={!action.enabled} sx={{ minHeight: 32 }}>{action.label}<VisuallyHidden> (abre a página do projeto dono do orçamento)</VisuallyHidden></Button>;
   }
   return <Typography variant="body2">{action.label}</Typography>;
 }
@@ -77,8 +77,7 @@ export function CardStatusPanel({ card, journey, journeyError, runner, onTab, on
   const prUrl = exec?.prUrl ?? card.prUrl;
   return (
     <Box component="section" aria-label="Situação do card" data-testid="card-status" sx={{ mb: 1 }}>
-      <Alert severity={journey.severity} role="status" icon={undefined} action={journey.action ? <SuggestedAction action={journey.action} runner={runner} onTab={onTab} /> : undefined}
-        sx={{ alignItems: "flex-start" }}>
+      <Alert severity={journey.severity} role="status" sx={{ alignItems: "flex-start", "& .MuiAlert-message": { minWidth: 0, overflowWrap: "anywhere" } }}>
         <AlertTitle data-testid="journey-headline">{journey.headline}</AlertTitle>
         {journey.detail && <Typography variant="body2" data-testid="journey-detail">{journey.detail}</Typography>}
         {journey.blocked && (
@@ -93,12 +92,13 @@ export function CardStatusPanel({ card, journey, journeyError, runner, onTab, on
               {journey.blockers.map((b, i) => (
                 <li key={`${b.code}-${i}`}>
                   <Typography variant="body2" component="span">{b.userMessage ?? b.message}</Typography>
-                  {b.userMessage && b.message && b.message !== b.userMessage && <Typography variant="caption" component="span" color="text.secondary"> {b.message}</Typography>}
+                  {b.userMessage && b.message && b.message !== b.userMessage && <Typography variant="caption" component="span" sx={{ color: "inherit" }}> {b.message}</Typography>}
                 </li>
               ))}
             </Box>
           </Box>
         )}
+        {journey.action && <Box sx={{ mt: 1 }} data-testid="journey-action"><SuggestedAction action={journey.action} runner={runner} onTab={onTab} /></Box>}
         {journey.action && !journey.action.enabled && <Typography variant="caption" component="p" sx={{ mt: 0.5 }}>Próxima ação sugerida (indisponível agora): {journey.action.label}</Typography>}
       </Alert>
       {(exec || prUrl) && (
@@ -109,7 +109,7 @@ export function CardStatusPanel({ card, journey, journeyError, runner, onTab, on
       )}
       {journey.base?.stale && (
         <Alert severity="warning" sx={{ mt: 1 }} data-testid="base-stale"
-          action={card.actions.revalidate ? <Button color="inherit" size="small" disabled={!!runner.busy} onClick={() => void runner.run("revalidate")} sx={{ minHeight: 32 }}>{runner.busy === "revalidate" ? "Revalidando…" : "Revalidar agora"}</Button> : undefined}>
+          action={card.actions.revalidate && journey.action?.key !== "revalidate" ? <Button color="inherit" size="small" disabled={!!runner.busy} onClick={() => void runner.run("revalidate")} sx={{ minHeight: 32 }}>{runner.busy === "revalidate" ? "Revalidando…" : "Revalidar agora"}</Button> : undefined}>
           A base do card está vencida: o produto avançou para a v{journey.base.currentHeadVersion ?? "?"} (o card foi escrito sobre a v{journey.base.headVersion ?? "?"}). Revalide antes de promover.
         </Alert>
       )}
