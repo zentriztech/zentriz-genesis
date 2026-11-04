@@ -14,6 +14,7 @@ import { startCloudDeployWorker, stopCloudDeployWorker } from "./services/cloudD
 import { startEvolutionMergeWorker, stopEvolutionMergeWorker } from "./services/evolutionMergeWorker.js";
 import { startSpecChatWorker, stopSpecChatWorker } from "./services/specChatWorker.js";
 import { startAnomalyWorker, stopAnomalyWorker } from "./services/llmAnomaly.js";
+import { startReconcilerWorker, stopReconcilerWorker } from "./services/evolveReconciler.js";
 
 const app = await buildApp();
 
@@ -143,11 +144,13 @@ try {
   // Roda AO LADO do LLM Guard; nenhum alerta altera o corte dele.
   const { pool: anomalyPool } = await import("./db/client.js");
   startAnomalyWorker(() => anomalyPool);
+  // Tarefa 1.8: reconciliador do /evolve (flag EVOLVE_RECONCILER, default off = nem agenda timer).
+  startReconcilerWorker(() => anomalyPool);
 } catch (err) {
   app.log.error(err);
   process.exit(1);
 }
 
 // Desligar workers graciosamente ao receber sinal de término
-process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); stopAnomalyWorker(); process.exit(0); });
-process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); stopAnomalyWorker(); process.exit(0); });
+process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); stopAnomalyWorker(); stopReconcilerWorker(); process.exit(0); });
+process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); stopAnomalyWorker(); stopReconcilerWorker(); process.exit(0); });
