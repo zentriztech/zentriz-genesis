@@ -1,0 +1,10 @@
+{
+  "request": "POST /api/projects/:draftId/spec-file",
+  "status": 409,
+  "body": {
+    "code": "CARD_PATH_COLLIDES_WITH_BASE",
+    "message": "'docs/rfc/RFC-0004-legado.md' já existe na spec da versão corrente (somente leitura): o card não pode reescrever RFC/ADR herdado nem reutilizar o número dele. Crie um arquivo novo com outro número (TK-0001).",
+    "userMessage": "Este arquivo já existe na versão corrente e não pode ser reescrito pelo card. Use outro nome ou número.",
+    "path": "docs/rfc/RFC-0004-legado.md"
+  }
+}

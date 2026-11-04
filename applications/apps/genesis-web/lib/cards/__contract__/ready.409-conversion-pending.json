@@ -1,0 +1,16 @@
+{
+  "request": "POST /api/cards/:id/ready",
+  "status": 409,
+  "body": {
+    "code": "CARD_ATTACHMENT_CONVERSION_PENDING",
+    "pending": [
+      {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "filename": "contrato.pdf",
+        "state": "pending"
+      }
+    ],
+    "message": "Há 1 anexo(s) com a conversão para texto ainda em andamento (contrato.pdf: pending). Aguarde o fim da conversão e valide de novo.",
+    "userMessage": "Ainda há anexo sendo convertido em texto. Aguarde o fim da conversão e valide de novo."
+  }
+}

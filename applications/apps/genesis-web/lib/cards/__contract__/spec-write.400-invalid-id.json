@@ -1,0 +1,8 @@
+{
+  "request": "POST /api/projects/:id/spec-file",
+  "status": 400,
+  "body": {
+    "code": "INVALID_ID",
+    "message": "Identificador inválido: use o UUID na forma canônica (8-4-4-4-12, com hífens e sem chaves)."
+  }
+}

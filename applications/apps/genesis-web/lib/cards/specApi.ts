@@ -30,10 +30,13 @@ export function newFilePathProblem(code: string, p: string): string | null {
 
 const slugify = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "novo";
 
-/** Caminho sugerido para um RFC novo: `docs/rfc/RFC-NNNN-<slug>.md`, com NNNN logo após o maior número já presente no rascunho. */
-export function suggestRfcPath(existing: string[], title = "novo-rfc"): string {
+/**
+ * Caminho sugerido para um RFC novo: `docs/rfc/RFC-NNNN-<slug>.md`, com NNNN logo após o maior número já presente no rascunho E na
+ * versão corrente (`basePaths`, AB-05): o servidor recusa o número que a base já usa, então sugerir só pelo rascunho levava a um 409.
+ */
+export function suggestRfcPath(existing: string[], title = "novo-rfc", basePaths: string[] = []): string {
   let max = 0;
-  for (const p of existing) { const m = /(?:^|\/)RFC-(\d{4})/.exec(p); if (m) max = Math.max(max, Number(m[1])); }
+  for (const p of [...existing, ...basePaths]) { const m = /(?:^|\/)RFC-(\d{4})/i.exec(p); if (m) max = Math.max(max, Number(m[1])); }
   return `docs/rfc/RFC-${String(max + 1).padStart(4, "0")}-${slugify(title)}.md`;
 }
 

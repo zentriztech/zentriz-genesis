@@ -458,21 +458,50 @@ export interface ApplyResult {
   questions: string[];
 }
 
+/** O card foi validado (ready) ou promovido enquanto o job gerava: nada mais pode ser gravado no rascunho (AB-01). */
+export class CardLockedDuringPlanError extends Error {
+  constructor(public readonly state: string | null) {
+    super("CARD_LOCKED_DURING_PLAN");
+    this.name = "CardLockedDuringPlanError";
+  }
+}
+
 /**
  * `upsertSpecFile` com a regra do card (Y-02/Y-08): arquivo que a versão corrente já tem NÃO é gravado no rascunho (a promoção o
  * sobrescreveria no filho). Devolve `skipped` e avisa. Fora de card, é `upsertSpecFile` puro.
+ *
+ * AB-01: para card, a trava é reconferida IMEDIATAMENTE antes de CADA gravação, sob `FOR UPDATE` do ticket e na mesma transação da
+ * gravação. O `ready` (markCardReady) trava o mesmo ticket antes de reler o hash: ou a escrita termina antes (e o `ready` vê o hash
+ * novo e recusa/volta), ou o `ready` vence e a escrita encontra o card travado ⇒ `CardLockedDuringPlanError` (nada é gravado).
  */
 async function upsertCardAware(db: Db, ctx: EvolutionPlanContext, relPath: string, content: string, warnings: string[]): Promise<"created" | "updated" | "skipped"> {
-  if (ctx.card) {
+  if (!ctx.card) return upsertSpecFile(db, ctx.childId, relPath, content, false);
+  const connect = (db as unknown as Pool).connect;
+  const client = typeof connect === "function" ? await (db as unknown as Pool).connect() : null;
+  const q: Db = client ?? db;
+  try {
+    if (client) await client.query("BEGIN");
+    const info = await loadCardDraftInfo(q as never, ctx.childId);
+    if (info?.ticketId && client) await client.query("SELECT 1 FROM tickets WHERE id = $1 FOR UPDATE", [info.ticketId]);
+    // estado relido DEPOIS do lock (a linha lida antes do lock pode estar atrasada)
+    const fresh = client ? await loadCardDraftInfo(q as never, ctx.childId) : info;
+    if (!fresh || (fresh.state !== "draft" && fresh.state !== "refining")) throw new CardLockedDuringPlanError(fresh?.state ?? null);
     const parsed = parseSpecPath(relPath);
-    const info = parsed ? await loadCardDraftInfo(db as never, ctx.childId) : null;
-    const hit = parsed && info ? await findBaseCollision(db as never, info, parsed.relDir, parsed.filename) : null;
-    if (hit && info) {
-      warnings.push(String(cardPathCollidesBody(info, hit).message));
+    const hit = parsed ? await findBaseCollision(q as never, fresh, parsed.relDir, parsed.filename) : null;
+    if (hit) {
+      warnings.push(String(cardPathCollidesBody(fresh, hit).message));
+      if (client) await client.query("COMMIT");
       return "skipped";
     }
+    const action = await upsertSpecFile(q, ctx.childId, relPath, content, false);
+    if (client) await client.query("COMMIT");
+    return action;
+  } catch (e) {
+    if (client) await client.query("ROLLBACK").catch(() => undefined);
+    throw e;
+  } finally {
+    client?.release();
   }
-  return upsertSpecFile(db, ctx.childId, relPath, content, false);
 }
 
 export async function applyEvolutionPlan(db: Db, ctx: EvolutionPlanContext, plan: EvolutionPlan): Promise<ApplyResult> {
@@ -696,7 +725,7 @@ async function setJob(db: Db, id: string, patch: { status: PlanJobStatus; result
     `UPDATE evolution_plan_jobs
         SET status = $2, result = COALESCE($3::jsonb, result), error = COALESCE($4, error), model_used = COALESCE($5, model_used),
             started_at = CASE WHEN $6 THEN now() ELSE started_at END, finished_at = CASE WHEN $7 THEN now() ELSE finished_at END, updated_at = now()
-      WHERE id = $1`,
+      WHERE id = $1 AND status IN ('pending','running')`, // job encerrado por fora (ex.: card validado ⇒ 'interrupted') não é ressuscitado
     [id, patch.status, patch.result ? JSON.stringify(patch.result) : null, patch.error ?? null, patch.modelUsed ?? null, !!patch.started, !!patch.finished],
   );
 }
@@ -728,6 +757,7 @@ export async function runEvolutionPlan(db: Db, job: PlanJob, requestOverride: st
     const friendly = msg === "PLAN_WITHOUT_RFC" ? "O arquiteto não devolveu nenhum RFC válido. Reformule o pedido (o que muda, para quem, por quê)."
       : msg === "PLAN_NOT_JSON" || /JSON/.test(msg) ? "O arquiteto não devolveu um plano em JSON válido. Tente de novo."
       : msg === "EMPTY_REQUEST" ? "Pedido de evolução vazio — descreva o que deve mudar."
+      : msg === "CARD_LOCKED_DURING_PLAN" ? "O card foi validado ou promovido enquanto o arquiteto gerava o RFC: o restante não foi gravado. Reabra o card (se estiver pronto) e gere de novo."
       : msg.slice(0, 300);
     await setJob(db, job.id, { status: "error", error: friendly, finished: true }).catch(() => {});
   }

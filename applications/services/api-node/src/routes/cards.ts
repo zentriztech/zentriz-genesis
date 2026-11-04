@@ -66,20 +66,40 @@ function denyMutation(user: AuthUser, reply: FastifyReply): boolean {
 
 /** Papéis que operam o ciclo do card de qualquer autor (Y-06). */
 const OPERATOR_ROLES = new Set(["tenant_admin", "zentriz_admin"]);
+/**
+ * AB-03 (decisão adotada): promover materializa uma versão do tenant com o usuário como AUTOR e gasta o orçamento do dono; a conta de
+ * gestão (`zentriz_admin`) não cria/evolui projeto (RFC-0002 A.1, mesma regra do `/evolve`). Logo, promove só o autor ou o
+ * `tenant_admin`. A conta de gestão continua rejeitando/revalidando/reabrindo/retomando/excluindo (operação, não autoria).
+ */
+const PROMOTER_ROLES = new Set(["tenant_admin"]);
+
+type OperateAction = "operate" | "promote";
+
+/** Pode este usuário executar a ação? Mesma regra do `denyOperate`, sem responder (o detalhe do card calcula `actions` com ela). */
+export function canOperateCard(user: AuthUser, card: Pick<CardRow, "created_by">, action: OperateAction = "operate"): boolean {
+  if (user.svc) return false;
+  const roles = action === "promote" ? PROMOTER_ROLES : OPERATOR_ROLES;
+  if (roles.has(user.role)) return true;
+  // autor: o `zentriz_admin` nunca promove, nem o próprio card (a conta de gestão não tem autoria)
+  if (action === "promote" && user.role === "zentriz_admin") return false;
+  return isProjectOwner(user, { created_by: card.created_by ?? null });
+}
 
 /**
- * Y-06: promover, rejeitar, retomar, revalidar, reabrir e excluir exigem `tenant_admin`, `zentriz_admin` ou o autor do card — o papel
- * `user` comum opera só os próprios cards. Token de serviço nunca. `true` = já respondeu 403.
+ * Y-06: promover, rejeitar, retomar, revalidar, reabrir e excluir exigem `tenant_admin`, `zentriz_admin` (promover: AB-03, só
+ * `tenant_admin`) ou o autor do card — o papel `user` comum opera só os próprios cards. Token de serviço nunca. `true` = já respondeu 403.
  */
-function denyOperate(user: AuthUser, card: CardRow, reply: FastifyReply): boolean {
+function denyOperate(user: AuthUser, card: CardRow, reply: FastifyReply, action: OperateAction = "operate"): boolean {
   if (user.svc) {
     reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não opera cards (autoria humana)." });
     return true;
   }
-  if (OPERATOR_ROLES.has(user.role) || isProjectOwner(user, { created_by: card.created_by ?? null })) return false;
+  if (canOperateCard(user, card, action)) return false;
   reply.status(403).send({
     code: "CARD_ACTION_NOT_ALLOWED",
-    message: "Promover, rejeitar, retomar, revalidar, reabrir ou excluir um card exige ser o autor dele ou administrador do tenant.",
+    message: action === "promote"
+      ? "Promover um card exige ser o autor dele ou administrador do tenant (a conta de gestão não promove)."
+      : "Promover, rejeitar, retomar, revalidar, reabrir ou excluir um card exige ser o autor dele ou administrador do tenant.",
   });
   return true;
 }
@@ -113,8 +133,14 @@ export async function cardRoutes(app: FastifyInstance) {
       reply.status(404).send({ code: "NOT_FOUND", message: "Produto não encontrado" });
       return null;
     }
-    // Y-21: o runner (token de serviço) não consome a API de cards.
+    // Y-21: o runner (token de serviço) não consome a API de cards. AB-08: com a flag do tenant do produto DESLIGADA a resposta é a
+    // mesma de sempre (404 "Recurso indisponível"), para o 403 não revelar a existência das rotas.
     if (user.svc) {
+      const t = (await pool.query("SELECT tenant_id FROM products WHERE id = $1", [productId])).rows[0] as { tenant_id: string | null } | undefined;
+      if (!opts.capabilities && !(t && (await cardsBancadaEnabled(pool, t.tenant_id ?? null)))) {
+        reply.status(404).send(NOT_AVAILABLE);
+        return null;
+      }
       reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não opera cards (autoria humana)." });
       return null;
     }
@@ -136,6 +162,12 @@ export async function cardRoutes(app: FastifyInstance) {
   async function cardGuard(request: FastifyRequest, reply: FastifyReply, id: string): Promise<CardRow | null> {
     const user = getUser(request);
     if (user.svc) {
+      // AB-08: flag desligada (ou card inexistente) ⇒ a resposta de sempre, sem revelar a rota.
+      const c = await loadCard(pool, id);
+      if (!c || !c.card_state || !(await cardsBancadaEnabled(pool, c.tenant_id ?? null))) {
+        reply.status(404).send(NOT_AVAILABLE);
+        return null;
+      }
       reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não opera cards (autoria humana)." });
       return null;
     }
@@ -309,16 +341,19 @@ export async function cardRoutes(app: FastifyInstance) {
       };
     }
     const st = card.card_state as CardState;
+    // AB-03: as ações que o papel não pode executar vêm `false` (o portal não oferece o botão que daria 403).
+    const user = getUser(request);
+    const operate = canOperateCard(user, card);
     const actions = {
       edit: st === "draft" || st === "refining",
       refine: allowedCardTargets(st, "user").includes("refining"),
       ready: st === "draft" || st === "refining",
-      promote: st === "ready",
-      revalidate: st === "draft" || st === "refining" || st === "ready",
-      reopen: st === "ready",
-      reject: allowedCardTargets(st, "user").includes("rejected"),
-      resume: st === "blocked",
-      delete: st === "draft",
+      promote: st === "ready" && canOperateCard(user, card, "promote"),
+      revalidate: operate && (st === "draft" || st === "refining" || st === "ready"),
+      reopen: operate && st === "ready",
+      reject: operate && allowedCardTargets(st, "user").includes("rejected"),
+      resume: operate && st === "blocked",
+      delete: operate && st === "draft",
     };
     return reply.send({ ...summary, body: card.body, attachments, events, base, actions });
   });
@@ -469,7 +504,7 @@ export async function cardRoutes(app: FastifyInstance) {
     const user = getUser(request);
     const card = await cardGuard(request, reply, request.params.id);
     if (!card) return;
-    if (denyOperate(user, card, reply)) return;
+    if (denyOperate(user, card, reply, "promote")) return;
     const r = await promoteCard(pool, card, user, request.log);
     for (const [h, v] of Object.entries(r.headers ?? {})) reply.header(h, v);
     return reply.status(r.status).send(r.body);

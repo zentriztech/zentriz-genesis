@@ -1,0 +1,9 @@
+{
+  "request": "POST /api/cards/:id/ready",
+  "status": 409,
+  "body": {
+    "code": "CARD_SPEC_CHANGED",
+    "message": "A spec (ou os anexos) do rascunho mudou durante a validação. Nada foi carimbado: valide de novo.",
+    "userMessage": "A spec mudou durante a validação. Valide o card de novo."
+  }
+}

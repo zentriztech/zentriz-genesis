@@ -582,9 +582,13 @@ describePg("Fase 2 / 2.6 — API de cards (Postgres real)", () => {
     }
     expect((await childrenOf(pool, s.parentId)).length).toBe(0);
     expect((await stateOf(c.id)).card_state).toBe("ready");
-    // ticket legado continua promovendo pelo /evolve
+    // AB-02: com a flag LIGADA no tenant do projeto, ticket legado também é recusado (USE_CARDS); sem a flag continua promovendo
     const t = await seedTicket(pool, s);
     as(s);
+    const legacyOn = await app.inject({ method: "POST", url: `/api/projects/${s.parentId}/evolve`, payload: { request: "x", ticketId: t.id } });
+    expect(legacyOn.statusCode, legacyOn.body).toBe(409);
+    expect(legacyOn.json().code).toBe("USE_CARDS");
+    await pool.query("DELETE FROM genesis_runtime_config WHERE key = 'CARDS_BANCADA' AND tenant_id = $1", [s.tenantId]);
     expect((await app.inject({ method: "POST", url: `/api/projects/${s.parentId}/evolve`, payload: { request: "x", ticketId: t.id } })).statusCode).toBe(201);
   });
 

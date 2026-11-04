@@ -46,7 +46,8 @@ Commits locais (`evo/l1`): `5cd18b9` (ids canônicos, rascunho fora de DELETE/st
 | Ação | Quem pode |
 |---|---|
 | Criar, editar texto, anexar, refinar, validar (`ready`) | `user` ou acima. Conta de gestão (`zentriz_admin`) e token de serviço **não** criam nem editam (regra anterior mantida) |
-| Promover, rejeitar, retomar, revalidar, reabrir, excluir (`draft`) | `tenant_admin`, `zentriz_admin` ou o **autor** do card (`tickets.created_by`) |
+| Promover | `tenant_admin` ou o **autor** do card (`tickets.created_by`). **`zentriz_admin` não promove** (decisão AB-03, ver `EVOLUIR-PROJETO-AC-correcoes-ab-fase3.md`; RFC-0002 A.1) |
+| Rejeitar, retomar, revalidar, reabrir, excluir (`draft`) | `tenant_admin`, `zentriz_admin` ou o **autor** do card |
 | Qualquer rota de card com token de serviço (`svc`) | Ninguém (403), nem leitura (Y-21) |
 
 Escolhas minhas dentro da sua matriz, para você rever: `ready` e `refine` ficaram no nível "user ou acima" (validar não gasta orçamento nem materializa versão); `delete` entrou no grupo de operação (autor ou administrador); `zentriz_admin` passou a poder operar o ciclo (antes a conta de gestão era recusada em tudo, o que contradizia a matriz pedida). Para reverter, basta trocar `denyOperate` por `denyMutation` nas rotas. O código novo é `CARD_ACTION_NOT_ALLOWED` (403).
@@ -63,7 +64,7 @@ Nenhuma fixture foi regravada: a suíte de contrato continua verde com as fixtur
 2. **`POST /api/cards/:id/ready`** ganha respostas 409: `CARD_ATTACHMENT_CONVERSION_PENDING` (`pending: [{id, filename, state}]`), `CARD_PATH_COLLIDES_WITH_BASE` (`paths: string[]`) e `CARD_SPEC_CHANGED`. O 200 pode agora ser seguido de um card em `refining` se uma escrita tardia chegar (o portal já relê o card).
 3. **`POST /api/cards/:id/promote`** pode responder 409 `EVOLUTION_RFC_REQUIRED`/`EVOLUTION_RFC_INVALID`/`CARD_KIND_*` (gate reavaliado no lock), `CARD_PATH_COLLIDES_WITH_BASE` ou `CARD_NOT_READY` com `state` real (inclusive `rejected`). Em todos o card volta a `refining`.
 4. **`GET /api/cards/:id/journey`** pode trazer o bloqueador `GLOBS_UNVERIFIED` (ação `revalidate`). `revalidate` não ganhou campo novo: `needsHumanReview` é expresso pela razão `NEEDS_HUMAN_REVIEW` (warning) já existente no contrato.
-5. **Papéis e runner:** 403 `CARD_ACTION_NOT_ALLOWED` para `user` que não é autor; `zentriz_admin` agora pode promover, rejeitar, retomar, revalidar e reabrir; token de serviço recebe 403 também nas leituras.
+5. **Papéis e runner:** 403 `CARD_ACTION_NOT_ALLOWED` para `user` que não é autor; `zentriz_admin` pode rejeitar, retomar, revalidar e reabrir (a promoção foi retirada dele em AC/AB-03); token de serviço recebe 403 também nas leituras.
 6. **Projetos:** `DELETE /api/projects/:id`, `POST /stop` e `PATCH` com `status` em rascunho de card ⇒ 409; id de projeto não canônico ⇒ 400 `INVALID_ID`; `/evolve` sem `ticketId` ⇒ 409 `USE_CARDS` quando a flag está ligada (o portal deve tratar `USE_CARDS` e não depender só de `capabilities`).
 7. **Carimbo do rascunho** (`extra.card_ready.attachments_hash`) e `extra.card_revalidation` são internos; não aparecem nas respostas.
 8. **Efeito colateral do GET da jornada (Y-14):** `GET /api/cards/:id/journey` e `POST /resume` seguem chamando `syncCardWithChild` (idempotente; pode levar `promoted→in_factory` ou `→blocked`). Agora o bloqueio por orçamento também acontece sem ninguém olhar, pelo gancho das rotas internas do Guard; a leitura da jornada deixou de ser a única porta, mas continua escrevendo. Recomendação: ligar o reconciliador (`EVOLVE_RECONCILER=on`) junto com a flag.

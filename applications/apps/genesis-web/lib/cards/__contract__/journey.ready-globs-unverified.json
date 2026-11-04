@@ -1,0 +1,78 @@
+{
+  "request": "GET /api/cards/:id/journey",
+  "status": 200,
+  "body": {
+    "cardId": "00000000-0000-4000-8000-000000000001",
+    "code": "TK-0001",
+    "state": "refining",
+    "kind": "feature",
+    "phase": "editing",
+    "steps": [
+      {
+        "key": "draft",
+        "label": "Rascunho",
+        "state": "done"
+      },
+      {
+        "key": "refining",
+        "label": "Refinando",
+        "state": "current"
+      },
+      {
+        "key": "ready",
+        "label": "Pronto",
+        "state": "todo"
+      },
+      {
+        "key": "promoted",
+        "label": "Promovido",
+        "state": "todo"
+      },
+      {
+        "key": "in_factory",
+        "label": "Na fábrica",
+        "state": "todo"
+      },
+      {
+        "key": "delivered",
+        "label": "Entregue",
+        "state": "todo"
+      }
+    ],
+    "current": "refining",
+    "next": "ready",
+    "blockers": [
+      {
+        "code": "GLOBS_UNVERIFIED",
+        "message": "Globs não conferidos: a versão corrente avançou e o escopo (files_allowed) do RFC não foi comparado com o código (sem repositório/clone). Confira o escopo e revalide o card.",
+        "userMessage": "A versão corrente avançou e o escopo do RFC não foi conferido com o código. Confira e revalide o card.",
+        "details": {
+          "revalidate": "POST /api/cards/00000000-0000-4000-8000-000000000001/revalidate"
+        }
+      }
+    ],
+    "action": {
+      "key": "revalidate",
+      "label": "Conferir o escopo e revalidar",
+      "method": "POST",
+      "path": "/api/cards/00000000-0000-4000-8000-000000000001/revalidate",
+      "enabled": true
+    },
+    "headline": "Globs não conferidos",
+    "detail": "Globs não conferidos: a versão corrente avançou e o escopo (files_allowed) do RFC não foi comparado com o código (sem repositório/clone). Confira o escopo e revalide o card.",
+    "severity": "warning",
+    "blocked": null,
+    "spec": {
+      "locked": false,
+      "canReopen": false
+    },
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000002",
+      "headVersion": 2,
+      "currentHeadProjectId": "00000000-0000-4000-8000-000000000002",
+      "currentHeadVersion": 2,
+      "stale": false
+    },
+    "execution": null
+  }
+}

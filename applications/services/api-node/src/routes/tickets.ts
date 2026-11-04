@@ -18,6 +18,7 @@ import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { sha256Hex } from "../lib/specTreeHash.js";
 import { flagEnabled } from "../services/featureFlags.js";
+import { cardsBancadaEnabled } from "../services/cardState.js";
 import { kickTicketConversions } from "../services/attachmentConversionQueue.js";
 import { deleteCard, legacyPatchCard, type CardRow } from "../services/cardService.js";
 import {
@@ -131,6 +132,14 @@ export async function ticketRoutes(app: FastifyInstance) {
     }
     if (product.status === "archived") {
       return reply.status(409).send({ code: "PRODUCT_ARCHIVED", message: "Produto arquivado não recebe novos pedidos." });
+    }
+    // AB-02: com `CARDS_BANCADA` ligada no tenant do produto o pedido nasce como CARD (POST /api/products/:id/cards). Esta rota legada
+    // criaria um ticket fora da máquina de estados, que o /evolve promoveria sem rascunho, carimbo nem RFC maturado.
+    if (await cardsBancadaEnabled(pool, product.tenant_id ?? null).catch(() => false)) {
+      return reply.status(409).send({
+        code: "USE_CARDS",
+        message: `Este tenant usa cards: abra o pedido por POST /api/products/${productId}/cards (a rota de pedido legado não cria mais tickets).`,
+      });
     }
 
     let title = "";
