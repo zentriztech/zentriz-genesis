@@ -4,6 +4,7 @@
  *  POST   /api/products/:productId/cards              cria card (json | multipart: kind, title, body, projectId + anexos)
  *  GET    /api/products/:productId/cards              lista (?state=&kind=&origin=&limit=&offset=)
  *  GET    /api/products/:productId/cards/capabilities { cardsBancada } — SEMPRE 200 (o portal decide se mostra o quadro)
+ *  GET    /api/products/:productId/cards/metrics      F5 (5.2): métricas versionadas (?since=ISO&limit=) — por estado, tempo por estado, custo, taxa de blocked
  *  GET    /api/cards/:id                              detalhe (+ anexos, eventos, base, ações disponíveis)
  *  PATCH  /api/cards/:id                              texto (title, body, kind) enquanto draft|refining
  *  POST   /api/cards/:id/refine | ready | reject | resume | revalidate | promote
@@ -39,6 +40,7 @@ import { promoteCard, resumeCard, syncCardWithChild } from "../services/cardProm
 import { withCardUserMessage } from "../services/cardErrors.js";
 import { buildCardJourney } from "../services/cardJourney.js";
 import { listCardAttachments } from "../services/cardAttachments.js";
+import { loadCardMetrics } from "../services/cardMetrics.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -194,6 +196,18 @@ export async function cardRoutes(app: FastifyInstance) {
     const g = await productGuard(request, reply, request.params.productId, { capabilities: true });
     if (!g) return;
     return reply.send({ cardsBancada: g.enabled });
+  });
+
+  // ── Métricas (F5, 5.2): leitura versionada, mesma autorização e flag do quadro ──────────────────
+  app.get<{ Params: { productId: string }; Querystring: { since?: string; limit?: string } }>("/api/products/:productId/cards/metrics", async (request, reply) => {
+    const g = await productGuard(request, reply, request.params.productId);
+    if (!g) return;
+    const q = request.query ?? {};
+    const since = (q.since ?? "").trim();
+    if (since && Number.isNaN(Date.parse(since))) return reply.status(400).send({ code: "BAD_REQUEST", message: "since deve ser uma data ISO 8601." });
+    const limit = q.limit == null || q.limit === "" ? undefined : Number(q.limit);
+    if (limit !== undefined && !(Number.isInteger(limit) && limit >= 1)) return reply.status(400).send({ code: "BAD_REQUEST", message: "limit deve ser um inteiro positivo." });
+    return reply.send(await loadCardMetrics(pool, g.product, { since: since ? new Date(since).toISOString() : null, limit }));
   });
 
   // ── Criar ───────────────────────────────────────────────────────────────────────────────────

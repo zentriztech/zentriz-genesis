@@ -7,13 +7,16 @@
  * Chaves suportadas:
  *  - `advisor_pct`      percentual (1–100) do ORÇAMENTO TOTAL do projeto-dono reservado ao Advisor (escopo global ou tenant).
  *                       C4': o Guard APLICA o teto (`advisorGate` em llmGuard.ts): gasto = ledger `llm_role='advisor'` do projeto-dono.
+ *  - `card_budget_pct`  F5 (5.1, D-E10): percentual (1–100) do ORÇAMENTO TOTAL do projeto-dono que UM card pode gastar (escopo global ou tenant).
+ *                       O Guard APLICA (`cardBudgetCheck` em llmGuard.ts): gasto = ledger dos projetos do card (rascunho + filho).
+ *                       Aceita `abs_cap_usd` (teto absoluto); NÃO usa piso nem valor em US$. Sem linha ⇒ o card compartilha o orçamento do dono.
  *  - `breaker_hour_usd` / `breaker_day_usd`  disjuntor global da plataforma (valor em US$ > 0; 0 é recusado). Só escopo global.
  *                       Quando existe linha, vence o valor de `llm_guard_settings`/env.
  * Todo valor nasce `calibrado=false`: só um zentriz_admin marca calibrado.
  */
 import type { Queryable } from "./llmGuard.js";
 
-export const POLICY_KEYS = ["advisor_pct", "breaker_hour_usd", "breaker_day_usd"] as const;
+export const POLICY_KEYS = ["advisor_pct", "card_budget_pct", "breaker_hour_usd", "breaker_day_usd"] as const;
 export type PolicyKey = (typeof POLICY_KEYS)[number];
 export const ADVISOR_BASE = "project_total_budget";
 
@@ -100,6 +103,18 @@ export function validatePolicy(input: PolicyInput): Validation {
     return { ok: true, value: {
       scopeType, scopeId, key, pct: Math.round(pct * 100) / 100, base: ADVISOR_BASE,
       floorUsd: floor.n, absCapUsd: cap.n, valueUsd: null, calibrated, source,
+    } };
+  }
+  if (key === "card_budget_pct") {
+    const pct = Number(input.pct);
+    if (isNil(input.pct) || !Number.isFinite(pct) || pct < 1 || pct > 100) {
+      return { ok: false, code: "INVALID_PCT", message: "O percentual do orçamento por card deve estar entre 1 e 100." };
+    }
+    if (!isNil(input.valueUsd)) return { ok: false, code: "INVALID_VALUE", message: "card_budget_pct não usa valueUsd." };
+    if (floor.n != null) return { ok: false, code: "INVALID_VALUE", message: "card_budget_pct não usa piso (floorUsd)." };
+    return { ok: true, value: {
+      scopeType, scopeId, key, pct: Math.round(pct * 100) / 100, base: ADVISOR_BASE,
+      floorUsd: null, absCapUsd: cap.n, valueUsd: null, calibrated, source,
     } };
   }
   // disjuntor global
@@ -234,6 +249,22 @@ export async function advisorPolicyView(db: Queryable, tenantId: string | null, 
     floorUsd: p.floorUsd, absCapUsd: p.absCapUsd, calibrated: p.calibrated, version: p.version, scopeType: p.scopeType,
     author: p.author, updatedAt: p.updatedAt,
   };
+}
+
+export interface CardBudgetPolicyView {
+  pct: number; baseUsd: number; capUsd: number; absCapUsd: number | null; calibrated: boolean; version: number;
+  scopeType: "global" | "tenant"; author: string; updatedAt: string;
+}
+
+/** F5 (5.1): teto do card = pct % do orçamento total do dono (limitado por `abs_cap_usd`). Sem política (ou pct inválido) ⇒ `null`. */
+export async function cardBudgetPolicyView(db: Queryable, tenantId: string | null, budgetUsd: number | null): Promise<CardBudgetPolicyView | null> {
+  if (budgetUsd == null || !(budgetUsd > 0)) return null;
+  const p = await getEffectivePolicy(db, "card_budget_pct", tenantId);
+  if (!p || p.pct == null) return null;
+  let cap = budgetUsd * (p.pct / 100);
+  if (p.absCapUsd != null) cap = Math.min(cap, p.absCapUsd);
+  return { pct: p.pct, baseUsd: budgetUsd, capUsd: Math.round(cap * 10000) / 10000, absCapUsd: p.absCapUsd, calibrated: p.calibrated,
+    version: p.version, scopeType: p.scopeType, author: p.author, updatedAt: p.updatedAt };
 }
 
 /** Disjuntor: valores em vigor vindos da política global (se existirem). */

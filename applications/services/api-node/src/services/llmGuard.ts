@@ -30,7 +30,7 @@ import { dailyTokenQuotaMode } from "../lib/costSource.js";
 import { PRE_FACTORY_STATUSES } from "./projectStatus.js";
 import { isSesConfigured, sendEmail } from "./emailSender.js";
 import { buildEstimator, fetchHistoryBuckets } from "./specEnrichment.js";
-import { advisorPolicyView, breakerOverrides, getEffectivePolicy, type AdvisorPolicyView } from "./costPolicies.js";
+import { advisorPolicyView, breakerOverrides, cardBudgetPolicyView, getEffectivePolicy, type AdvisorPolicyView } from "./costPolicies.js";
 import { effectiveAdvisorFloorUsd } from "../lib/advisorFloor.js";
 
 export interface Queryable {
@@ -63,7 +63,7 @@ const SETTING_DEFAULTS: Record<string, string> = {
 export type GuardCode =
   | "KILL_SWITCH" | "GLOBAL_HOURLY_CAP" | "GLOBAL_DAILY_CAP" | "REPEAT_PAYLOAD"
   | "UNATTRIBUTED_DAILY_CAP" | "PROJECT_NOT_FOUND" | "BUDGET_MISSING" | "BUDGET_PAUSED"
-  | "BUDGET_INSUFFICIENT" | "GUARD_ERROR";
+  | "BUDGET_INSUFFICIENT" | "CARD_BUDGET_CAP" | "GUARD_ERROR";
 
 export type GuardDecision =
   | { allow: true; remainingUsd: number | null; budgetProjectId: string | null; advisorPolicy?: AdvisorPolicyView }
@@ -431,9 +431,20 @@ export async function preflight(db: Queryable, input: PreflightInput): Promise<G
       await pauseForBudget(db, owner, reason);
       return { allow: false, code: "BUDGET_INSUFFICIENT", budgetProjectId: owner.ownerId, message: `Projeto pausado: ${reason}.` };
     }
+    // F5 (5.1): teto do card em %. NÃO pausa o dono (os outros cards seguem): só para o filho deste card (`stopped_by='budget'`),
+    // que o reconciliador/`syncCardWithChild` leva a `blocked` (`budget:CARD_BUDGET_CAP`). Sem política ⇒ nada muda (D-E10).
+    const cardCap = await cardBudgetCheck(db, pid, est);
+    if (cardCap.applies && !cardCap.ok) {
+      await logEvent(db, "card_cap_reached", pid, { ownerId: owner.ownerId, ticketId: cardCap.ticketId, capUsd: cardCap.capUsd, spentUsd: cardCap.spentUsd, estUsd: est });
+      await db.query(
+        `UPDATE projects SET status = 'stopped', stopped_by = 'budget', updated_at = now() WHERE id = $1 AND status = ANY($2::text[])`,
+        [pid, FACTORY_ACTIVE_STATUSES],
+      ).catch((e) => console.warn(`[llmGuard] parar filho do card ${pid}: ${msg(e)}`));
+      return { allow: false, code: "CARD_BUDGET_CAP", budgetProjectId: owner.ownerId, message: cardCap.message };
+    }
     const quotaDenied = await checkDailyTokenQuota(db, owner.tenantId, pid);
     if (quotaDenied) return { ...quotaDenied, budgetProjectId: owner.ownerId };
-    // C3': exposição do teto do Advisor lido de cost_policies; ausente sem política. A APLICAÇÃO é `advisorGate` (C4').
+    // C3'': exposição do teto do Advisor lido de cost_policies; ausente sem política. A APLICAÇÃO é `advisorGate` (C4').
     const advisorPolicy = await advisorPolicyView(db, owner.tenantId, owner.budgetUsd);
     return { allow: true, remainingUsd: remaining, budgetProjectId: owner.ownerId, ...(advisorPolicy ? { advisorPolicy } : {}) };
   } catch (e) {
@@ -516,6 +527,51 @@ export async function advisorGate(
     console.error(`[llmGuard] advisorGate falhou — NEGANDO o Advisor (fail-closed): ${msg(e)}`);
     return { allow: false, mode: "policy", code: "advisor_denied_no_base", message: "Guarda do Advisor indisponível — Advisor negado por segurança." };
   }
+}
+
+// ── Orçamento do card em percentual (F5, 5.1) ────────────────────────────────
+
+export type CardBudgetCheck =
+  | { applies: false }
+  | { applies: true; ok: true; capUsd: number; spentUsd: number }
+  | { applies: true; ok: false; capUsd: number; spentUsd: number; ticketId: string; message: string };
+
+/** Gasto do card: SOMA DO LEDGER dos projetos do card (rascunho de refino + filho promovido). Sobrevive a reinício. */
+export async function cardSpentUsd(db: Queryable, projectIds: string[]): Promise<number> {
+  const ids = projectIds.filter((x) => UUID_RE.test(x));
+  if (!ids.length) return 0;
+  const r = await db.query("SELECT COALESCE(SUM(cost_usd), 0) AS s FROM llm_call_ledger WHERE project_id = ANY($1::uuid[])", [ids]);
+  return num(r.rows[0]?.s);
+}
+
+/**
+ * F5 (5.1, D-E10) — o Guard aplica o teto do CARD: `card_budget_pct` % × `budget_usd` do projeto-dono (limitado por `abs_cap_usd`).
+ *   · `projectId` não é de um card (`tickets.draft_project_id|child_project_id`, `card_state` não nulo) OU sem política ⇒ `applies:false`
+ *     (comportamento anterior: o card compartilha o orçamento do dono; `BUDGET_MISSING` segue no `preflight`);
+ *   · gasto (ledger do card) + `estUsd` > teto ⇒ `ok:false` (o chamador nega com `CARD_BUDGET_CAP` e o card vira `blocked`, nunca `failed`);
+ *   · erro de leitura ⇒ lança (o chamador é fail-closed: `preflight` → `GUARD_ERROR`; `checkProjectBudgetGate` → `GUARD_ERROR`).
+ */
+export async function cardBudgetCheck(db: Queryable, projectId: string, estUsd = 0): Promise<CardBudgetCheck> {
+  if (!UUID_RE.test(projectId)) return { applies: false };
+  const t = (await db.query(
+    `SELECT id, draft_project_id, child_project_id FROM tickets
+      WHERE card_state IS NOT NULL AND (child_project_id = $1 OR draft_project_id = $1) LIMIT 1`, [projectId])).rows[0];
+  if (!t) return { applies: false };
+  const owner = await resolveBudgetOwner(db, projectId);
+  if (!owner) return { applies: false };
+  const p = await getEffectivePolicy(db, "card_budget_pct", owner.tenantId);
+  if (!p) return { applies: false };
+  if (owner.budgetUsd == null || !(owner.budgetUsd > 0)) return { applies: false }; // BUDGET_MISSING é do preflight
+  const view = await cardBudgetPolicyView(db, owner.tenantId, owner.budgetUsd);
+  if (!view || !(view.pct >= 1 && view.pct <= 100)) {
+    throw new Error("política card_budget_pct inválida (percentual fora de 1–100)");
+  }
+  const spent = await cardSpentUsd(db, [t.draft_project_id, t.child_project_id].filter(Boolean).map(String));
+  if (spent + Math.max(0, num(estUsd)) > view.capUsd + 1e-9) {
+    return { applies: true, ok: false, capUsd: view.capUsd, spentUsd: spent, ticketId: String(t.id),
+      message: `Teto do card atingido: US$ ${spent.toFixed(4)} gastos > US$ ${view.capUsd} (${view.pct} % de US$ ${owner.budgetUsd}). Aumente o orçamento ou o percentual.` };
+  }
+  return { applies: true, ok: true, capUsd: view.capUsd, spentUsd: spent };
 }
 
 // ── Registro ─────────────────────────────────────────────────────────────────
@@ -870,6 +926,8 @@ export async function checkProjectBudgetGate(db: Queryable, projectId: string): 
     if (remaining < minNextActivityUsd(spend)) {
       return { ok: false, code: "BUDGET_INSUFFICIENT", message: `Saldo de US$ ${remaining.toFixed(2)} não comporta a próxima atividade. Aumente o orçamento.` };
     }
+    const cardCap = await cardBudgetCheck(db, projectId); // F5 (5.1): gasto do card já no teto ⇒ nega (fail-closed no catch)
+    if (cardCap.applies && !cardCap.ok) return { ok: false, code: "CARD_BUDGET_CAP", message: cardCap.message };
     return { ok: true };
   } catch (e) {
     return { ok: false, code: "GUARD_ERROR", message: `Guarda de custo indisponível: ${msg(e)}` };

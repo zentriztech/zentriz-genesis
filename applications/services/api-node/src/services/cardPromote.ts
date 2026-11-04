@@ -188,6 +188,14 @@ export async function syncCardWithChild(pool: Pool, ticketId: string): Promise<C
     if (!gate.ok) return null;
     // saldo de volta: cai no ramo "bloqueio de orçamento resolvido" abaixo.
   }
+  // F5 (5.1): teto do card em % estourado com o filho ainda VIVO e não parado (ex.: Bancada, que mantém o status). O Guard
+  // (`cardBudgetCheck`) é soberano: negou ⇒ `blocked` por orçamento (`budget:CARD_BUDGET_CAP`), nunca `failed`. Sem política não consulta nada novo.
+  if (t.child_project_id && (t.card_state === "promoted" || t.card_state === "in_factory") && !budgetStopped) {
+    const gate = await childBudgetGate(pool, t.child_project_id);
+    if (!gate.ok && gate.code === "CARD_BUDGET_CAP") {
+      return transitionCard(pool, { ticketId, to: "blocked", actorKind: "guard", reason: `${BUDGET_BLOCK_PREFIX}CARD_BUDGET_CAP`, dedupeKey: `budget_stop:${t.child_project_id}:CARD_BUDGET_CAP` });
+    }
+  }
   if (t.card_state === "blocked" && isBudgetBlockReason(t.blocked_reason)) {
     // Bloqueio de orçamento só cai quando o Guard libera de novo (pausa limpa e saldo para a próxima atividade).
     const gate = t.child_project_id ? await childBudgetGate(pool, t.child_project_id) : { ok: false as const, code: "PROJECT_NOT_FOUND" };

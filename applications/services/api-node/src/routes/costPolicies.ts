@@ -6,7 +6,7 @@
  *   DELETE /api/cost-policies          — remove (a remoção também fica no histórico)
  * `advisor_pct` aceita `baseBudgetUsd` (C4'): recusa a gravação se `pct % × base` ficar abaixo do piso calculado (lib/advisorFloor.ts).
  * Escrita: SOMENTE pessoa. Token de serviço (`user.svc`: runner/agents) é negado, como o PUT de orçamento.
- *   zentriz_admin: qualquer escopo/chave e pode marcar `calibrated`. tenant_admin: só `advisor_pct` do PRÓPRIO tenant, sempre `calibrated=false`.
+ *   zentriz_admin: qualquer escopo/chave e pode marcar `calibrated`. tenant_admin: só `advisor_pct`/`card_budget_pct` do PRÓPRIO tenant, sempre `calibrated=false`.
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { pool } from "../db/client.js";
@@ -27,7 +27,7 @@ function denyWrite(request: FastifyRequest, reply: FastifyReply, t: { scopeType:
   const user = getUser(request);
   if (user.svc) return reply.status(403).send({ code: "FORBIDDEN", message: "Política de custo só é alterada por pessoa, não por agente." });
   if (user.role === "zentriz_admin") return null;
-  if (user.role === "tenant_admin" && user.tenantId && t.scopeType === "tenant" && t.scopeId === user.tenantId.toLowerCase() && t.key === "advisor_pct") {
+  if (user.role === "tenant_admin" && user.tenantId && t.scopeType === "tenant" && t.scopeId === user.tenantId.toLowerCase() && (t.key === "advisor_pct" || t.key === "card_budget_pct")) {
     return null;
   }
   return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão para esta política." });
