@@ -155,7 +155,8 @@ export interface TickResult { claimed: number; done: number; empty: number; fail
  * Uma passada: processa até `limit` conversões elegíveis (opcionalmente só de um pedido). `ignoreBackoff` (drenagem inline na
  * materialização) ignora `next_attempt_at`, mas continua respeitando o lock de quem já está convertendo. Nunca lança.
  */
-export async function runConversionTick(db: QueueDb, opts: { ticketId?: string; limit?: number; ignoreBackoff?: boolean } = {}): Promise<TickResult> {
+export async function runConversionTick(db: QueueDb, opts: { ticketId?: string; limit?: number; ignoreBackoff?: boolean; budgetMs?: number } = {}): Promise<TickResult> {
+  const startedAt = Date.now();
   const res: TickResult = { claimed: 0, done: 0, empty: 0, failed: 0, retry: 0, skippedFlagOff: 0 };
   try {
     const cands = (await db.query(
@@ -170,6 +171,8 @@ export async function runConversionTick(db: QueueDb, opts: { ticketId?: string; 
     )).rows as Array<{ id: string; tenant_id: string | null }>;
     const flagByTenant = new Map<string, boolean>();
     for (const cand of cands) {
+      // orçamento de tempo (drenagem inline): não INICIA outra conversão depois de estourado; o resto segue `pending` para o worker
+      if (opts.budgetMs !== undefined && Date.now() - startedAt >= opts.budgetMs) break;
       const key = cand.tenant_id ?? "";
       if (!flagByTenant.has(key)) flagByTenant.set(key, await attachmentConversionEnabled(db, cand.tenant_id));
       if (!flagByTenant.get(key)) { res.skippedFlagOff++; continue; }
@@ -207,11 +210,26 @@ export async function kickTicketConversions(db: QueueDb, tenantId: string | null
   }
 }
 
-/** Drenagem inline (materialização da spec): garante que o que dá para converter já esteja convertido. Nunca lança. */
+/** Limites da drenagem inline (S-10), padrões conservadores NÃO calibrados (calibrado=falso), override por variável. */
+export const INLINE_DRAIN_DEFAULTS = { maxConversions: 2, budgetMs: 20_000 } as const;
+export function inlineDrainLimitsFromEnv(env: NodeJS.ProcessEnv = process.env): { maxConversions: number; budgetMs: number } {
+  const num = (k: string, d: number) => { const n = Number(env[k]); return Number.isFinite(n) && n > 0 ? Math.floor(n) : d; };
+  return {
+    maxConversions: Math.min(num("ATTACHMENT_CONVERSION_INLINE_MAX", INLINE_DRAIN_DEFAULTS.maxConversions), 20),
+    budgetMs: num("ATTACHMENT_CONVERSION_INLINE_BUDGET_MS", INLINE_DRAIN_DEFAULTS.budgetMs),
+  };
+}
+
+/**
+ * Drenagem inline (materialização da spec): converte JÁ o que couber em `maxConversions` (padrão 2) e `budgetMs` (padrão 20 s,
+ * checado antes de iniciar cada conversão; teto de espera ≈ orçamento + `timeoutMs` de uma conversão). O restante continua
+ * `pending` e é convertido pelo worker periódico; a spec ganha o derivado na próxima materialização/reconciliação (S-10). Nunca lança.
+ */
 export async function drainTicketConversions(db: QueueDb, ticketId: string): Promise<void> {
   try {
+    const lim = inlineDrainLimitsFromEnv();
     await enqueueTicketConversions(db, ticketId);
-    await runConversionTick(db, { ticketId, limit: 20, ignoreBackoff: true });
+    await runConversionTick(db, { ticketId, limit: lim.maxConversions, ignoreBackoff: true, budgetMs: lim.budgetMs });
   } catch (e) {
     console.warn(`[attachmentConversion] drenagem ${ticketId} falhou: ${e instanceof Error ? e.message : String(e)}`);
   }
