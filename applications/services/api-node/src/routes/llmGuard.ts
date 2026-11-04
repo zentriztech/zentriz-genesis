@@ -258,7 +258,7 @@ export async function llmGuardUserRoutes(app: FastifyInstance): Promise<void> {
 
   app.put<{ Body: Record<string, string | number> }>("/api/admin/llm-guard/settings", async (request, reply) => {
     if (!requireAdmin(request)) return reply.status(403).send({ code: "FORBIDDEN" });
-    const allowed = new Set(["kill_switch", "global_max_usd_per_hour", "global_max_usd_per_day", "unattributed_max_usd_per_day", "repeat_max_per_6h"]);
+    const allowed = new Set(["kill_switch", "global_max_usd_per_hour", "global_max_usd_per_day", "tenant_max_usd_per_hour", "unattributed_max_usd_per_day", "repeat_max_per_6h"]);
     const by = getUser(request).email;
     for (const [k, raw] of Object.entries(request.body ?? {})) {
       if (!allowed.has(k)) return reply.status(400).send({ code: "UNKNOWN_SETTING", message: k });

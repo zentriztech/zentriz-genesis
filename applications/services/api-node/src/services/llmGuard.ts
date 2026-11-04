@@ -58,6 +58,9 @@ const SETTING_DEFAULTS: Record<string, string> = {
   // Baseline medido antes do incidente: ~BRL 402/dia ≈ US$ 75/dia na plataforma inteira.
   global_max_usd_per_hour: "40",
   global_max_usd_per_day: "250",
+  // AV/A-5: teto horário POR TENANT. "auto" = 50% do teto horário global em vigor (um tenant sozinho nunca liga a chave geral);
+  // número = US$/h fixo; 0 = desligado (volta ao comportamento anterior: só o teto global).
+  tenant_max_usd_per_hour: "auto",
   unattributed_max_usd_per_day: "5",
   repeat_max_per_6h: "4",
 };
@@ -69,7 +72,7 @@ export type GuardCode =
 
 export type GuardDecision =
   | { allow: true; remainingUsd: number | null; budgetProjectId: string | null; advisorPolicy?: AdvisorPolicyView }
-  | { allow: false; code: GuardCode; message: string; budgetProjectId?: string | null };
+  | { allow: false; code: GuardCode; message: string; budgetProjectId?: string | null; scope?: "tenant" };
 
 export interface PreflightInput {
   projectId?: string | null;
@@ -292,6 +295,21 @@ async function globalSpend(db: Queryable): Promise<{ hour: number; day: number; 
   return { hour: num(r.hour), day: num(r.day), unattributedDay: num(r.unattributed_day) };
 }
 
+/** AV/A-5: gasto das últimas 24 h NÃO — da última HORA do tenant (a janela do teto horário). */
+async function tenantHourSpend(db: Queryable, tenantId: string): Promise<number> {
+  const r = (await db.query(
+    "SELECT COALESCE(SUM(cost_usd), 0) AS hour FROM llm_call_ledger WHERE tenant_id = $1 AND created_at > now() - interval '1 hour'", [tenantId],
+  )).rows[0] ?? {};
+  return num(r.hour);
+}
+
+/** AV/A-5: teto horário do tenant em vigor (0 = sem teto). `auto` = metade do teto horário global; o global segue como ÚLTIMO recurso. */
+export function tenantHourlyCap(s: Record<string, string>, globalHourCap: number): number {
+  const v = (s.tenant_max_usd_per_hour ?? "auto").trim().toLowerCase();
+  if (v === "" || v === "auto") return globalHourCap > 0 ? globalHourCap * 0.5 : 0;
+  return Math.max(0, num(v));
+}
+
 /** Liga a chave geral automaticamente e avisa a Zentriz. Idempotente (só avisa na transição). */
 async function tripKillSwitch(db: Queryable, code: GuardCode, detail: Record<string, unknown>): Promise<void> {
   const cur = (await db.query("SELECT value FROM llm_guard_settings WHERE key = 'kill_switch'")).rows[0];
@@ -422,6 +440,23 @@ export async function preflight(db: Queryable, input: PreflightInput): Promise<G
 
     const owner = await resolveBudgetOwner(db, pid);
     if (!owner) return { allow: false, code: "PROJECT_NOT_FOUND", message: "Projeto não encontrado para debitar a chamada de LLM." };
+    // AV/A-5: teto horário POR TENANT, antes do orçamento. Estourou ⇒ nega só este tenant (sem ligar a chave geral): 5 cards simultâneos de um
+    // tenant não derrubam o LLM de todos. O código segue `GLOBAL_HOURLY_CAP` por compatibilidade com o runner (espera com teto, C1'); `scope:"tenant"`
+    // e a mensagem dizem de quem é o teto. Janela deslizante de 1 h: a espera resolve sozinha.
+    const tCap = tenantHourlyCap(s, hourCap);
+    if (tCap > 0 && owner.tenantId) {
+      const tSpent = await tenantHourSpend(db, owner.tenantId);
+      if (tSpent >= tCap) {
+        const recent = (await db.query(
+          `SELECT 1 FROM llm_guard_events WHERE kind = 'tenant_hourly_cap_denied' AND detail->>'tenantId' = $1 AND created_at > now() - interval '1 hour' LIMIT 1`,
+          [owner.tenantId])).rows[0];
+        if (!recent) await logEvent(db, "tenant_hourly_cap_denied", pid, { tenantId: owner.tenantId, spentLastHourUsd: tSpent.toFixed(2), tenantCapUsd: tCap, globalHourCapUsd: hourCap });
+        return {
+          allow: false, code: "GLOBAL_HOURLY_CAP", scope: "tenant", budgetProjectId: owner.ownerId,
+          message: `Teto horário do tenant de US$ ${tCap.toFixed(2)} atingido (US$ ${tSpent.toFixed(2)} na última hora) — LLM deste tenant em espera; os demais tenants seguem.`,
+        };
+      }
+    }
     if (owner.budgetUsd == null) {
       return {
         allow: false, code: "BUDGET_MISSING", budgetProjectId: owner.ownerId,
