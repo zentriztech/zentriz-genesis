@@ -920,6 +920,33 @@ def _apply_connect_declaration(pipeline_ctx: "PipelineContext", project_id: str)
                 "connect.yaml inválido (CONNECT_DECLARATION_GATE=hard): " + "; ".join(errors)[:500])
 
 
+class SpecReadError(RuntimeError):
+    """Arquivo de spec registrado que NÃO pôde ser lido (ATTACHMENTS_STRICT=on). Erro explícito: nunca vira ""."""
+
+
+def _attachments_strict() -> bool:
+    return (os.environ.get("ATTACHMENTS_STRICT", "off") or "off").strip().lower() == "on"
+
+
+#: Allowlist de TEXTO da árvore de spec (ATTACHMENTS_STRICT=on). Sobrescrevível por SPEC_TEXT_EXTENSIONS (CSV com ponto).
+#: Padrão = o que a Bancada/ZIP já produzem como texto (md/txt + manifestos json/csv/rst + código de referência do ZIP).
+#: pdf/doc/docx/png/xlsx… NÃO entram: ficam guardados no card (tickets/ticket_attachments) e não na árvore.
+_SPEC_TEXT_EXTENSIONS_DEFAULT = ".md,.markdown,.txt,.json,.csv,.rst,.ts,.js,.tsx,.jsx,.py,.sql,.sh"
+
+
+def _spec_text_extensions() -> tuple[str, ...]:
+    raw = os.environ.get("SPEC_TEXT_EXTENSIONS") or _SPEC_TEXT_EXTENSIONS_DEFAULT
+    return tuple(e.strip().lower() for e in raw.split(",") if e.strip())
+
+
+def _read_spec_file_strict(fpath: Path, label: str) -> str:
+    """Leitura estrita: UTF-8 ou erro explícito com o nome do arquivo (nada de devolver "" em silêncio)."""
+    try:
+        return fpath.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SpecReadError(f"não foi possível ler o arquivo de spec '{label}' ({fpath}): {exc}") from exc
+
+
 def load_spec_all(project_id: str) -> str:
     """Carrega todos os project_spec_files de um projeto e os concatena.
 
@@ -941,12 +968,33 @@ def load_spec_all(project_id: str) -> str:
             mime = str(entry.get("mimeType") or entry.get("mime_type") or "").lower()
             return name.endswith((".yaml", ".yml")) or mime == "application/yaml"
         data = [e for e in data if isinstance(e, dict) and not _is_machine_readable(e)]
+        strict = _attachments_strict()
+        if strict:
+            # Tarefa 1.5: só TEXTO entra na árvore. Tudo o mais (pdf/doc/docx/png/xlsx…) é ignorado COM AVISO.
+            _allowed = _spec_text_extensions()
+            _kept: list[dict] = []
+            for e in data:
+                _name = str(e.get("filename") or Path(str(e.get("filePath") or e.get("file_path") or "")).name)
+                if _name.lower().endswith(_allowed):
+                    _kept.append(e)
+                else:
+                    logger.warning("[load_spec_all] ATTACHMENTS_STRICT: '%s' fora da allowlist de texto da spec (%s) — ignorado "
+                                   "(documentos não-texto ficam guardados no card).", _name, ",".join(_allowed))
+            if not _kept and data:
+                # Havia arquivos registrados e NENHUM é texto: não devolve "" (o chamador cairia em silêncio no arquivo primário).
+                raise SpecReadError("nenhum arquivo de texto na árvore de spec (todos fora da allowlist: "
+                                    + ", ".join(str(e.get("filename")) for e in data) + ")")
+            data = _kept
         if not data:
             return ""
         if len(data) == 1:
             fpath = Path(data[0].get("filePath") or data[0].get("file_path", ""))
             if fpath.exists():
+                if strict:
+                    return _strip_yaml_frontmatter(_read_spec_file_strict(fpath, str(data[0].get("filename", fpath.name))))
                 return _strip_yaml_frontmatter(fpath.read_text(encoding="utf-8"))
+            if strict:
+                raise SpecReadError(f"arquivo de spec registrado não existe no disco: {fpath}")
             return ""
         parts: list[str] = []
         for entry in data:
@@ -955,11 +1003,18 @@ def load_spec_all(project_id: str) -> str:
             rel_dir = str(entry.get("relDir") or entry.get("rel_dir") or "")
             label = f"{rel_dir}/{fname}" if rel_dir else str(fname)
             if not fpath.exists():
+                if strict:
+                    raise SpecReadError(f"arquivo de spec registrado não existe no disco: {label} ({fpath})")
                 logger.warning("[load_spec_all] Arquivo não encontrado: %s", fpath)
                 continue
-            content = _strip_yaml_frontmatter(fpath.read_text(encoding="utf-8"))
+            if strict:
+                content = _strip_yaml_frontmatter(_read_spec_file_strict(fpath, label))
+            else:
+                content = _strip_yaml_frontmatter(fpath.read_text(encoding="utf-8"))
             parts.append(f"---\n# [{label}]\n\n{content}")
         return "\n\n".join(parts)
+    except SpecReadError:
+        raise  # ATTACHMENTS_STRICT=on: erro explícito, sobe para o chamador (nunca "" em silêncio)
     except Exception as exc:
         logger.warning("[load_spec_all] Falha ao carregar spec files: %s", exc)
         return ""
@@ -3891,7 +3946,37 @@ def _parse_tasks_from_backlog(project_id: str, pm_module: str = "web") -> list[d
 _INHERIT_SKIP_TASKS = ("TSK-DEVOPS-001", "TSK-FULL-TEST")
 
 
-def _inherit_parent_tasks(project_id: str, parent_id: str) -> int:
+def _task_inherit_transitive() -> bool:
+    """Tarefa 1.6: herança transitiva de tasks (todas as versões da linhagem). `off` (padrão) = comportamento anterior."""
+    return (os.environ.get("TASK_INHERIT_TRANSITIVE", "off") or "off").strip().lower() == "on"
+
+
+#: ID herdado transitivo: `TSK-INH-V<n>-<ID original sem "TSK-">` (ex.: TSK-EVO-001 da v2 → TSK-INH-V2-EVO-001).
+#: Mantém o prefixo `TSK-INH-` (todas as exclusões de contagem/Dev/QA e os `LIKE 'TSK-INH-%'` da API continuam valendo) e
+#: carrega a versão de origem, então `TSK-EVO-001` de versões distintas nunca colide no upsert (project_id, task_id).
+#: Não precisa mudar o regex de backlog `TSK-[A-Z]+-\d+`: IDs herdados são criados pelo runner, não parseados do texto do PM
+#: (e, por conter `V<n>` após `INH-`, o regex nem os casa por engano).
+_INH_VERSIONED_RE = re.compile(r"^TSK-INH-V(\d+)-")
+
+
+def _inherited_task_id(version: int | str, tid: str) -> str:
+    return f"TSK-INH-V{version}-{tid.removeprefix('TSK-')}"
+
+
+def _get_project_version(project_id: str) -> int | None:
+    """versionNumber do projeto (GET /api/projects/:id). None se indisponível."""
+    try:
+        data, status = _api_get(f"/api/projects/{project_id}")
+        if status == 200 and isinstance(data, dict):
+            v = data.get("versionNumber", data.get("version_number"))
+            if isinstance(v, int) and v >= 1:
+                return v
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[H6] versão do projeto %s indisponível: %s", project_id[:8], exc)
+    return None
+
+
+def _inherit_parent_tasks(project_id: str, parent_id: str, parent_version: int | None = None) -> int:
     """Bloco 2 H6 — copia as tasks DONE/QA_PASS do PAI como `TSK-INH-<id>` com status DONE (herdadas).
     Excluídas: DevOps/full-test (o filho gera as suas) e tasks já herdadas (TSK-INH-*). Idempotente (upsert
     da API por (project_id, task_id)). Devolve o nº de tasks enviadas."""
@@ -3903,12 +3988,38 @@ def _inherit_parent_tasks(project_id: str, parent_id: str) -> int:
         return 0
     rows = data if isinstance(data, list) else (data.get("tasks") if isinstance(data, dict) else None) or []
     inherited: list[dict] = []
+    transitive = _task_inherit_transitive()
+    origin_label: int | str = ""
+    if transitive:
+        # Versão de origem das tasks PRÓPRIAS do pai. Sem a versão (API indisponível) usa o início do id do pai, que
+        # também é único por versão — melhor um rótulo feio do que a colisão que esta flag existe para evitar.
+        origin_label = parent_version if parent_version is not None else (_get_project_version(parent_id) or f"P{parent_id[:8].upper()}")
     for t in rows:
         if not isinstance(t, dict):
             continue
         tid = str(t.get("taskId") or t.get("task_id") or "").strip()
         st = str(t.get("status") or "").upper()
+        if transitive and tid.startswith("TSK-INH-") and tid not in _INHERIT_SKIP_TASKS and st in ("DONE", "QA_PASS"):
+            # Tarefa 1.6: a herdada do pai JÁ carrega a versão de origem (TSK-INH-V<n>-…) — segue com o MESMO ID, assim a
+            # linhagem inteira chega ao filho sem colisão. Herdada legada (TSK-INH-<resto>, sem versão) segue como está.
+            inherited.append({
+                "task_id": tid,
+                "module": str(t.get("module") or "backend"),
+                "owner_role": str(t.get("ownerRole") or t.get("owner_role") or "DEV"),
+                "requirements": str(t.get("requirements") or "")[:1700],
+                "status": "DONE",
+            })
+            continue
         if not tid or st not in ("DONE", "QA_PASS") or tid in _INHERIT_SKIP_TASKS or tid.startswith("TSK-INH-"):
+            continue
+        if transitive:
+            inherited.append({
+                "task_id": _inherited_task_id(origin_label, tid),
+                "module": str(t.get("module") or "backend"),
+                "owner_role": str(t.get("ownerRole") or t.get("owner_role") or "DEV"),
+                "requirements": f"[HERDADA da v{origin_label} — {tid}] " + str(t.get("requirements") or "")[:1500],
+                "status": "DONE",
+            })
             continue
         inherited.append({
             "task_id": f"TSK-INH-{tid.removeprefix('TSK-')}",
@@ -3924,6 +4035,67 @@ def _inherit_parent_tasks(project_id: str, parent_id: str) -> int:
         logger.warning("[H6] POST das tasks herdadas falhou (HTTP %s): %s", post_status, str(_pd)[:200])
         return 0
     return len(inherited)
+
+
+def _task_inherit_summary_max_tokens() -> int:
+    """Teto (tokens) do resumo das tasks herdadas no contexto do CTO/PM. Env TASK_INHERIT_SUMMARY_MAX_TOKENS, padrão 1500
+    (~6.000 chars), faixa 200..20000. NÃO calibrado: ajustar quando houver medição de linhagens reais."""
+    try:
+        v = int(os.environ.get("TASK_INHERIT_SUMMARY_MAX_TOKENS", "1500"))
+    except ValueError:
+        return 1500
+    return min(max(v, 200), 20000)
+
+
+def _summarize_inherited_tasks(done_rows: list[dict], parent_version: int | None = None, max_tokens: int | None = None) -> str:
+    """Bloco compacto "TASKS JÁ ENTREGUES NAS VERSÕES ANTERIORES", agrupado pela versão de origem (mais nova primeiro).
+    Estimativa 4 chars/token. Ao estourar o teto corta em fronteira de linha e declara quantas ficaram de fora."""
+    budget = (max_tokens if max_tokens is not None else _task_inherit_summary_max_tokens()) * 4
+    groups: dict[str, list[tuple[str, str]]] = {}
+    for t in done_rows:
+        tid = str(t.get("taskId") or t.get("task_id") or "")
+        if not tid or tid in _INHERIT_SKIP_TASKS:
+            continue
+        m = _INH_VERSIONED_RE.match(tid)
+        if m:
+            label = f"v{m.group(1)}"
+        elif tid.startswith("TSK-INH-"):
+            label = "origem não registrada (herança legada)"
+        else:
+            label = f"v{parent_version}" if parent_version is not None else "versão imediatamente anterior"
+        groups.setdefault(label, []).append((tid, str(t.get("requirements") or "")))
+
+    def _order(label: str) -> int:
+        m = re.match(r"v(\d+)$", label)
+        return -int(m.group(1)) if m else 1  # mais nova primeiro; sem versão por último
+
+    head = "### TASKS JÁ ENTREGUES NAS VERSÕES ANTERIORES (não repita — só o DELTA do pedido)\n"
+    out = [head]
+    used = len(head)
+    total = sum(len(v) for v in groups.values())
+    shown = 0
+    truncated = False
+    for label in sorted(groups, key=_order):
+        sub = f"#### {label}\n"
+        if used + len(sub) > budget:
+            break
+        out.append(sub)
+        used += len(sub)
+        for tid, req in groups[label]:
+            # requisito herdado já abre com "[HERDADA …]": para o resumo basta o texto útil
+            req1 = re.sub(r"^\[HERDADA[^\]]*\]\s*", "", req).replace("\n", " ")[:140]
+            line = f"- {tid} — {req1}\n"
+            if used + len(line) > budget:
+                truncated = True
+                break
+            out.append(line)
+            used += len(line)
+            shown += 1
+        if truncated:
+            break
+    if shown < total:
+        out.append(f"- … e mais {total - shown} task(s) omitida(s) (teto de ~{budget // 4} tokens)\n")
+    return "".join(out) + "\n"
 
 
 def _inherited_task_ids(project_id: str) -> list[str]:
@@ -5555,7 +5727,14 @@ def main() -> int:
     logger.info("[Pipeline] Lendo spec: %s", spec_ref)
     spec_content = ""
     if project_id:
-        spec_content = load_spec_all(project_id)
+        try:
+            spec_content = load_spec_all(project_id)
+        except SpecReadError as _e_spec:
+            # ATTACHMENTS_STRICT=on: arquivo de spec ilegível = falha EXPLÍCITA e visível (não cai em silêncio no primário).
+            logger.error("[Pipeline] %s", _e_spec)
+            _post_error(f"Spec ilegível: {_e_spec}", request_id, _e_spec)
+            _patch_project({"status": "failed"})
+            return 1
         if spec_content:
             logger.info("[Pipeline] Spec carregada via project_spec_files (%d chars, %d arquivo(s))",
                         len(spec_content),
@@ -5960,7 +6139,10 @@ def main() -> int:
                         and str(t.get("taskId") or t.get("task_id") or "") not in _INHERIT_SKIP_TASKS]
             if _pt_status != 200:
                 logger.warning("[H6] tasks do pai indisponíveis para o contexto do CTO/PM (HTTP %s) — token escopado? ver auth.ts (ancestrais)", _pt_status)
-            if _pt_status == 200 and _pt_done:
+            if _pt_status == 200 and _pt_done and _task_inherit_transitive():
+                # Tarefa 1.6: resumo COMPACTO de todas as versões da linhagem, com teto de tokens configurável.
+                _parent_done_block = _summarize_inherited_tasks(_pt_done, _get_project_version(_parent_project_id_evo))
+            elif _pt_status == 200 and _pt_done:
                 _lines = [f"- {str(t.get('taskId') or t.get('task_id'))} — {str(t.get('requirements') or '')[:140]}" for t in _pt_done[:40]]
                 _parent_done_block = ("### TASKS JÁ ENTREGUES NA VERSÃO ANTERIOR (não repita — só o DELTA do pedido)\n"
                                       + "\n".join(_lines) + (f"\n- … e mais {len(_pt_done) - 40}" if len(_pt_done) > 40 else "") + "\n\n")
