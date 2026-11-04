@@ -88,6 +88,17 @@ export const UNIQUENESS_INDEXES: readonly UniquenessIndexDef[] = [
  WHERE child_project_id IS NOT NULL AND status IN ('promoted', 'delivered')
  GROUP BY child_project_id HAVING count(*) > 1 LIMIT 5`,
   },
+  {
+    name: "uq_tickets_draft",
+    description: "um rascunho de card (projeto card_draft) pertence a no máximo um ticket (Fase 2, H §4.3)",
+    createSql: `CREATE UNIQUE INDEX IF NOT EXISTS uq_tickets_draft
+  ON tickets (draft_project_id)
+  WHERE draft_project_id IS NOT NULL`,
+    dirtySql: `SELECT draft_project_id::text AS k1, NULL::text AS k2, count(*)::int AS n
+  FROM tickets
+ WHERE draft_project_id IS NOT NULL
+ GROUP BY draft_project_id HAVING count(*) > 1 LIMIT 5`,
+  },
 ] as const;
 
 export interface UniquenessReport {

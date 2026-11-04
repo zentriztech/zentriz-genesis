@@ -20,6 +20,7 @@
  * spec não mudou, `[Normalizar]` devolve verde e NÃO regenera nada (zero tokens). Editar qualquer
  * spec invalida a normalização e a trava do /promote volta.
  */
+import { notHiddenProjectSql } from "./projectStatus.js";
 import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
@@ -198,6 +199,7 @@ export async function loadProductProjects(db: Queryable, productId: string): Pro
        FROM projects p
       WHERE p.product_id = $1
         AND p.status <> 'archived'
+        AND ${notHiddenProjectSql("p")}
         AND COALESCE(p.extra->>'superseded_by', '') = ''
       ORDER BY p.created_at ASC, p.title ASC
       LIMIT ${MAX_PROJECTS + 1}`,
@@ -1457,7 +1459,7 @@ export async function isProductNormalized(
   const count = (await db.query(
     `SELECT count(*)::int AS n FROM project_spec_files f
        JOIN projects p ON p.id = f.project_id
-      WHERE p.product_id = $1`,
+      WHERE p.product_id = $1 AND ${notHiddenProjectSql("p")}`,
     [product.id],
   )).rows[0] as { n: number } | undefined;
   if ((count?.n ?? 0) > NORMALIZED_CHECK_MAX_FILES) return { normalized: null, hash: null };

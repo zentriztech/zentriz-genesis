@@ -10,6 +10,7 @@
  * Determinístico e transacional: valida TUDO (DAG, specs, tipos) antes de criar
  * qualquer projeto; em erro, faz ROLLBACK (nada meia-criado).
  */
+import { notHiddenProjectSql } from "./projectStatus.js";
 import type { Pool } from "pg";
 import { buildProductSketch, parseManifest, computeProductHash, ManifestError, type ProductSketch } from "./productManifest.js";
 import { createProjectFromSpec } from "./projectCreation.js";
@@ -93,7 +94,7 @@ async function buildReuseResult(
     if (consumed.rowCount === 0) originAlreadyPromoted = true;
   }
   const rows = (await pool.query(
-    "SELECT id, title, status FROM projects WHERE product_id = $1",
+    `SELECT id, title, status FROM projects WHERE product_id = $1 AND ${notHiddenProjectSql("")}`,
     [productId],
   )).rows as Array<{ id: string; title: string; status: string }>;
   const byTitle = new Map(rows.map((r) => [r.title, r]));

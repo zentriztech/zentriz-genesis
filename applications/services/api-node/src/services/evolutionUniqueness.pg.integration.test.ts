@@ -70,7 +70,7 @@ describePg("Fase 1' / 1.2 — unicidade parcial (banco descartável)", () => {
     );
   const constraintOf = async (p: Promise<unknown>) => { try { await p; return null; } catch (e) { const x = e as { code?: string; constraint?: string }; return `${x.code}:${x.constraint}`; } };
 
-  it("banco limpo ⇒ os 5 índices são criados; segunda execução é no-op", async () => {
+  it("banco limpo ⇒ todos os índices (5 do /evolve + uq_tickets_draft da Fase 2) são criados; segunda execução é no-op", async () => {
     await dropAll();
     resetUniquenessCountersForTest();
     const r1 = await ensureEvolutionUniqueness(pool, logger);
@@ -80,9 +80,9 @@ describePg("Fase 1' / 1.2 — unicidade parcial (banco descartável)", () => {
     expect(r1.dirty).toHaveLength(0);
     expect(r1.errors).toHaveLength(0);
     expect(r2.created).toHaveLength(0);
-    expect(r2.existing).toHaveLength(5);
+    expect(r2.existing).toHaveLength(UNIQUENESS_INDEXES.length);
     expect(await indexNames()).toEqual(UNIQUENESS_INDEXES.map((d) => d.name).sort());
-    expect(getUniquenessCounters().created).toBe(5);
+    expect(getUniquenessCounters().created).toBe(UNIQUENESS_INDEXES.length);
   });
 
   it("conflito ⇒ 23505 em cada índice (INSERT direto de duplicata)", async () => {
@@ -144,7 +144,7 @@ describePg("Fase 1' / 1.2 — unicidade parcial (banco descartável)", () => {
     expect(report.dirty.map((d) => d.index)).toEqual(["uq_projects_parent_version_live"]);
     expect(report.created.sort()).toEqual(UNIQUENESS_INDEXES.map((d) => d.name).filter((n) => n !== "uq_projects_parent_version_live").sort());
     expect(present).not.toContain("uq_projects_parent_version_live");
-    expect(present).toHaveLength(4);
+    expect(present).toHaveLength(UNIQUENESS_INDEXES.length - 1);
     expect(getUniquenessCounters().dirty).toBe(1);
     expect(parsed.some((p) => p.level === "error" && p.event === "evolution_uniqueness_dirty" && p.index === "uq_projects_parent_version_live")).toBe(true);
 
@@ -152,7 +152,7 @@ describePg("Fase 1' / 1.2 — unicidade parcial (banco descartável)", () => {
     await pool.query("DELETE FROM projects WHERE id = ANY($1)", [[dup1, dup2]]);
     const again = await ensureEvolutionUniqueness(pool, logger);
     expect(again.created).toEqual(["uq_projects_parent_version_live"]);
-    expect(await indexNames()).toHaveLength(5);
+    expect(await indexNames()).toHaveLength(UNIQUENESS_INDEXES.length);
   });
 
   it("erro inesperado num índice não derruba os outros (catch por índice)", async () => {
@@ -167,13 +167,13 @@ describePg("Fase 1' / 1.2 — unicidade parcial (banco descartável)", () => {
     await dropAll();
     const r = await ensureEvolutionUniqueness(flaky, logger);
     expect(r.errors.map((e) => e.index)).toEqual(["uq_projects_ticket_live"]);
-    expect(r.created).toHaveLength(4);
+    expect(r.created).toHaveLength(UNIQUENESS_INDEXES.length - 1);
     await dropAll();
     await ensureEvolutionUniqueness(pool, logger);
   });
 
   it("rede de segurança: com os índices e SEM claim (flag off), N simultâneas no /evolve histórico ⇒ 1× 201 e o resto 409 EVOLUTION_IN_FLIGHT (antes: N filhos)", async () => {
-    expect(await indexNames()).toHaveLength(5);
+    expect(await indexNames()).toHaveLength(UNIQUENESS_INDEXES.length);
     vi.stubEnv("EVOLVE_CLAIM", "off");
     try {
       const s = await seed();

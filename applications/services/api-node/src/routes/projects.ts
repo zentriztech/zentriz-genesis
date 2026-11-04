@@ -1,4 +1,5 @@
 import { attachmentsStrictEnabled, classifyAttachment } from "../services/ticketAttachments.js";
+import { notHiddenProjectSql } from "../services/projectStatus.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readFile, writeFile, readdir, stat } from "fs/promises";
 import path from "path";
@@ -29,6 +30,7 @@ import { dispatchProjectRun } from "../services/runnerDispatch.js";
 import { maybeNotifyBlock, maybeNotifyDone, scheduleFactoryDone } from "../services/opsNotify.js";
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
 import { ticketTransitionsEnabled, recordTicketEvent } from "../services/ticketTransitions.js";
+import { loadTaskCardLinksIfEnabled } from "../services/taskCardLinks.js";
 import { evolutionPromoteEnabled } from "../services/evolutionPromote.js";
 import { resolveInboxProductId } from "../services/inbox.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
@@ -155,7 +157,7 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE b.project_id = p.id AND b.status IN ('running','running_degraded')
              ORDER BY b.created_at DESC LIMIT 1
            ) bdep ON true
-           WHERE ($1::uuid IS NULL OR p.tenant_id = $1) AND (p.status <> 'archived' OR COALESCE(p.extra->>'superseded_by','') <> '')
+           WHERE ($1::uuid IS NULL OR p.tenant_id = $1) AND (p.status <> 'archived' OR COALESCE(p.extra->>'superseded_by','') <> '') AND ${notHiddenProjectSql("p")}
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
              p.product_id NULLS FIRST,
@@ -185,7 +187,7 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE b.project_id = p.id AND b.status IN ('running','running_degraded')
              ORDER BY b.created_at DESC LIMIT 1
            ) bdep ON true
-           WHERE p.tenant_id = $1 AND (p.status <> 'archived' OR COALESCE(p.extra->>'superseded_by','') <> '')
+           WHERE p.tenant_id = $1 AND (p.status <> 'archived' OR COALESCE(p.extra->>'superseded_by','') <> '') AND ${notHiddenProjectSql("p")}
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
              p.product_id NULLS FIRST,
@@ -215,7 +217,7 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE b.project_id = p.id AND b.status IN ('running','running_degraded')
              ORDER BY b.created_at DESC LIMIT 1
            ) bdep ON true
-           WHERE p.created_by = $1 AND (p.status <> 'archived' OR COALESCE(p.extra->>'superseded_by','') <> '')
+           WHERE p.created_by = $1 AND (p.status <> 'archived' OR COALESCE(p.extra->>'superseded_by','') <> '') AND ${notHiddenProjectSql("p")}
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
              p.product_id NULLS FIRST,
@@ -498,6 +500,7 @@ export async function projectRoutes(app: FastifyInstance) {
            created_at ASC`,
         [id]
       );
+      const cardLinks = await loadTaskCardLinksIfEnabled(client, id);
       const tasks = result.rows.map((row: Record<string, unknown>) => ({
         id: row.id,
         projectId: row.project_id,
@@ -511,6 +514,8 @@ export async function projectRoutes(app: FastifyInstance) {
         monitorAttempted: row.monitor_attempted ?? false,
         createdAt:  (row.created_at as Date)?.toISOString(),
         updatedAt:  (row.updated_at as Date)?.toISOString(),
+        // Fase 2 (2.3): vínculo task → card, SÓ com CARDS_BANCADA ligada para o tenant (flag off ⇒ resposta idêntica à de antes).
+        ...(cardLinks ? (cardLinks.get(String(row.id)) ?? { cardId: null, originSpecFile: null }) : {}),
       }));
       return reply.send(tasks);
     } finally {

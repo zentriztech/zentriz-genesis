@@ -19,6 +19,7 @@
  *    classificação de tenants separa "aguardando pagamento" (inactive COM charge) de
  *    "inativos (ação manual)" (inactive SEM charge) e "suspensos".
  */
+import { notHiddenProjectSql } from "../services/projectStatus.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
@@ -139,7 +140,7 @@ export async function dashboardRoutes(app: FastifyInstance) {
               ORDER BY d.created_at DESC LIMIT 3
            ) x
        ) msgs ON true
-       WHERE p.status <> 'archived' ${tenantFilter}
+       WHERE p.status <> 'archived' AND ${notHiddenProjectSql("p")} ${tenantFilter}
        ORDER BY (p.status = 'running') DESC, p.updated_at DESC
        LIMIT 100`,
       params,
@@ -281,7 +282,7 @@ async function buildTenantKpis(tenantId: string, features: Record<string, boolea
        count(*) FILTER (WHERE p.status IN ('accepted','completed') AND p.started_at IS NOT NULL AND p.finished_at IS NOT NULL
                    AND COALESCE(p.finished_at, p.completed_at, p.updated_at) > now() - interval '30 days')::int AS lead_time_samples
      FROM projects p
-     WHERE p.tenant_id = $1 AND p.status <> 'archived'`,
+     WHERE p.tenant_id = $1 AND p.status <> 'archived' AND ${notHiddenProjectSql("p")}`,
     params,
   );
 
@@ -406,7 +407,7 @@ async function buildAdminKpis(features: Record<string, boolean>) {
        count(*) FILTER (WHERE status LIKE 'blocked_%')::int AS blocked,
        count(*) FILTER (WHERE status = 'running')::int AS running,
        count(*) FILTER (WHERE status = 'queued')::int AS queued
-     FROM projects WHERE status <> 'archived'`,
+     FROM projects WHERE status <> 'archived' AND ${notHiddenProjectSql("")}`,
   );
 
   // A4+A6: propostas em voo (global) + interrompidas/erro nas últimas 24h.

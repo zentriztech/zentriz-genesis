@@ -11,6 +11,7 @@
  * portal precisa mostrar isso. Precedência: failed > stalled > accepted-total >
  * partial > running > ingesting.
  */
+import { notHiddenProjectSql } from "./projectStatus.js";
 import type { Pool, PoolClient } from "pg";
 
 export type ProductLifecycle =
@@ -98,6 +99,7 @@ export async function recomputeProductLifecycle(
     const res = await db.query(
       `SELECT p.status FROM projects p
         WHERE p.product_id = $1
+          AND ${notHiddenProjectSql("p")}
           AND NOT ( p.status IN ('failed', 'archived') AND p.parent_project_id IS NOT NULL AND (p.extra->>'evolution') = 'true'
                     AND EXISTS (SELECT 1 FROM projects s
                                  WHERE s.parent_project_id = p.parent_project_id AND s.version_number = p.version_number

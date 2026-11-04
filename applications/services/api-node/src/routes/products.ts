@@ -24,6 +24,7 @@
  * DELETE /api/projects/:id/links/:linkId         — remover link
  */
 
+import { notHiddenProjectSql } from "../services/projectStatus.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -222,7 +223,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
                COUNT(proj.id)::int AS project_count,
                MIN(proj.created_at) AS oldest_project_at
         FROM products p
-        LEFT JOIN projects proj ON proj.product_id = p.id`;
+        LEFT JOIN projects proj ON proj.product_id = p.id AND ${notHiddenProjectSql("proj")}`;
       const tail = `
                GROUP BY p.id
                HAVING (p.solo_app = false OR COUNT(proj.id) > 0)
@@ -1061,7 +1062,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
                 psf.filename, psf.rel_dir, psf.is_primary, psf.content_sha256, psf.created_at
            FROM project_spec_files psf
            JOIN projects p ON p.id = psf.project_id
-          WHERE p.product_id = $1 AND p.tenant_id IS NOT DISTINCT FROM $2
+          WHERE p.product_id = $1 AND p.tenant_id IS NOT DISTINCT FROM $2 AND ${notHiddenProjectSql("p")}
           ORDER BY p.created_at ASC, psf.rel_dir, psf.filename
           LIMIT $3`,
         [id, prow.tenant_id, MAX_FILES + 1],
@@ -1074,7 +1075,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         const cnt = (await client.query(
           `SELECT count(*)::int AS n FROM project_spec_files psf
              JOIN projects p ON p.id = psf.project_id
-            WHERE p.product_id = $1 AND p.tenant_id IS NOT DISTINCT FROM $2`,
+            WHERE p.product_id = $1 AND p.tenant_id IS NOT DISTINCT FROM $2 AND ${notHiddenProjectSql("p")}`,
           [id, prow.tenant_id],
         )).rows[0] as { n: number };
         totalFiles = cnt.n;
@@ -1599,7 +1600,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     try {
       await client.query("BEGIN");
       const statuses = (await client.query(
-        "SELECT status, COUNT(*) AS n FROM projects WHERE product_id = $1 GROUP BY status", [id],
+        `SELECT status, COUNT(*) AS n FROM projects WHERE product_id = $1 AND ${notHiddenProjectSql("")} GROUP BY status`, [id],
       )).rows as Array<{ status: string; n: string }>;
       const started = statuses.filter((s) => s.status !== "draft" && s.status !== "promoted");
       if (started.length > 0) {

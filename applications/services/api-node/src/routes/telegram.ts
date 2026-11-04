@@ -1,4 +1,5 @@
 // Telegram Bot integration — webhook, vinculação e notificações push
+import { notHiddenProjectSql } from "../services/projectStatus.js";
 import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { PoolClient } from "pg";
@@ -444,6 +445,7 @@ async function handleStatus(chatId: number, user: UserRow, projectIdPrefix?: str
      FROM projects
      WHERE tenant_id = $1
        AND status != 'archived'
+       AND ${notHiddenProjectSql("")}
      ORDER BY updated_at DESC LIMIT 20`,
     [user.tenant_id]
   );
@@ -787,6 +789,7 @@ async function handleList(chatId: number, user: UserRow) {
      LEFT JOIN project_tasks pt ON pt.project_id = pr.id
      WHERE pr.tenant_id = $1
        AND pr.status <> 'archived'
+       AND ${notHiddenProjectSql("pr")}
        AND pr.status <> ALL($2::text[])
      GROUP BY pr.id, pr.title, pr.status, pr.product_id, pd.name
      ORDER BY pd.name NULLS LAST, pr.updated_at DESC`,
@@ -1385,6 +1388,7 @@ async function resolveProject(tenantId: string, prefix: string) {
     `SELECT id, title, status FROM projects
      WHERE tenant_id = $1 AND id::text LIKE $2
        AND status NOT IN ('accepted', 'failed', 'archived', 'draft')
+       AND ${notHiddenProjectSql("")}
      LIMIT 1`,
     [tenantId, `${prefix}%`]
   );

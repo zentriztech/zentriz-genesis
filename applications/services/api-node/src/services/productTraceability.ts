@@ -29,6 +29,7 @@
  * CORTES: todo teto está em `LIMITS` e todo corte aplicado vira uma linha em `truncated[]` com o
  * que foi cortado e quanto ficou de fora. Cortar é aceitável; mentir sobre o corte não é.
  */
+import { notHiddenProjectSql } from "./projectStatus.js";
 import { computeFactoryCertificates, type FactoryCertificate } from "./factoryCertificate.js";
 import { computeCurrentSpecHash } from "./specValidation.js";
 
@@ -260,7 +261,7 @@ export async function buildTraceabilityReport(
   const projRows = (await db.query(
     `SELECT id, title, status, extra, version_number, parent_project_id, created_at, finished_at,
             run_count, spec_fingerprint
-       FROM projects WHERE product_id = $1 ORDER BY created_at ASC`,
+       FROM projects WHERE product_id = $1 AND ${notHiddenProjectSql("")} ORDER BY created_at ASC`,
     [productId],
   )).rows;
   const projectsTotal = projRows.length;

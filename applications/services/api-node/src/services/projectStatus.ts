@@ -35,7 +35,28 @@ export const SPEC_EDITABLE_STATUSES = new Set([
   "blocked_backlog_empty_with_frs", "blocked_awaiting_expo_confirm",
   // D3: enquanto a fábrica espera resposta, editar a spec é uma remediação legítima.
   "needs_spec_input",
+  // Fase 2 (2.1): rascunho de card — a spec do card é editada enquanto o card está em draft/refining/ready
+  // (a trava por estado do card é aplicada pelos escritores de spec na Fase 3).
+  "card_draft",
 ]);
+
+/**
+ * Fase 2 (2.1, desenho H §5.2/F14): status que NÃO existem para os leitores de "projetos do produto/tenant".
+ * `card_draft` é o rascunho de um card (sem versão, sem pai, sem árvore herdada): não é spec viva do produto, não é
+ * versão, não entra em contagens, listagens de projetos, agregado do produto nem em "Minhas SPECs". Todo leitor que
+ * filtra por EXCLUSÃO de status (`<> 'archived'`) ou não filtra tem de aplicar este conjunto
+ * (ver `NOT_HIDDEN_PROJECT_SQL`). Leitores por LISTA DE PERMISSÃO (`status IN (...)`) já o excluem por construção.
+ */
+export const HIDDEN_FROM_PRODUCT_STATUSES = ["card_draft"] as const;
+
+/**
+ * Fragmento SQL canônico (sem parâmetros) que exclui os status ocultos. Uso: `WHERE ... AND ${notHiddenProjectSql("p")}`.
+ * Valores fixos e confiáveis (constantes acima), por isso interpolação segura.
+ */
+export function notHiddenProjectSql(alias = "p"): string {
+  const list = HIDDEN_FROM_PRODUCT_STATUSES.map((s) => `'${s}'`).join(", ");
+  return `${alias ? `${alias}.` : ""}status NOT IN (${list})`;
+}
 
 /** Fábrica-ativa / terminal — produção, NUNCA rascunho de inbox. */
 export const FACTORY_OR_TERMINAL_STATUSES = [

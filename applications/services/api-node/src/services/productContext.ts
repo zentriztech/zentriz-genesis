@@ -35,6 +35,7 @@
  * Flag: `SPEC_CONTEXT_PRODUCT_SCOPE=off` por default (GAP-9) — com ela desligada este módulo não é
  * chamado e o contexto do chat é byte-idêntico ao de antes.
  */
+import { notHiddenProjectSql } from "./projectStatus.js";
 import { readFile } from "node:fs/promises";
 import type { ValidationFinding } from "./specValidation.js";
 
@@ -165,6 +166,7 @@ export async function buildProductMap(db: Queryable, anchorProjectId: string): P
       WHERE p.product_id = $1
         AND ${scoped.clause}
         AND p.status <> 'archived'
+        AND ${notHiddenProjectSql("p")}
         AND COALESCE(p.extra->>'superseded_by', '') = ''
       ORDER BY p.title
       LIMIT ${MAX_MAP_PROJECTS + 1}`,
