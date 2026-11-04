@@ -154,7 +154,7 @@ export async function findLineageRepo(db: Db, childId: string, parentId: string 
 }
 
 export type GateStatus = "passed" | "failed" | "not_run";
-export interface GateOutcome { status: GateStatus; detail: string }
+export interface GateOutcome { status: GateStatus; detail: string; /** Gate de escopo: arquivos do diff real fora do `files_allowed` (até 50), para o portal listá-los na confirmação do merge. */ files?: string[] }
 export interface FactoryGateOutcomes { scope: GateOutcome; symbols: GateOutcome; qa: GateOutcome; fullTest: GateOutcome; baseline: GateOutcome }
 
 const GATE_LABEL: Record<GateStatus, string> = { passed: "passou", failed: "FALHOU", not_run: "não executado/sem evidência" };
@@ -200,7 +200,7 @@ export async function describeFactoryGates(db: Db, childId: string, opts: { scop
       const note = foreign.size ? ` Lockfile(s) de outro gerenciador de pacotes EXCLUÍDO(S) da publicação: ${[...foreign].slice(0, 3).join(", ")}.` : "";
       if (outside.length) {
         const sample = outside.slice(0, 5).join(", ");
-        scope = { status: "failed", detail: `${outside.length} arquivo(s) no diff FORA do \`files_allowed\` do RFC (${sample}${outside.length > 5 ? ", …" : ""}).${note}${scope.status === "failed" ? ` ${scope.detail}.` : ""}` };
+        scope = { status: "failed", detail: `${outside.length} arquivo(s) no diff FORA do \`files_allowed\` do RFC (${sample}${outside.length > 5 ? ", …" : ""}).${note}${scope.status === "failed" ? ` ${scope.detail}.` : ""}`, files: outside.slice(0, 50) };
       } else if (scope.status === "failed") {
         scope = { status: "failed", detail: `${scope.detail}.${note}` };
       } else {
@@ -333,10 +333,17 @@ export async function recordScopeGate(db: Db, childId: string, extra: Record<str
   if (extra.evolution_origin !== "card") return null;
   try {
     const scopeGlobs = Array.isArray(extra.evolution_scope) ? (extra.evolution_scope as unknown[]).map(String) : undefined;
-    const { scope } = await describeFactoryGates(db, childId, { scope: scopeGlobs });
+    const gates = await describeFactoryGates(db, childId, { scope: scopeGlobs });
+    const { scope } = gates;
+    const at = new Date().toISOString();
+    const cut = (o: GateOutcome) => ({ status: o.status, detail: o.detail.slice(0, 600) });
     await db.query(
       "UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1",
-      [childId, JSON.stringify({ evolution_scope_gate: { status: scope.status, detail: scope.detail.slice(0, 600), at: new Date().toISOString() } })],
+      [childId, JSON.stringify({
+        evolution_scope_gate: { status: scope.status, detail: scope.detail.slice(0, 600), ...(scope.files?.length ? { files: scope.files } : {}), at },
+        // 4.5c: os 5 gates REAIS no aceite — o card deriva `factoryHealth` daqui (um filho aceito com gate FALHO não parece saudável).
+        evolution_factory_gates: { scope: cut(gates.scope), symbols: cut(gates.symbols), qa: cut(gates.qa), fullTest: cut(gates.fullTest), baseline: cut(gates.baseline), at },
+      })],
     );
     return scope;
   } catch { return null; }

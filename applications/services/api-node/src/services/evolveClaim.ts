@@ -88,6 +88,10 @@ export const evolveTestHooks: {
 const fault = (point: string) => evolveTestHooks.fault?.(point);
 
 class LeaseLost extends Error {}
+/** D-4 (4.5c): o repositório da linhagem existe mas o código-base não pôde ser buscado — falha RECUPERÁVEL (a repetição refaz o passo). */
+class CodeBaseFetchFailed extends Error {
+  constructor(public readonly cause2: string) { super(`código-base não obtido do repositório da linhagem: ${cause2}`); }
+}
 class TerminalFailure extends Error {
   constructor(public readonly code: string, message: string) { super(message); }
 }
@@ -717,7 +721,7 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
     // S1 — árvore de spec: copia os arquivos da versão corrente (upsert + arquivo temporário/rename)
     await runStep("spec_tree", (ctx) => stepSpecTree(pool, { childId, headId, version, requestText, ticket, ctx }));
     // S2 — código: clone do repo `dev` em evolution/vN (ou cópia do apps/ da versão corrente)
-    await runStep("code", (ctx) => stepCode(pool, { childId, headId, rootId, version, headProductId: head.product_id, log, ctx }));
+    await runStep("code", (ctx) => stepCode(pool, { childId, headId, rootId, version, headProductId: head.product_id, log, ctx, isCard: Boolean(cardDraftId) }));
     // S3 — request.md do ticket (+ anexos) na árvore da spec
     if (ticket) {
       await runStep("ticket", async () => {
@@ -751,11 +755,12 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
     // S5 — mensagem no diálogo do filho
     await runStep("dialogue", async () => {
       const src = String(steps.code?.source ?? "none");
+      const cardDiskCopy = Boolean(cardDraftId) && src === "disk-copy";
       const inherited = Number(steps.spec_tree?.files ?? 0);
       await pool.query(
         `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
          VALUES ($1, 'system', 'system', 'step', $2)`,
-        [childId, `🔄 Evolução v${version} criada a partir de "${head.title}". Código-base: ${src === "git-clone" ? `clone do repo (dev) em evolution/v${version}` : src === "disk-copy" ? "cópia do apps/ do pai (sem repo GitHub — Deadpool pode ter alterado)" : "NENHUM (apps/ vazio — verifique PROJECT_FILES_ROOT/repo)"}. Arquivos herdados: ${inherited}. Pedido${ticket ? ` ${ticketCode(ticket.number)}` : ""}: "${requestText}"`],
+        [childId, `${cardDiskCopy ? "⚠️ ALERTA — código-base copiado do DISCO (não do repositório). " : ""}🔄 Evolução v${version} criada a partir de "${head.title}". Código-base: ${src === "git-clone" ? `clone do repo (dev) em evolution/v${version}` : src === "disk-copy" ? (cardDiskCopy ? `cópia do apps/ do pai (${String(steps.code?.error ?? "sem detalhe")})` : "cópia do apps/ do pai (sem repo GitHub — Deadpool pode ter alterado)") : "NENHUM (apps/ vazio — verifique PROJECT_FILES_ROOT/repo)"}. Arquivos herdados: ${inherited}. Pedido${ticket ? ` ${ticketCode(ticket.number)}` : ""}: "${requestText}"`],
       );
       return { posted: true };
     });
@@ -766,6 +771,8 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
     const finalExtra: Json = {
       evolution_source: steps.code?.source ?? "none",
       evolution_source_error: steps.code?.error ?? null,
+      // D-4: filho de card que partiu do disco carrega o alerta (o card e o portal o mostram: `codeBaseWarning`).
+      ...(cardDraftId && steps.code?.source === "disk-copy" ? { evolution_code_base_warning: String(steps.code?.error ?? "código-base copiado do disco do pai") } : {}),
       evolution_inherited_files: inheritedFiles,
       evolution_inherited_spec: steps.spec_tree?.inherited_spec ?? [],
       ...(ticket ? { ticket_files: steps.ticket?.files ?? [], ticket_materialize_error: steps.ticket?.error ?? null } : {}),
@@ -820,6 +827,17 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
     if (e instanceof TerminalFailure) return failTerminal(pool, { childId, rootId, me, version, productId: childRow.product_id }, e);
     await releaseLease(pool, childId, me); // falha recuperável: libera para a repetição retomar já
     log.warn({ err: e, childId }, "[evolve] materialização interrompida — repetir a requisição retoma");
+    if (e instanceof CodeBaseFetchFailed) {
+      await pool.query(
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)`,
+        [childId, `⚠️ ALERTA — não foi possível buscar o código-base do repositório da linhagem (${e.cause2.slice(0, 300)}). A promoção NÃO copiou do disco (o disco do pai pode ter código não mergeado); repita a promoção.`],
+      ).catch(() => undefined);
+      return {
+        status: 500,
+        body: { code: "MATERIALIZATION_FAILED", reason: "CODE_BASE_FETCH_FAILED", cause: e.cause2.slice(0, 300), retryable: true, message: "Não foi possível buscar o código-base do repositório da linhagem; nada foi copiado do disco. Repita a requisição: ela retoma do ponto da falha.", childProjectId: childId },
+        headers: retry(5),
+      };
+    }
     return {
       status: 500,
       body: { code: "MATERIALIZATION_FAILED", message: "A materialização da evolução foi interrompida. Repita a requisição: ela retoma do ponto da falha.", childProjectId: childId },
@@ -1014,10 +1032,14 @@ function redactGit(msg: string | null | undefined): string {
 
 async function stepCode(
   pool: Pool,
-  a: { childId: string; headId: string; rootId: string; version: number; headProductId: string | null; log: EvolveLog; ctx: StepCtx },
+  a: { childId: string; headId: string; rootId: string; version: number; headProductId: string | null; log: EvolveLog; ctx: StepCtx; isCard?: boolean },
 ): Promise<Json> {
   let source: "git-clone" | "disk-copy" | "none" = "none";
   let error: string | null = null;
+  // D-4 (4.5c): filho de CARD nunca cai em silêncio para a cópia do disco quando o repositório da linhagem EXISTE — o disco do pai
+  // pode conter código aceito e NÃO mergeado. Só com permissão explícita (`EVOLVE_CARD_DISK_COPY=on`); sempre com alerta visível.
+  const cardDiskCopyAllowed = (process.env.EVOLVE_CARD_DISK_COPY ?? "").trim().toLowerCase() === "on";
+  let repoKnown = false;
   const { existsSync, mkdirSync, rmSync, readdirSync } = await import("fs");
   const { cp } = await import("fs/promises");
   const { join } = await import("path");
@@ -1037,6 +1059,10 @@ async function stepCode(
       [[a.rootId, a.headId], a.rootId],
     )).rows[0] as { repo_url: string; installation_id: number | null } | undefined;
     const fullName = repoRow?.repo_url ? repoRow.repo_url.replace(/^https?:\/\/github\.com\//, "").replace(/\.git$/, "") : null;
+    repoKnown = Boolean(fullName);
+    if (a.isCard && fullName && !repoRow?.installation_id && !cardDiskCopyAllowed) {
+      throw new CodeBaseFetchFailed(`o repositório ${fullName} existe, mas o tenant não tem instalação do GitHub App ativa para buscá-lo`);
+    }
     if (fullName && repoRow?.installation_id) {
       // Reexecutável: `git init` em repo existente, remote remove/add, fetch --depth=1 + checkout -B + reset --hard
       // origin/dev. O reset é seguro SÓ porque o filho está 'materializing' E (M-04) o lease foi reconfirmado agora.
@@ -1047,6 +1073,10 @@ async function stepCode(
         const br = await checkoutNewBranch(a.childId, `evolution/v${a.version}`);
         if (!br.ok) throw new Error(`branch local evolution/v${a.version} não criado: ${redactGit(br.error)}`);
         source = "git-clone";
+      } else if (a.isCard && !cardDiskCopyAllowed) {
+        // Card + repositório existente: QUALQUER falha (inclusive 401/403/404, que o GitHub devolve também por indisponibilidade
+        // transitória/propagação de token) falha a materialização — a repetição refaz o passo. Nada de disk-copy silencioso.
+        throw new CodeBaseFetchFailed(redactGit(link.error ?? "git-link falhou"));
       } else if (isPermanentGitError(link.error)) {
         error = redactGit(link.error ?? "git-link falhou"); // permanente: cai no fallback do disco, se houver
       } else {
@@ -1071,6 +1101,12 @@ async function stepCode(
         await cp(src, childApps, { recursive: true, filter: (s) => !/(^|\/)(node_modules|\.next|dist|__pycache__|\.venv|venv)(\/|$)/.test(s) });
         a.ctx.assertAlive();
         source = "disk-copy";
+        if (a.isCard) {
+          // Alerta SEMPRE que um filho de card parte do disco: guardado em `error` (vira `evolution_source_error` + diálogo + card).
+          error = (error ? error + "; " : "") + (repoKnown
+            ? "ATENÇÃO: o repositório da linhagem existe, mas o fetch falhou; copiado do disco do pai (EVOLVE_CARD_DISK_COPY=on) — o disco pode conter código aceito e NÃO mergeado"
+            : "linhagem sem repositório GitHub: código-base copiado do disco do pai");
+        }
         if (existsSync(join(childApps, ".git"))) {
           const br = await checkoutNewBranch(a.childId, `evolution/v${a.version}`);
           if (!br.ok) error = `branch local não criado (disk-copy): ${redactGit(br.error)}`;
