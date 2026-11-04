@@ -20,7 +20,7 @@ KINDS = ("evolution", "fix", "feature")
 
 
 def _extra(kind: str | None, number: int | None = 7, card: str | None = CARD_UUID) -> dict:
-    ex: dict = {"evolution": True}
+    ex: dict = {"evolution": True, "evolution_origin": "card", "card_draft_project_id": "draft"}
     if kind is not None:
         ex["ticket_kind"] = kind
     if number is not None:
@@ -167,7 +167,7 @@ def test_tasks_novas_carregam_card_id_e_herdadas_done_nao_sao_refeitas(tmp_path,
     assert store.rows["TSK-INH-V1-BE-001"] == {"status": "DONE", "requirements": "[HERDADA da v1 — TSK-BE-001] CRUD", "card_id": None, "origin_spec_file": None}
     sent = {t["task_id"]: t for p in store.posts for t in p["tasks"]}
     assert "TSK-INH-V1-BE-001" not in sent
-    assert "card_id" not in sent["TSK-FULL-TEST"]                 # só TSK-EVO-* recebe o vínculo
+    assert sent["TSK-FULL-TEST"]["card_id"] == CARD_UUID          # AH-A3: toda task não herdada recebe o vínculo
     # retomada (runner morto e reiniciado): idempotente, sem duplicar, card_id mantido
     assert runner._seed_tasks("filho", "backend", card_id=CARD_UUID, origin_spec_file="tickets/TK-0007/request.md")
     assert sorted(store.rows) == ["TSK-EVO-001", "TSK-EVO-002", "TSK-FULL-TEST", "TSK-INH-V1-BE-001"]
@@ -180,7 +180,7 @@ def test_sem_card_o_corpo_do_post_e_identico_ao_de_antes(tmp_path, monkeypatch):
     assert all("card_id" not in t and "origin_spec_file" not in t for t in store.posts[0]["tasks"])
 
 
-def test_link_so_toca_tsk_evo():
+def test_link_toca_toda_task_nao_herdada():
     out = runner._link_tasks_to_card(
         [{"task_id": "TSK-EVO-001"}, {"task_id": "TSK-INH-V2-EVO-001", "status": "DONE"}, {"task_id": "TSK-BE-003"}], CARD_UUID, "tickets/TK-0007/request.md")
-    assert [bool(t.get("card_id")) for t in out] == [True, False, False]
+    assert [bool(t.get("card_id")) for t in out] == [True, False, True]

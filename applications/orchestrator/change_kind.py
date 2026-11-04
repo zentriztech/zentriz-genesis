@@ -51,12 +51,21 @@ def ticket_code(number: Any) -> str | None:
     return f"TK-{n:04d}" if n > 0 else None
 
 
+def is_card_child(extra: dict | None) -> bool:
+    """True só se o filho foi criado pelo claim de promoção de CARD (`extra.evolution_origin == "card"`)."""
+    return isinstance(extra, dict) and extra.get("evolution_origin") == "card"
+
+
 def derive_change_context(extra: dict | None) -> dict:
     """De `projects.extra` do filho → {ticket_kind, spec_origin, card_id, origin_spec_file}.
 
-    Só há origem derivada quando há card (`ticket_id`/`ticket_number`): `card:TK-NNNN`. Projeto sem card ⇒ tudo None
+    Só há contexto quando o filho nasceu de um CARD: o claim de promoção grava `extra.evolution_origin == "card"` (e
+    `card_draft_project_id`); `/evolve` legado grava `ticket_id/number/kind` SEM esse marcador e não pode receber as regras
+    novas (flag `CARDS_BANCADA` desligada ⇒ prompt byte-idêntico ao pré-Fase 4). Projeto sem card ⇒ tudo None
     (a origem `initial` só é afirmada explicitamente por quem chama; ver `change_kind_instruction`)."""
     ex = extra if isinstance(extra, dict) else {}
+    if not is_card_child(ex):
+        return {"ticket_kind": None, "spec_origin": None, "card_id": None, "origin_spec_file": None}
     kind = normalize_kind(ex.get("ticket_kind"))
     code = ticket_code(ex.get("ticket_number"))
     tid = ex.get("ticket_id")

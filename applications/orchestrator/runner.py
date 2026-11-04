@@ -2661,6 +2661,9 @@ def call_qa(
             "SÓ é implementável alterando arquivos fora do escopo, reprove com o motivo `SCOPE_EXPANSION_REQUIRED` "
             "(o humano amplia o `## Impacto` do RFC)."
         )
+    # AH-M3: o QA recebe o tipo do card (Correção ⇒ FAIL_TO_PASS de reprodução) — só filho de card; {} caso contrário.
+    if pipeline_ctx is not None and hasattr(pipeline_ctx, "change_kind_inputs"):
+        inputs.update(pipeline_ctx.change_kind_inputs())
     # existing_artifacts serve como contexto de interfaces/tipos existentes.
     if task_delivered_files:
         inputs["task_files"] = [
@@ -4192,15 +4195,29 @@ def _apply_change_context(pipeline_ctx, extra: dict) -> dict:
     return cc
 
 
+def _card_link_args(pipeline_ctx) -> tuple[str | None, str | None]:
+    """Fase 4 (4.2): (card_id, origin_spec_file) do filho de card; (None, None) em projeto comum ou ticket legado."""
+    if pipeline_ctx is None:
+        return None, None
+    return getattr(pipeline_ctx, "card_id", None), getattr(pipeline_ctx, "origin_spec_file", None)
+
+
+def _may_consolidate_trivial(active_tasks: list[dict], card_id: str | None) -> bool:
+    """GAP-NEW-3: consolidar >3 tasks do PM em `TSK-TRIVIAL-001` CANCELA as originais. Filho de card nunca consolida
+    (AH-A3: não se descartam tasks ligadas ao card)."""
+    return not card_id and len(active_tasks) > 3
+
+
 def _link_tasks_to_card(tasks: list[dict], card_id: str | None, origin_spec_file: str | None) -> list[dict]:
-    """Fase 4 (4.2): só as tasks NOVAS `TSK-EVO-*` recebem `card_id`/`origin_spec_file` (o ID não muda). As herdadas
-    (`TSK-INH-*`, DONE) e as demais (FULL-TEST, DevOps…) ficam como estão. Sem card ⇒ lista inalterada."""
+    """Fase 4 (4.2/AH-A3): TODA task NÃO herdada de um filho de card recebe `card_id`/`origin_spec_file` (EVO, FULL-TEST,
+    DEVOPS, TRIVIAL e qualquer outro prefixo criado pelo PM; o ID não muda). As herdadas (`TSK-INH-*`, DONE) ficam como
+    estão. Sem card ⇒ lista inalterada."""
     if not card_id:
         return tasks
     out: list[dict] = []
     for t in tasks:
         tid = str(t.get("task_id") or t.get("taskId") or "")
-        if tid.startswith("TSK-EVO-"):
+        if tid and not tid.startswith("TSK-INH-"):
             t = {**t, "card_id": card_id, **({"origin_spec_file": origin_spec_file} if origin_spec_file else {})}
         out.append(t)
     return out
@@ -4208,7 +4225,6 @@ def _link_tasks_to_card(tasks: list[dict], card_id: str | None, origin_spec_file
 
 def _seed_tasks(project_id: str, pm_module: str = "web", card_id: str | None = None, origin_spec_file: str | None = None) -> bool:
     tasks = _parse_tasks_from_backlog(project_id, pm_module)
-    tasks = _link_tasks_to_card(tasks, card_id, origin_spec_file)
 
     # TaskState: preservar status de tasks já terminadas (idempotência entre restarts)
     try:
@@ -4251,6 +4267,7 @@ def _seed_tasks(project_id: str, pm_module: str = "web", card_id: str | None = N
             "requirements": "Validação E2E do produto entregue (Claude Code Agent).",
         })
 
+    tasks = _link_tasks_to_card(tasks, card_id, origin_spec_file)  # depois do FULL-TEST: também ele é do filho do card
     path = f"/api/projects/{project_id}/tasks"
     body = {"tasks": tasks}
     data, status = _api_post(path, body)
@@ -5201,7 +5218,7 @@ def _run_monitor_loop(
                             "depends_on_files": [],
                             "target_route": "infra",
                         }]
-                        _d, _s = _api_post(_devops_seed_path, {"tasks": _devops_task})
+                        _d, _s = _api_post(_devops_seed_path, {"tasks": _link_tasks_to_card(_devops_task, *_card_link_args(pipeline_ctx))})
                         if 200 <= _s < 300:
                             logger.info("[GAP-P5] TSK-DEVOPS-001 criada no portal.")
                     except Exception as _de:
@@ -5346,7 +5363,7 @@ def _run_monitor_loop(
                     # Seed task no portal
                     if project_id and _api_available():
                         try:
-                            _api_post(f"/api/projects/{project_id}/tasks", {"tasks": [{
+                            _api_post(f"/api/projects/{project_id}/tasks", {"tasks": _link_tasks_to_card([{
                                 "task_id":   "TSK-FULL-TEST",
                                 "taskId":    "TSK-FULL-TEST",
                                 "module":    "test",
@@ -5355,7 +5372,7 @@ def _run_monitor_loop(
                                 "status":    "ASSIGNED",
                                 "depends_on_files": [],
                                 "target_route": "/",
-                            }]})
+                            }], *_card_link_args(pipeline_ctx))})
                         except Exception: pass
 
                     # Gerar prompt para Claude Code Agent no disco do projeto (host path)
@@ -7008,7 +7025,7 @@ def main() -> int:
             # Seed a task trivial diretamente, sem _seed_tasks (que lê BACKLOG.md do disco)
             if project_id and _api_available():
                 _trivial_seed_path = f"/api/projects/{project_id}/tasks"
-                _trivial_seed_body = {"tasks": [_trivial_task]}
+                _trivial_seed_body = {"tasks": _link_tasks_to_card([_trivial_task], *_card_link_args(pipeline_ctx))}
                 _trivial_data, _trivial_status = _api_post(_trivial_seed_path, _trivial_seed_body)
                 if 200 <= _trivial_status < 300:
                     logger.info("[Trivial] Task TSK-TRIVIAL-001 criada via API.")
@@ -7399,7 +7416,10 @@ def main() -> int:
                 if _hint_after_pm == "trivial" and project_id and _api_available():
                     _all_pm_tasks = _get_tasks(project_id)
                     _active_pm_tasks = [t for t in _all_pm_tasks if t.get("status") not in ("DONE", "QA_PASS", "CANCELLED")]
-                    if len(_active_pm_tasks) > 3:
+                    if not _may_consolidate_trivial(_active_pm_tasks, _card_link_args(pipeline_ctx)[0]) and _active_pm_tasks:
+                        # AH-A3: filho de card — as tasks ligadas ao card nunca são descartadas pela consolidação.
+                        logger.info("[GAP-NEW-3] filho de card: consolidação em TSK-TRIVIAL-001 pulada (%d task(s) ligadas ao card).", len(_active_pm_tasks))
+                    elif _may_consolidate_trivial(_active_pm_tasks, _card_link_args(pipeline_ctx)[0]):
                         logger.info(
                             "[GAP-NEW-3] complexity_hint=trivial mas PM gerou %d tasks. Consolidando em 1 task.",
                             len(_active_pm_tasks),
@@ -7430,7 +7450,7 @@ def main() -> int:
                             "depends_on_files": [],
                             "target_route": "/",
                         }
-                        _api_post(f"/api/projects/{project_id}/tasks", {"tasks": [_consolidated_task]})
+                        _api_post(f"/api/projects/{project_id}/tasks", {"tasks": _link_tasks_to_card([_consolidated_task], *_card_link_args(pipeline_ctx))})
                         backlog_summary = f"[TRIVIAL CONSOLIDADO] 1 task — {len(_active_pm_tasks)} tasks do PM unificadas. {charter_summary[:300]}"
                 _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id, pipeline_ctx=pipeline_ctx, run_log=_run_log)
                 # Após o Monitor Loop, marcar projeto como completed se todas as tasks estiverem DONE.
