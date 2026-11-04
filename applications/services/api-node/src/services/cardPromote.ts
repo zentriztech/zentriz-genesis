@@ -208,9 +208,17 @@ async function childBudgetGate(pool: Pool, childProjectId: string): Promise<{ ok
 export async function syncCardsWithChildren(pool: Pool, opts: { limit?: number } = {}): Promise<number> {
   let n = 0;
   try {
+    // Só candidatos que PEDEM transição (um card saudável em `in_factory` não ocupa vaga): filho morto, filho parado pelo Guard,
+    // bloqueio de orçamento a liberar, ou `promoted` cujo filho já entrou na fábrica.
     const rows = (await pool.query(
-      `SELECT id FROM tickets WHERE card_state IN ('promoted','in_factory','blocked') AND child_project_id IS NOT NULL
-        ORDER BY updated_at ASC LIMIT $1`, [opts.limit ?? 200])).rows;
+      `SELECT t.id FROM tickets t JOIN projects p ON p.id = t.child_project_id
+        WHERE t.card_state IN ('promoted', 'in_factory', 'blocked')
+          AND ( (t.card_state IN ('promoted', 'in_factory') AND p.status IN ('failed', 'archived'))
+             OR (t.card_state IN ('promoted', 'in_factory') AND p.status = 'stopped' AND p.stopped_by = 'budget')
+             OR (t.card_state = 'blocked' AND t.blocked_reason LIKE 'budget:%')
+             OR (t.card_state = 'promoted' AND p.status <> ALL($2::text[])) )
+        ORDER BY t.updated_at ASC LIMIT $1`,
+      [opts.limit ?? 200, [...PRE_FACTORY_CHILD_STATUSES, "card_draft"]])).rows;
     for (const r of rows) {
       const res = await syncCardWithChild(pool, String(r.id)).catch(() => null);
       if (res && res.kind === "applied") n++;

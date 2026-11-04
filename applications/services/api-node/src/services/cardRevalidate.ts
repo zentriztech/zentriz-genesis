@@ -65,6 +65,12 @@ export function globMatches(glob: string, relPath: string): boolean {
   return rx.test(rel) || rx.test(`apps/${rel}`);
 }
 
+/** Globs que o gate de escopo do runner SEMPRE libera (testes, docs, CHANGELOG): não são código da árvore `apps/` e não entram na conferência. */
+export function isAlwaysAllowedGlob(glob: string): boolean {
+  const g = glob.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+  return /^(tests?|__tests__|docs)(\/|$)/i.test(g) || /^\*\*\/(tests?|__tests__)\//i.test(g) || /\.(test|spec)\.[a-z*]+$/i.test(g) || /\.md$/i.test(g);
+}
+
 export interface RepoTree { available: boolean; files: string[]; capped: boolean; root: string | null }
 
 /** Arquivos de `<PROJECT_FILES_ROOT>/[produto/]<projeto>/apps` (relativos a `apps/`). Sem clone/raiz ⇒ `available:false`. */
@@ -181,6 +187,7 @@ export function evaluateRevalidation(i: RevalidateInput): RevalidateOutcome {
   } else {
     for (const r of i.rfcs) {
       for (const g of r.filesAllowed) {
+        if (isAlwaysAllowedGlob(g)) continue;
         const matchedNow = i.treeNow.files.some((f) => globMatches(g, f));
         const matchedBefore = i.treeBefore?.available ? i.treeBefore.files.some((f) => globMatches(g, f)) : null;
         globs.push({ rfc: r.path, glob: g, matchedNow, matchedBefore });

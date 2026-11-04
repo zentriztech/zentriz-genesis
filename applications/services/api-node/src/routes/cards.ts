@@ -435,7 +435,16 @@ export async function cardRoutes(app: FastifyInstance) {
     // Antes de decidir, alinha o card ao estado real do filho (idempotente).
     await syncCardWithChild(pool, card.id).catch(() => undefined);
     const current = (await loadCard(pool, card.id)) ?? card;
-    if (current.card_state === "in_factory") return reply.send({ ok: true, replayed: true, card: await fresh(card.id) });
+    if (current.card_state === "in_factory") {
+      // O alinhamento acima pode ter acabado de liberar um bloqueio de orçamento (saldo voltou): o card volta a `in_factory`, mas o
+      // filho segue `stopped` (liberar a pausa não religa a execução) — a resposta diz como religá-lo.
+      const cs = current.child_project_id ? (await pool.query("SELECT status FROM projects WHERE id = $1", [current.child_project_id])).rows[0] as { status: string } | undefined : undefined;
+      const restart = cs?.status === "stopped" && !!current.child_project_id;
+      return reply.send({
+        ok: true, replayed: card.card_state !== "blocked", card: await fresh(card.id),
+        ...(restart ? { childRestartRequired: true, next: `POST /api/projects/${current.child_project_id}/run`, message: "O orçamento voltou, mas a execução continua parada: reinicie-a para a fábrica seguir." } : {}),
+      });
+    }
     const r = await resumeCard(pool, current, user);
     switch (r.kind) {
       case "resumed_in_factory":

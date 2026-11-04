@@ -71,6 +71,7 @@ export const CARD_ERRORS = {
   BUDGET_PAUSED: { http: 402, area: "orcamento", message: "O orçamento de IA está pausado. Aumente o orçamento para continuar." },
   BUDGET_INSUFFICIENT: { http: 402, area: "orcamento", message: "O saldo de IA não comporta a próxima atividade. Aumente o orçamento." },
   BUDGET_FREE_BELOW_MIN: { http: 402, area: "orcamento", message: "O saldo livre está abaixo do mínimo para abrir uma nova versão. Aumente o orçamento." },
+  CARD_CHILD_NOT_ACCEPTED: { http: 409, area: "estado", message: "A execução do card ainda não foi aceita." },
   CARD_BUDGET_BLOCKED: { http: 402, area: "orcamento", message: "O card está bloqueado por orçamento. Aumente o orçamento da versão e retome o card." },
   KILL_SWITCH: { http: 402, area: "orcamento", message: "O uso de IA está temporariamente suspenso pela plataforma." },
   GLOBAL_HOURLY_CAP: { http: 402, area: "orcamento", message: "O limite de uso de IA da plataforma foi atingido. Tente mais tarde." },
