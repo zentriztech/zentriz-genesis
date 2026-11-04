@@ -695,6 +695,8 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
     # Dev recebia `evolution_scope` sem a regra que explica que o gate descarta o que sai do escopo.
     for _instr_field, _instr_title in (
         ("evolution_scope_instruction", "Escopo desta evolução"),
+        # Fase 4 (4.1): tipo do card (Correção/Recurso novo/Evolução) e origem da spec (inicial × nova) — ACRESCENTA exigências.
+        ("change_kind_instruction", "Tipo do card e origem da spec"),
         ("task_scope_instruction", "Escopo desta validação"),
         ("evolution_qa_instruction", "Escopo da validação nesta evolução"),
         ("spec_scope_instruction", "Contra o que medir a entrega"),

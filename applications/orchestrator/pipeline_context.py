@@ -173,6 +173,12 @@ class PipelineContext:
         self.evolution_manifest_baseline: dict[str, str] = {}
         # Bloco 3 F2: projeto pai (baseline da reconciliação Connect = reconciliation.json do pai).
         self.evolution_parent_id: str | None = None
+        # Fase 4 (4.1/4.2): tipo do card (`extra.ticket_kind`), origem da spec (`initial` | `card:TK-NNNN`) e vínculo da
+        # run com o card (id do ticket + arquivo de spec de origem). Todos None = projeto comum (prompt inalterado).
+        self.ticket_kind: str | None = None
+        self.spec_origin: str | None = None
+        self.card_id: str | None = None
+        self.origin_spec_file: str | None = None
         # Bloco 4 M7 (Fase 0 — métricas de reescrita, gated por EVOLUTION_DEV_EDIT_METRICS): mede quanto
         # do que o Dev devolve numa evolução é IDÊNTICO ao arquivo já em disco (custo real do formato
         # `whole`). Acumulado por evolução e lido pelo painel (routes/evolutionPlan.ts → EvolutionPanel).
@@ -395,7 +401,13 @@ class PipelineContext:
             inputs["backlog_summary"] = backlog_summary[:self._CTX_CAP]
         if validate_backlog_only:
             inputs["validate_backlog_only"] = True
+        inputs.update(self.change_kind_inputs())
         return inputs
+
+    def change_kind_inputs(self) -> dict:
+        """Fase 4 (4.1): tipo do card + origem da spec (spec inicial × nova) para CTO/PM/Dev. {} sem tipo/origem."""
+        from orchestrator.change_kind import change_kind_inputs
+        return change_kind_inputs(self.ticket_kind, self.spec_origin)
 
     def build_inputs_for_engineer(self, cto_questionamentos: str | None = None) -> dict:
         inputs = {
@@ -452,13 +464,16 @@ class PipelineContext:
             inputs["connect_declaration"] = self.connect_declaration
         if self.evolution_scope:
             inputs["evolution_scope"] = list(self.evolution_scope)
+        inputs.update(self.change_kind_inputs())
         return inputs
 
     def evolution_scope_inputs(self, task_id: str | None = None) -> dict:
         """Evoluir E4: bloco de escopo p/ Dev/QA — globs permitidos + violações anteriores da task."""
+        kind_in = self.change_kind_inputs()
         if not self.evolution_scope:
-            return {}
+            return kind_in
         out: dict = {
+            **kind_in,
             "evolution_scope": list(self.evolution_scope),
             "evolution_scope_instruction": (
                 "ESTA É UMA EVOLUÇÃO. Só é permitido criar/alterar arquivos que casem com `evolution_scope` "
@@ -745,6 +760,10 @@ class PipelineContext:
             "evolution_baseline": self.evolution_baseline,
             "evolution_manifest_baseline": self.evolution_manifest_baseline,
             "evolution_parent_id": self.evolution_parent_id,
+            "ticket_kind": self.ticket_kind,
+            "spec_origin": self.spec_origin,
+            "card_id": self.card_id,
+            "origin_spec_file": self.origin_spec_file,
             "evolution_dev_rewrite_stats": self.evolution_dev_rewrite_stats,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -813,6 +832,10 @@ class PipelineContext:
         _mb = data.get("evolution_manifest_baseline")
         ctx.evolution_manifest_baseline = {str(k): str(v) for k, v in _mb.items()} if isinstance(_mb, dict) else {}
         ctx.evolution_parent_id = data.get("evolution_parent_id") or None
+        ctx.ticket_kind = data.get("ticket_kind") or None
+        ctx.spec_origin = data.get("spec_origin") or None
+        ctx.card_id = data.get("card_id") or None
+        ctx.origin_spec_file = data.get("origin_spec_file") or None
         _rw = data.get("evolution_dev_rewrite_stats")
         ctx.evolution_dev_rewrite_stats = _rw if isinstance(_rw, dict) else None
         logger.info("Checkpoint restaurado (LEI 11): step=%s, tasks=%s", ctx.current_step, len(ctx.completed_tasks))

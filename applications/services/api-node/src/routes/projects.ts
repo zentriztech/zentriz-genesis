@@ -35,6 +35,7 @@ import { maybeNotifyBlock, maybeNotifyDone, scheduleFactoryDone } from "../servi
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
 import { ticketTransitionsEnabled, recordTicketEvent } from "../services/ticketTransitions.js";
 import { loadTaskCardLinksIfEnabled } from "../services/taskCardLinks.js";
+import { flagEnabled, tenantOfProject } from "../services/featureFlags.js";
 import { evolutionPromoteEnabled } from "../services/evolutionPromote.js";
 import { resolveInboxProductId } from "../services/inbox.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
@@ -536,7 +537,7 @@ export async function projectRoutes(app: FastifyInstance) {
   // POST /api/projects/:id/tasks — seed ou upsert tarefas (runner / Monitor Loop)
   app.post<{
     Params: { id: string };
-    Body: { tasks: Array<{ task_id: string; module?: string; owner_role: string; requirements?: string; status?: string }> };
+    Body: { tasks: Array<{ task_id: string; module?: string; owner_role: string; requirements?: string; status?: string; card_id?: string; origin_spec_file?: string }> };
   }>("/api/projects/:id/tasks", async (request, reply) => {
     const user = getUser(request);
     const { id } = request.params;
@@ -548,8 +549,31 @@ export async function projectRoutes(app: FastifyInstance) {
     try {
       const allowed = await checkProjectAccess(client, id, user);
       if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      // Fase 4 (4.2): vínculo opcional task → card. O card só pode ser o ticket que originou ESTE projeto (extra.ticket_id) —
+      // evita ligar tasks a card de outro tenant/projeto. Sem card_id no corpo o comportamento é o de antes.
+      let projectTicketId: string | null | undefined;
+      let cardsOn: boolean | undefined;
+      const resolveTicketId = async (): Promise<string | null> => {
+        if (projectTicketId === undefined) {
+          const r = await client.query("SELECT extra->>'ticket_id' AS tid FROM projects WHERE id = $1", [id]);
+          projectTicketId = (r.rows[0]?.tid as string | null | undefined) ?? null;
+        }
+        return projectTicketId;
+      };
       const created: unknown[] = [];
       for (const t of tasks) {
+        const rawCard = (t as Record<string, unknown>).cardId ?? t.card_id ?? null;
+        const rawOrigin = (t as Record<string, unknown>).originSpecFile ?? t.origin_spec_file ?? null;
+        let cardId = typeof rawCard === "string" && rawCard !== "" ? rawCard : null;
+        let originSpecFile = typeof rawOrigin === "string" && rawOrigin !== "" ? rawOrigin.slice(0, 500) : null;
+        if (cardId || originSpecFile) {
+          // Flag CARDS_BANCADA desligada para o tenant ⇒ o vínculo é ignorado (estado do banco idêntico ao de antes).
+          if (cardsOn === undefined) cardsOn = await flagEnabled(client, "CARDS_BANCADA", await tenantOfProject(client, id));
+          if (!cardsOn) { cardId = null; originSpecFile = null; }
+        }
+        if (cardId && cardId !== (await resolveTicketId())) {
+          return reply.status(400).send({ code: "CARD_MISMATCH", message: "card_id da task não é o card que originou este projeto" });
+        }
         // Aceita snake_case (task_id, owner_role) e camelCase (taskId, ownerRole) — runner pode enviar qualquer um
         const taskId = (t as Record<string, unknown>).taskId as string ?? t.task_id ?? "";
         const module = (t as Record<string, unknown>).module as string ?? "backend";
@@ -557,12 +581,14 @@ export async function projectRoutes(app: FastifyInstance) {
         const requirements = t.requirements ?? null;
         const status = t.status ?? "ASSIGNED";
         await client.query(
-          `INSERT INTO project_tasks (project_id, task_id, module, owner_role, requirements, status)
-           VALUES ($1, $2, $3, $4, $5, $6)
+          `INSERT INTO project_tasks (project_id, task_id, module, owner_role, requirements, status, card_id, origin_spec_file)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT (project_id, task_id) DO UPDATE SET
              module = EXCLUDED.module,
              owner_role = EXCLUDED.owner_role,
              requirements = COALESCE(EXCLUDED.requirements, project_tasks.requirements),
+             card_id = COALESCE(EXCLUDED.card_id, project_tasks.card_id),
+             origin_spec_file = COALESCE(EXCLUDED.origin_spec_file, project_tasks.origin_spec_file),
              -- IDEMPOTENCY: preserve terminal statuses; reset IN_PROGRESS/WAITING_REVIEW to ASSIGNED on restart
              status = CASE
                WHEN project_tasks.status IN ('DONE','QA_PASS','QA_FAIL','BLOCKED') THEN project_tasks.status
@@ -570,7 +596,7 @@ export async function projectRoutes(app: FastifyInstance) {
                ELSE EXCLUDED.status
              END,
              updated_at = now()`,
-          [id, taskId, module, ownerRole, requirements, status]
+          [id, taskId, module, ownerRole, requirements, status, cardId, originSpecFile]
         );
         created.push({ taskId, module, ownerRole, status });
       }
