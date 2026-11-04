@@ -1399,7 +1399,7 @@ async function resolveProject(tenantId: string, prefix: string) {
 async function resolveProjectAny(tenantId: string, prefix: string) {
   const result = await pool.query(
     `SELECT id, title, status FROM projects
-     WHERE tenant_id = $1 AND id::text LIKE $2
+     WHERE tenant_id = $1 AND id::text LIKE $2 AND ${notHiddenProjectSql("")}
      ORDER BY updated_at DESC LIMIT 1`,
     [tenantId, `${prefix}%`]
   );

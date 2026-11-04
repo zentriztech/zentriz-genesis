@@ -14,8 +14,9 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { resolveScopedTenantId } from "../lib/tenantScope.js";
-import { FLAG_DEFS, FLAG_NAMES, isRolloutFlagKey } from "../services/featureFlags.js";
-import { runCardsFlagBackfill, startCardsBackfillJob, getCardsBackfillJob, listCardsBackfillJobs, type CardsBackfillOutcome } from "../services/cardsBackfill.js";
+import { FLAG_DEFS, FLAG_NAMES, isRolloutFlagKey, resolveFlag } from "../services/featureFlags.js";
+import { backfillCardState, backfillSpecOrigin, getCardsBackfillJob, listCardsBackfillJobs, type CardsBackfillOutcome } from "../services/cardsBackfill.js";
+import { findCardStatusDivergences, type CardDivergence } from "../services/cardState.js";
 import { MULTIPART_MAX_FILES, MULTIPART_MAX_FILE_BYTES, MULTIPART_MAX_TOTAL_BYTES } from "../services/ticketAttachments.js";
 
 function getUser(r: FastifyRequest): AuthUser {
@@ -62,23 +63,90 @@ const CONFIG_KEYS: Record<string, { label: string; group: string; unit: string; 
   }])),
 };
 
+type TxClient = { query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }>; release(): void };
+
+/** Máximo de divergências listadas no corpo do 409 `CARD_DIVERGENCE`. */
+const CARD_DIVERGENCE_LIST_LIMIT = 20;
+
+export type CardsFlagChange<R> =
+  | { kind: "ok"; result: R; cardsBackfill: CardsBackfillOutcome[] }
+  | { kind: "skipped"; result: R }
+  | { kind: "divergence"; divergences: Array<CardDivergence & { tenantId: string }> }
+  | { kind: "failed"; tenantId: string; error: string };
+
 /**
- * Fase 2 (2.5): ligar `CARDS_BANCADA` para um tenant (ou mudar o padrão global) dispara o backfill idempotente de
- * `card_state` e `spec_origin`. Só a chave CARDS_BANCADA; as demais não chamam nada. Falha do backfill não desfaz a gravação
- * da flag: volta no corpo da resposta (`cardsBackfill[].error`) e o backfill pode ser repetido (PUT idempotente).
+ * Fase 2 (2.5 + trava S-01 do lote B): TODA mudança de `CARDS_BANCADA` (PUT e DELETE) roda NUMA transação:
+ *   1) grava/remove a linha da flag (`mutate`);
+ *   2) para cada tenant em que a flag passa a valer ligada, roda o backfill idempotente (`card_state`, `spec_origin`) com o MESMO cliente
+ *      (a flag ainda não confirmada é visível a ele);
+ *   3) confere `findCardStatusDivergences` (card_state × status) dos tenants alvo — tenant explícito: sempre; padrão global: só os tenants
+ *      que passaram de desligado a ligado. Qualquer divergência ⇒ ROLLBACK de tudo (flag + backfill): o tenant fica exatamente como estava
+ *      e a resposta é 409 `CARD_DIVERGENCE` com as ocorrências. Falha do backfill também desfaz tudo (`failed`).
+ * Desligar a flag nunca é bloqueado. Outras chaves não passam por aqui.
+ * Serializado por `pg_advisory_xact_lock` para duas mudanças simultâneas da flag não se intercalarem.
  */
-async function cardsFlagBackfillFor(key: string, tenantId: string | null): Promise<CardsBackfillOutcome[] | undefined> {
-  if (key !== "CARDS_BANCADA") return undefined;
+export async function changeCardsFlag<R>(
+  tenantId: string | null,
+  mutate: (c: TxClient) => Promise<{ proceed: boolean; result: R }>,
+): Promise<CardsFlagChange<R>> {
+  const client = (await pool.connect()) as unknown as TxClient;
   try {
-    // S-11: padrão GLOBAL percorre todos os tenants ⇒ roda em segundo plano (job com relatório); por tenant segue síncrono (com statement_timeout)
-    if (tenantId === null) {
-      const job = startCardsBackfillJob(pool as unknown as Parameters<typeof startCardsBackfillJob>[0], null);
-      return [{ tenantId: "*", mode: "async", jobId: job.id, status: "started" }];
+    // Decisão de integração (lote A + lote B): a trava S-01 (backfill + conferência de divergências + ROLLBACK) exige a
+    // mesma transação, então o backfill roda aqui de forma síncrona, inclusive no padrão GLOBAL. O job assíncrono do
+    // lote A (S-11) segue disponível em `startCardsBackfillJob` para instalações com muitos tenants (ligar tenant a tenant).
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('CARDS_BANCADA'))");
+    const tenants: string[] = tenantId
+      ? [tenantId]
+      : (await client.query("SELECT id FROM tenants")).rows.map((r) => String(r.id));
+    const wasOn = new Map<string, boolean>();
+    for (const t of tenants) wasOn.set(t, (await resolveFlag(client, "CARDS_BANCADA", t)).value >= 1);
+    const m = await mutate(client);
+    if (!m.proceed) { await client.query("ROLLBACK"); return { kind: "skipped", result: m.result }; }
+    const outcomes: CardsBackfillOutcome[] = [];
+    const divergences: Array<CardDivergence & { tenantId: string }> = [];
+    for (const t of tenants) {
+      if ((await resolveFlag(client, "CARDS_BANCADA", t)).value < 1) continue;
+      try {
+        await client.query("SAVEPOINT cards_flag_tenant");
+        const cardState = await backfillCardState(client, t);
+        const specOrigin = await backfillSpecOrigin(client, t);
+        await client.query("RELEASE SAVEPOINT cards_flag_tenant");
+        outcomes.push({ tenantId: t, cardState, specOrigin });
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        return { kind: "failed", tenantId: t, error: e instanceof Error ? e.message : String(e) };
+      }
+      if (tenantId !== null || !wasOn.get(t)) {
+        for (const d of await findCardStatusDivergences(client, { tenantId: t, limit: CARD_DIVERGENCE_LIST_LIMIT })) divergences.push({ ...d, tenantId: t });
+      }
     }
-    return await runCardsFlagBackfill(pool as unknown as Parameters<typeof runCardsFlagBackfill>[0], tenantId);
+    if (divergences.length > 0) {
+      await client.query("ROLLBACK");
+      return { kind: "divergence", divergences: divergences.slice(0, CARD_DIVERGENCE_LIST_LIMIT) };
+    }
+    await client.query("COMMIT");
+    return { kind: "ok", result: m.result, cardsBackfill: outcomes };
   } catch (e) {
-    return [{ tenantId: tenantId ?? "*", error: e instanceof Error ? e.message : String(e) }];
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw e;
+  } finally {
+    client.release();
   }
+}
+
+function cardsRefusal(r: Extract<CardsFlagChange<unknown>, { kind: "divergence" | "failed" }>) {
+  if (r.kind === "divergence") {
+    return {
+      status: 409,
+      body: {
+        code: "CARD_DIVERGENCE",
+        message: "CARDS_BANCADA não foi alterada: há tickets com card_state diferente do status legado. Corrija as divergências e repita.",
+        divergences: r.divergences,
+      },
+    };
+  }
+  return { status: 500, body: { code: "CARDS_BACKFILL_FAILED", message: `CARDS_BANCADA não foi alterada: o backfill falhou (${r.error}).`, tenantId: r.tenantId } };
 }
 
 export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
@@ -214,15 +282,41 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(403).send({ code: "FORBIDDEN", message: "tenant_admin não pode alterar configuração global" });
       }
 
-      await pool.query(
-        `INSERT INTO genesis_runtime_config (key, value, tenant_id, updated_by, updated_at)
-         VALUES ($1, $2, $3, $4, NOW())
-         ON CONFLICT (key, tenant_id) DO UPDATE
-           SET value = $2, updated_by = $4, updated_at = NOW()`,
-        [key, String(numVal), targetTenantId, user.id]
-      );
-
-      const cardsBackfill = await cardsFlagBackfillFor(key, targetTenantId);
+      const upsert = async (db: { query: (sql: string, params?: unknown[]) => Promise<{ rowCount?: number | null }> }) => {
+        if (targetTenantId === null) {
+          // Linha GLOBAL: `UNIQUE (key, tenant_id)` não conflita com NULL, então ON CONFLICT duplicaria a linha a cada PUT (131_llm_guard…).
+          // Atualiza TODAS as linhas globais da chave (converge duplicatas antigas) e só insere se não houver nenhuma.
+          const up = await db.query(
+            `UPDATE genesis_runtime_config SET value = $2, updated_by = $3, updated_at = NOW() WHERE key = $1 AND tenant_id IS NULL`,
+            [key, String(numVal), user.id],
+          );
+          if ((up.rowCount ?? 0) > 0) return;
+          await db.query(
+            `INSERT INTO genesis_runtime_config (key, value, tenant_id, updated_by, updated_at) VALUES ($1, $2, NULL, $3, NOW())`,
+            [key, String(numVal), user.id],
+          );
+          return;
+        }
+        await db.query(
+          `INSERT INTO genesis_runtime_config (key, value, tenant_id, updated_by, updated_at)
+           VALUES ($1, $2, $3, $4, NOW())
+           ON CONFLICT (key, tenant_id) DO UPDATE
+             SET value = $2, updated_by = $4, updated_at = NOW()`,
+          [key, String(numVal), targetTenantId, user.id],
+        );
+      };
+      let cardsBackfill: CardsBackfillOutcome[] | undefined;
+      if (key === "CARDS_BANCADA") {
+        // Trava S-01: backfill + conferência de divergência na mesma transação da gravação (reverte se houver divergência).
+        const ch = await changeCardsFlag<null>(targetTenantId, async (c) => { await upsert(c); return { proceed: true, result: null }; });
+        if (ch.kind === "divergence" || ch.kind === "failed") {
+          const ref = cardsRefusal(ch);
+          return reply.status(ref.status).send(ref.body);
+        }
+        if (ch.kind === "ok") cardsBackfill = ch.cardsBackfill;
+      } else {
+        await upsert(pool);
+      }
       return reply.send({
         ok:       true,
         key,
@@ -261,16 +355,29 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(403).send({ code: "FORBIDDEN", message: "tenant_admin não pode remover configuração global" });
       }
 
-      const result = await pool.query(
+      const del = (db: { query: (sql: string, params?: unknown[]) => Promise<{ rowCount?: number | null }> }) => db.query(
         `DELETE FROM genesis_runtime_config WHERE key = $1 AND tenant_id IS NOT DISTINCT FROM $2`,
-        [key, targetTenantId]
+        [key, targetTenantId],
       );
-
-      if (result.rowCount === 0) {
-        return reply.status(404).send({ code: "NOT_FOUND", message: "Configuração não encontrada" });
+      let cardsBackfill: CardsBackfillOutcome[] | undefined;
+      if (key === "CARDS_BANCADA") {
+        // Remover o override também pode ligar a flag (volta ao global/env): mesma trava do PUT (S-01).
+        const ch = await changeCardsFlag<number>(targetTenantId, async (c) => {
+          const n = (await del(c)).rowCount ?? 0;
+          return { proceed: n > 0, result: n };
+        });
+        if (ch.kind === "skipped") return reply.status(404).send({ code: "NOT_FOUND", message: "Configuração não encontrada" });
+        if (ch.kind === "divergence" || ch.kind === "failed") {
+          const ref = cardsRefusal(ch);
+          return reply.status(ref.status).send(ref.body);
+        }
+        if (ch.kind === "ok") cardsBackfill = ch.cardsBackfill;
+      } else {
+        const result = await del(pool);
+        if (result.rowCount === 0) {
+          return reply.status(404).send({ code: "NOT_FOUND", message: "Configuração não encontrada" });
+        }
       }
-
-      const cardsBackfill = await cardsFlagBackfillFor(key, targetTenantId);
       return reply.send({ ok: true, key, restored: "global", ...(cardsBackfill ? { cardsBackfill } : {}) });
     }
   );

@@ -3,6 +3,7 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { resolveScopedTenantId } from "../lib/tenantScope.js";
 import { getValueReport } from "../services/valueEvents.js";
+import { notHiddenProjectSql } from "../services/projectStatus.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -120,7 +121,8 @@ export async function reportsRoutes(app: FastifyInstance) {
 
     const client = await pool.connect();
     try {
-      const where: string[] = [];
+      // Fase 2 (S-16): o rascunho de card (`card_draft`) não é projeto do produto — fica fora do relatório.
+      const where: string[] = [notHiddenProjectSql("p")];
       const params: unknown[] = [];
       let i = 1;
 

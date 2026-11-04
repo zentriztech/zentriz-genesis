@@ -17,6 +17,7 @@ import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { sha256Hex } from "../lib/specTreeHash.js";
+import { flagEnabled } from "../services/featureFlags.js";
 import { kickTicketConversions } from "../services/attachmentConversionQueue.js";
 import { deleteCard, legacyPatchCard, type CardRow } from "../services/cardService.js";
 import {
@@ -62,7 +63,23 @@ function safeFilename(name: string): string {
  */
 type TicketOut = TicketRow & { code: string; execution_status: string | null; execution_title: string | null; attachments_count: number };
 
+/** Colunas LEGADAS de `tickets` (contrato público anterior à Fase 2). Lista explícita: coluna nova NUNCA vaza por `SELECT *`/spread (S-05). */
+const TICKET_LEGACY_KEYS = [
+  "id", "tenant_id", "product_id", "project_id", "number", "title", "body", "change_kind", "status",
+  "child_project_id", "created_by", "promoted_at", "delivered_at", "extra", "created_at", "updated_at",
+] as const;
+/** Colunas do card (migration 148). Só aparecem na resposta de ticket que É card (card_state não nulo) de tenant com `CARDS_BANCADA` ligada. */
+const TICKET_CARD_KEYS = ["card_state", "blocked_reason", "origin", "external_ref", "draft_project_id", "card_contract_version"] as const;
+/** Lista explícita de colunas para `SELECT`/`RETURNING` desta rota (sem `*`). */
+const TICKET_COLUMNS_SQL = [...TICKET_LEGACY_KEYS, ...TICKET_CARD_KEYS].join(", ");
+
 async function hydrate(rows: TicketRow[]): Promise<TicketOut[]> {
+  const cardsOnByTenant = new Map<string, boolean>();
+  for (const r of rows) {
+    if (!(r as unknown as { card_state?: string | null }).card_state) continue;
+    const tid = r.tenant_id ?? "";
+    if (!cardsOnByTenant.has(tid)) cardsOnByTenant.set(tid, await flagEnabled(pool, "CARDS_BANCADA", r.tenant_id ?? null));
+  }
   const childIds = rows.map((r) => r.child_project_id).filter((v): v is string => !!v);
   const execByChild = new Map<string, { status: string; title: string }>();
   if (childIds.length > 0) {
@@ -79,8 +96,12 @@ async function hydrate(rows: TicketRow[]): Promise<TicketOut[]> {
   }
   return rows.map((r) => {
     const exec = r.child_project_id ? execByChild.get(r.child_project_id) : undefined;
+    const src = r as unknown as Record<string, unknown>;
+    const dto: Record<string, unknown> = {};
+    for (const k of TICKET_LEGACY_KEYS) dto[k] = src[k];
+    if (src.card_state && cardsOnByTenant.get(r.tenant_id ?? "")) for (const k of TICKET_CARD_KEYS) dto[k] = src[k];
     return {
-      ...r,
+      ...(dto as unknown as TicketRow),
       code: ticketCode(r.number),
       execution_status: exec?.status ?? null,
       execution_title: exec?.title ?? null,
@@ -199,7 +220,7 @@ export async function ticketRoutes(app: FastifyInstance) {
       const number = await allocTicketNumber(client, productId);
       const ins = await client.query(
         `INSERT INTO tickets (tenant_id, product_id, project_id, number, title, body, change_kind, status, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8) RETURNING *`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8) RETURNING ${TICKET_COLUMNS_SQL}`,
         [product.tenant_id, productId, projectId, number, title, body, changeKind, user.id],
       );
       const ticket = ins.rows[0] as TicketRow;
@@ -256,8 +277,8 @@ export async function ticketRoutes(app: FastifyInstance) {
       const status = (request.query?.status ?? "").trim();
       const rows = (await pool.query(
         status
-          ? "SELECT * FROM tickets WHERE product_id = $1 AND status = $2 ORDER BY number DESC"
-          : "SELECT * FROM tickets WHERE product_id = $1 ORDER BY number DESC",
+          ? `SELECT ${TICKET_COLUMNS_SQL} FROM tickets WHERE product_id = $1 AND status = $2 ORDER BY number DESC`
+          : `SELECT ${TICKET_COLUMNS_SQL} FROM tickets WHERE product_id = $1 ORDER BY number DESC`,
         status ? [productId, status] : [productId],
       )).rows as TicketRow[];
       return reply.send(await hydrate(rows));
@@ -362,7 +383,7 @@ export async function ticketRoutes(app: FastifyInstance) {
           if (same) {
             // Só edição de conteúdo (status já era o pedido): o CAS ancora no status lido.
             const upd = await client.query(
-              `UPDATE tickets SET ${patch.join(", ")}, updated_at = now() WHERE id = $1 AND status = $${vals.length + 1} RETURNING *`,
+              `UPDATE tickets SET ${patch.join(", ")}, updated_at = now() WHERE id = $1 AND status = $${vals.length + 1} RETURNING ${TICKET_COLUMNS_SQL}`,
               [...vals, from],
             );
             row = upd.rows[0] as TicketRow | undefined;
@@ -373,7 +394,7 @@ export async function ticketRoutes(app: FastifyInstance) {
               extraSet: [...patch, strictTo === "delivered" ? "delivered_at = now()" : "delivered_at = NULL"],
               extraVals,
             });
-            if (r.kind === "noop") row = (await client.query("SELECT * FROM tickets WHERE id = $1", [ticket.id])).rows[0] as TicketRow;
+            if (r.kind === "noop") row = (await client.query(`SELECT ${TICKET_COLUMNS_SQL} FROM tickets WHERE id = $1`, [ticket.id])).rows[0] as TicketRow;
             else if (r.kind === "applied") row = r.row as unknown as TicketRow;
             else {
               await client.query("ROLLBACK");
@@ -399,7 +420,7 @@ export async function ticketRoutes(app: FastifyInstance) {
       }
       if (patch.length === 0) return reply.status(400).send({ code: "BAD_REQUEST", message: "Nada a alterar." });
 
-      const upd = await pool.query(`UPDATE tickets SET ${patch.join(", ")}, updated_at = now() WHERE id = $1 RETURNING *`, vals);
+      const upd = await pool.query(`UPDATE tickets SET ${patch.join(", ")}, updated_at = now() WHERE id = $1 RETURNING ${TICKET_COLUMNS_SQL}`, vals);
       const [out] = await hydrate([upd.rows[0] as TicketRow]);
       return reply.send(out);
     },

@@ -16,7 +16,7 @@ vi.mock("../middleware/auth.js", () => authMock());
 
 import { runtimeConfigRoutes } from "../routes/runtimeConfig.js";
 import { projectRoutes } from "../routes/projects.js";
-import { backfillCardState, backfillSpecOrigin, runCardsFlagBackfill, awaitCardsBackfillJob, BACKFILL_DEFAULTS } from "./cardsBackfill.js";
+import { backfillCardState, backfillSpecOrigin, runCardsFlagBackfill, awaitCardsBackfillJob, BACKFILL_DEFAULTS, type CardsBackfillOutcome } from "./cardsBackfill.js";
 
 const ev = (tag: string, data: unknown) => console.log(`[F2-${tag}] EVIDÊNCIA ${JSON.stringify(data)}`);
 
@@ -224,21 +224,18 @@ describePg("Fase 2 / 2.5 — CARDS_BANCADA por tenant + backfill (Postgres real)
     try {
       const r = await put("CARDS_BANCADA", 1); // global
       expect(r.statusCode).toBe(200);
-      // S-11: o modo global NÃO roda dentro do PUT — responde na hora com o job, e o relatório vem por consulta
-      const started = r.json().cardsBackfill as Array<{ tenantId: string; mode?: string; jobId?: string; status?: string }>;
-      expect(started).toEqual([{ tenantId: "*", mode: "async", jobId: expect.any(String), status: "started" }]);
-      const job = (await awaitCardsBackfillJob(started[0].jobId!))!;
-      expect(job.status).toBe("done");
-      const bf = job.outcomes!;
+      // Integração lote A + lote B: o PUT global roda o backfill NA MESMA TRANSAÇÃO da trava S-01 (conferência de
+      // divergências + ROLLBACK), portanto responde com os resultados por tenant. O relatório assíncrono (job) continua
+      // existindo para instalações grandes (ligar tenant a tenant) e é coberto pelos testes de `startCardsBackfillJob`.
+      const bf = r.json().cardsBackfill as CardsBackfillOutcome[];
       expect(bf.map((x) => x.tenantId)).toContain(A.tenantId);
       expect(bf.map((x) => x.tenantId)).not.toContain(B.tenantId);
-      const rep = await app.inject({ method: "GET", url: `/api/admin/runtime-config/cards-backfill/${job.id}` });
-      expect(rep.statusCode).toBe(200);
-      expect(rep.json()).toMatchObject({ id: job.id, status: "done", tenantId: null });
-      expect((await app.inject({ method: "GET", url: "/api/admin/runtime-config/cards-backfill" })).json().jobs.length).toBeGreaterThan(0);
+      const jobs = await app.inject({ method: "GET", url: "/api/admin/runtime-config/cards-backfill" });
+      expect(jobs.statusCode).toBe(200);
+      expect(Array.isArray(jobs.json().jobs)).toBe(true);
       expect((await app.inject({ method: "GET", url: "/api/admin/runtime-config/cards-backfill/cbf_inexistente" })).statusCode).toBe(404);
       tenantAdmin();
-      expect((await app.inject({ method: "GET", url: `/api/admin/runtime-config/cards-backfill/${job.id}` })).statusCode).toBe(403);
+      expect((await app.inject({ method: "GET", url: "/api/admin/runtime-config/cards-backfill" })).statusCode).toBe(403);
       admin();
       for (const id of bTickets) expect((await cardRow(id)).card_state).toBeNull();
     } finally {
