@@ -86,6 +86,8 @@
 | [docs/backlogs/BACKLOG_WEB.md](backlogs/BACKLOG_WEB.md) | Backlog Web |
 | [docs/guides/PM_AUTOBACKLOG_GUIDE.md](guides/PM_AUTOBACKLOG_GUIDE.md) | Como PM gera backlog |
 | [docs/guides/CTO_AGENT_FLOW_ANALYSIS.md](guides/CTO_AGENT_FLOW_ANALYSIS.md) | Fluxo completo CTO: comunicação com IA, formato de retorno, gravação em disco |
+| [docs/guides/GUIA-CARDS-BANCADA.md](guides/GUIA-CARDS-BANCADA.md) | Guia do usuário: cards da Bancada (criar, maturar a spec, validar, promover, acompanhar, o que fazer quando bloqueia) |
+| [docs/runbooks/CARDS-BANCADA-RUNBOOK.md](runbooks/CARDS-BANCADA-RUNBOOK.md) | Runbook dos cards: promoção que falha, card bloqueado, PR pendente, reconciliador, rollback da flag, ordem de deploy |
 | [docs/DEVOPS_SELECTION.md](DEVOPS_SELECTION.md) | Regra de seleção DevOps |
 | [docs/TEAM_COMPOSITION.md](TEAM_COMPOSITION.md) | Squad por módulo |
 
@@ -96,7 +98,8 @@
 | Pasta | Conteúdo |
 |-------|----------|
 | [docs/plans/](plans/) | Planos (Pipeline V2, Engineer, E2E, Portal, Full Stack) |
-| [docs/guides/](guides/) | Guias (E2E, PM backlog, prompt execução) |
+| [docs/guides/](guides/) | Guias (E2E, PM backlog, prompt execução, cards da Bancada) |
+| [docs/runbooks/](runbooks/) | Runbooks operacionais (cards da Bancada) |
 | [docs/status/](status/) | Status, pendências, resumos de implementação |
 | [docs/backlogs/](backlogs/) | Backlogs Backend e Web |
 | [docs/analysis/](analysis/) | Análises e diagnósticos (E2E, LLM, de-para API) |
@@ -114,6 +117,8 @@
 | [docs/adr/](adr/) | Architecture Decision Records |
 | [docs/rfc/](rfc/) | Request for Comments |
 | [docs/rfc/RFC-0001-GRAPH-VIEW-EXECUTIVE_COMMAND_CENTER.md](rfc/RFC-0001-GRAPH-VIEW-EXECUTIVE_COMMAND_CENTER.md) | Proposta de Graph View executivo para squads, agentes, atividades e fluxos de conversa |
+| [docs/rfc/RFC-0009-EVOLUCAO-POR-TICKET.md](rfc/RFC-0009-EVOLUCAO-POR-TICKET.md) | Evolução por Ticket e, na seção final, evolução por cards da Bancada (Aceito/Implementado) |
+| [docs/plans/EVOLUIR-PROJETO-BANCADA-plano.md](plans/EVOLUIR-PROJETO-BANCADA-plano.md) | Plano "Evoluir projeto" na Bancada, com cards (fases 0'–6, decisões D-E1..D-E10) |
 
 ---
 

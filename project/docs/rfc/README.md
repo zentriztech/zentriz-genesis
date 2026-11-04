@@ -28,7 +28,7 @@ Cada RFC segue o template em [0000-template.md](0000-template.md).
 | [RFC-0007](RFC-0007-FABRICA-N-SQUADS-POR-PROJETO.md) | Fábrica: N squads por projeto | Rascunho |
 | [RFC-0008](RFC-0008-ADR-RFC-DONOS-E-HIERARQUIA-DE-PRODUTO.md) | ADR/RFC: donos, momento e hierarquia de produto | Rascunho |
 | [RFC-0008 emenda 01](RFC-0008-EMENDA-01-NORMALIZAR-ANTES-DE-PROMOVER.md) | Normalizar antes de promover | Implementado |
-| [RFC-0009](RFC-0009-EVOLUCAO-POR-TICKET.md) | Evolução por Ticket — identidade, anexo e fila do pedido | Rascunho |
+| [RFC-0009](RFC-0009-EVOLUCAO-POR-TICKET.md) | Evolução por Ticket — identidade, anexo e fila do pedido; evolução por cards da Bancada ([runbook](../runbooks/CARDS-BANCADA-RUNBOOK.md), [guia](../guides/GUIA-CARDS-BANCADA.md)) | Aceito/Implementado |
 
 ## Convenções
 
