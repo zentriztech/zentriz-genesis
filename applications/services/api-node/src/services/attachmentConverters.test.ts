@@ -1,6 +1,6 @@
 /**
  * Tarefa Q — conversão pdf/docx/doc → Markdown: fixtures REAIS geradas em memória (src/testing/attachmentFixtures.ts),
- * executadas na worker thread isolada (o mesmo caminho do produto). Sem Postgres, sem rede, sem LLM.
+ * executadas no processo filho isolado (o mesmo caminho do produto). Sem Postgres, sem rede, sem LLM.
  */
 import { describe, it, expect } from "vitest";
 import { createHash } from "crypto";
