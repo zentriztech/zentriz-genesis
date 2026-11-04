@@ -11,7 +11,7 @@
  */
 import type { PromotionVerdict } from "./factoryActions";
 
-export type JourneyStepKey = "normalize" | "validate" | "review" | "promote";
+export type JourneyStepKey = "normalize" | "rfc" | "validate" | "review" | "promote";
 export type JourneyStepState = "done" | "current" | "todo";
 
 /** O comando que destrava a etapa atual — cada tela o liga ao seu handler. */
@@ -38,16 +38,19 @@ export interface Journey {
 
 export const JOURNEY_LABEL: Record<JourneyStepKey, string> = {
   normalize: "Normalizar",
+  rfc: "RFC",
   validate: "Validar",
   review: "Revisar GAPs",
   promote: "Promover",
 };
 
 const ORDER: JourneyStepKey[] = ["normalize", "validate", "review", "promote"];
+/** Filho de EVOLUÇÃO: o RFC substitui o Normalizar (api: `evolution: true`, `EVOLUTION_PROMOTE_BANCADA=on`). */
+const ORDER_EVOLUTION: JourneyStepKey[] = ["rfc", "validate", "review", "promote"];
 
-function stepsAt(current: JourneyStepKey | "all_done"): JourneyStep[] {
-  const idx = current === "all_done" ? ORDER.length : ORDER.indexOf(current);
-  return ORDER.map((key, i) => ({
+function stepsAt(current: JourneyStepKey | "all_done", order: JourneyStepKey[] = ORDER): JourneyStep[] {
+  const idx = current === "all_done" ? order.length : order.indexOf(current);
+  return order.map((key, i) => ({
     key, label: JOURNEY_LABEL[key],
     state: i < idx ? "done" : i === idx ? "current" : "todo",
   }));
@@ -83,6 +86,8 @@ export function journeyFromVerdict(
     return { ...base, phase: "unknown", steps: stepsAt("normalize").map((s) => ({ ...s, state: "todo" })), current: null,
       action: null, actionLabel: null, headline: "Etapa não conferida pelo servidor", severity: "info" };
   }
+
+  if (promotion.evolution === true) return evolutionJourney(promotion, base);
 
   if (promotion.canPromote === true) {
     return { ...base, phase: "ready", steps: stepsAt("promote"), current: "promote", action: "promote",
@@ -131,5 +136,47 @@ export function journeyFromVerdict(
     default:
       return { ...base, phase: "blocked", steps: stepsAt("normalize"), current: null, action: null, actionLabel: null,
         headline: detail ?? "Promoção bloqueada", severity: "info" };
+  }
+}
+
+/**
+ * Jornada do filho de EVOLUÇÃO: RFC → Validar → Revisar GAPs → Promover (sem Normalizar). Só traduz o veredito do servidor;
+ * motivo desconhecido cai no texto dele, sem inventar etapa.
+ */
+function evolutionJourney(
+  promotion: PromotionVerdict,
+  base: { blockingProjectId: string | null; blockingProjectTitle: string | null; detail: string | null },
+): Journey {
+  const at = (k: JourneyStepKey | "all_done") => stepsAt(k, ORDER_EVOLUTION);
+  if (promotion.canPromote === true) {
+    return { ...base, phase: "ready", steps: at("promote"), current: "promote", action: "promote",
+      actionLabel: JOURNEY_LABEL.promote, headline: "Evolução pronta para promover à fábrica", severity: "success" };
+  }
+  if (promotion.canPromote === null) {
+    return { ...base, phase: "unknown", steps: at("rfc").map((s) => ({ ...s, state: "todo" as const })), current: null, action: null,
+      actionLabel: null, headline: "Etapa não conferida pelo servidor", severity: "info" };
+  }
+  switch (promotion.reason) {
+    case "NOT_ON_WORKBENCH":
+      return { ...base, phase: "in_factory", steps: at("all_done"), current: null, action: null, actionLabel: null,
+        headline: "Já está na fábrica", severity: "success" };
+    case "EVOLUTION_RFC":
+      return { ...base, phase: "blocked", steps: at("rfc"), current: "rfc", action: null, actionLabel: null,
+        headline: promotion.code === "EVOLUTION_RFC_INVALID" ? "RFC da evolução incompleto" : "Falta o RFC da evolução", severity: "warning" };
+    case "CONNECT_MISSING":
+      return { ...base, phase: "blocked", steps: at("validate"), current: "validate", action: null, actionLabel: null,
+        headline: promotion.code === "CONNECT_DECLARATION_INCOMPLETE" ? "connect.yaml incompleto" : "Falta o connect.yaml", severity: "warning" };
+    case "BUDGET_BLOCKED":
+      return { ...base, phase: "blocked", steps: at("promote"), current: null, action: null, actionLabel: null,
+        headline: "Orçamento do projeto impede a promoção", severity: "error" };
+    case "NOT_VALIDATED": {
+      const asProduct = journeyFromVerdict({ ...promotion, evolution: false }, null);
+      // Mesmos motivos/ações da validação, mas com as etapas da evolução (sem Normalizar).
+      const current = asProduct.current === "normalize" ? "validate" : asProduct.current;
+      return { ...asProduct, steps: current ? at(current) : at("validate"), current };
+    }
+    default:
+      return { ...base, phase: "blocked", steps: at("rfc"), current: null, action: null, actionLabel: null,
+        headline: base.detail ?? "Promoção bloqueada", severity: "info" };
   }
 }

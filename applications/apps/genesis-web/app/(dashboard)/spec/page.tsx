@@ -3525,7 +3525,9 @@ export default function SpecPage() {
         const fresh = await reloadProducts();
         owner = fresh?.find((p) => p.id === ownerId);
       }
-      const promoteWholeProduct = !!ownerId && owner !== undefined && owner.is_inbox !== true;
+      // Filho de EVOLUÇÃO (veredito `evolution`): promove ESTE projeto — nunca o produto inteiro (o produto de um serviço aceito não está
+      // em `draft` e o RFC substitui a normalização). Veredito sem o campo (flag off) ⇒ caminho histórico.
+      const promoteWholeProduct = !!ownerId && owner !== undefined && owner.is_inbox !== true && promotion?.evolution !== true;
 
       if (promoteWholeProduct && ownerId) {
         const res = await apiPost<{
@@ -3561,7 +3563,7 @@ export default function SpecPage() {
     } finally {
       setApproving(null);
     }
-  }, [editProjectId, specMarkdown, products, router, persistSpecMarkdown, reloadProducts]);
+  }, [editProjectId, specMarkdown, products, router, persistSpecMarkdown, reloadProducts, promotion]);
 
   /** GAPs abertos → confirmação N2 (digitada). Sem GAPs, o texto do diálogo é apenas informativo. */
   const promoteNeedsWord = (gapCount ?? 0) > 0;

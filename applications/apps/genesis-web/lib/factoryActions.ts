@@ -95,6 +95,11 @@ export interface PromotionVerdict {
   /** Spec que travou a prontidão (no produto, a primeira que falhou) — leva o usuário direto a ela. */
   blockingProjectId?: string | null;
   blockingProjectTitle?: string | null;
+  /**
+   * `true` quando o veredito é de FILHO DE EVOLUÇÃO (api, `EVOLUTION_PROMOTE_BANCADA=on`): o RFC substitui o Normalizar e há dois motivos
+   * novos — `EVOLUTION_RFC` (RFC ausente/inválido) e `BUDGET_BLOCKED` (orçamento do dono). Ausente no veredito histórico.
+   */
+  evolution?: boolean;
 }
 
 /** Ordem que o servidor exige para liberar o Promover (`PROMOTION_STEPS` da api). */
@@ -112,6 +117,8 @@ export interface ConnectEnsure {
  */
 export function promoteNextAction(p: PromotionVerdict | null | undefined): "normalize" | "validate" | "gaps" | null {
   if (!p || p.canPromote !== false) return null;
+  // Evolução: Normalizar não se aplica (o RFC é o documento de decisão) — só a validação tem ação própria.
+  if (p.evolution === true && p.reason !== "NOT_VALIDATED") return null;
   if (p.reason === "NOT_NORMALIZED" || p.reason === "CONNECT_MISSING") return "normalize";
   if (p.reason === "NOT_VALIDATED") {
     // O servidor emite `SPEC_VALIDATION_BLOCKED` (não `BLOCKED`): com o nome errado, um GAP crítico
