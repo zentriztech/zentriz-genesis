@@ -8,7 +8,8 @@
  *   1. `genesis_runtime_config` com `tenant_id = <tenant do recurso>`  — decisão EXPLÍCITA do tenant (só zentriz_admin grava);
  *   2. `genesis_runtime_config` com `tenant_id IS NULL`                 — padrão GLOBAL da plataforma, em configuração;
  *   3. variável de ambiente (`EVOLVE_CLAIM=on` etc.)                    — DEFAULT de plataforma (compose/boot), só vale quando
- *                                                                          nenhuma linha de config existe para a chave;
+ *                                                                          nenhuma linha de config existe para a chave
+ *                                                                          (EXCETO flags `configOnly`, como CARDS_BANCADA: o env é ignorado — S-06);
  *   4. nada / valor inválido / erro de banco                            — `off` (fail-safe).
  * Uma linha de config com valor inválido é IGNORADA (com aviso) e a resolução segue para o nível seguinte.
  *
@@ -21,7 +22,11 @@
 import type { RuntimeConfigDb } from "./runtimeTunables.js";
 
 export type FlagKind = "bool" | "tri";
-export interface FlagDef { key: string; kind: FlagKind; label: string }
+export interface FlagDef {
+  key: string; kind: FlagKind; label: string;
+  /** `true` = a flag só vale por CONFIGURAÇÃO (`genesis_runtime_config`); o ambiente (compose/boot) é IGNORADO (S-06). */
+  configOnly?: boolean;
+}
 
 export const FLAG_DEFS = {
   EVOLVE_CLAIM: { key: "EVOLVE_CLAIM", kind: "bool", label: "Evoluir: claim transacional do /evolve" },
@@ -32,7 +37,8 @@ export const FLAG_DEFS = {
   ATTACHMENT_CONVERSION: { key: "ATTACHMENT_CONVERSION", kind: "bool", label: "Anexos do card: conversão automática pdf/doc/docx para .md (exige ATTACHMENTS_STRICT)" },
   EVOLVE_RECONCILER: { key: "EVOLVE_RECONCILER", kind: "tri", label: "Reconciliador do /evolve (0=off, 1=shadow, 2=on)" },
   // Fase 2 (2.5): portas de entrada dos cards na Bancada. Ligar para o tenant dispara o backfill de card_state (services/cardsBackfill.ts).
-  CARDS_BANCADA: { key: "CARDS_BANCADA", kind: "bool", label: "Bancada: cards (máquina de estados, rascunho de card)" },
+  // S-06: configOnly — ligar por env valeria para todo tenant SEM backfill (só o PUT/DELETE o dispara) e deixaria tickets `card_state NULL`.
+  CARDS_BANCADA: { key: "CARDS_BANCADA", kind: "bool", label: "Bancada: cards (máquina de estados, rascunho de card)", configOnly: true },
 } as const satisfies Record<string, FlagDef>;
 
 export type FlagName = keyof typeof FLAG_DEFS;
@@ -97,6 +103,10 @@ export async function resolveFlag(
     }
   } catch (e) {
     console.warn(`[FeatureFlags] ${def.key} não lida (${e instanceof Error ? e.message : String(e)}) — fail-safe off`);
+    return { value: 0, source: "default" };
+  }
+  if ((def as FlagDef).configOnly) {
+    if (parseEnvFlag(envRaw, def.kind)) console.warn(`[FeatureFlags] ${def.key}=${JSON.stringify(envRaw)} no ambiente é IGNORADO: esta flag só vale por configuração (PUT /api/admin/runtime-config/${def.key}), que dispara o backfill`);
     return { value: 0, source: "default" };
   }
   const env = parseEnvFlag(envRaw, def.kind);

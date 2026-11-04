@@ -81,4 +81,15 @@ describe("resolveFlag — precedência", () => {
     expect(isRolloutFlagKey("AGENT_TIMEOUT_PM")).toBe(false);
     expect(isRolloutFlagKey("toString")).toBe(false);
   });
+
+  it("S-06: CARDS_BANCADA é configOnly — o ambiente (envRaw='1') é IGNORADO; só a configuração liga", async () => {
+    expect(await resolveFlag(fakeDb([]), "CARDS_BANCADA", "A", "1")).toEqual({ value: 0, source: "default" });
+    expect(await resolveFlag(fakeDb([]), "CARDS_BANCADA", "A", "on")).toEqual({ value: 0, source: "default" });
+    expect(await flagEnabled(fakeDb([]), "CARDS_BANCADA", "A", "1")).toBe(false);
+    // a configuração continua valendo (tenant e global)
+    expect(await resolveFlag(fakeDb([{ key: "CARDS_BANCADA", tenant_id: "A", value: "1" }]), "CARDS_BANCADA", "A", "0")).toEqual({ value: 1, source: "tenant" });
+    expect(await resolveFlag(fakeDb([{ key: "CARDS_BANCADA", tenant_id: null, value: "1" }]), "CARDS_BANCADA", "A")).toEqual({ value: 1, source: "global" });
+    // as demais flags seguem aceitando o env como default de plataforma
+    expect(await resolveFlag(fakeDb([]), "EVOLVE_CLAIM", "A", "1")).toEqual({ value: 1, source: "env" });
+  });
 });
