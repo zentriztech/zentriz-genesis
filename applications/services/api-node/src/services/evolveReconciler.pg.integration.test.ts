@@ -114,7 +114,7 @@ describePg("Fase 1' / 1.8 — reconciliador do /evolve (banco descartável)", ()
     expect(reconcilerMode({ EVOLVE_RECONCILER: "1" } as never)).toBe("off");
     expect(reconcilerMode({ EVOLVE_RECONCILER: "shadow" } as never)).toBe("shadow");
     expect(reconcilerMode({ EVOLVE_RECONCILER: " ON " } as never)).toBe("on");
-    expect(resolveReconcilerParams({})).toEqual({ claimGraceS: 300, stuckHours: 72, orphanGraceS: 300 });
+    expect(resolveReconcilerParams({})).toEqual({ claimGraceS: 300, stuckHours: 72, orphanGraceS: 300, publishGraceS: 900 });
   });
 
   it("off: nada roda nem é escrito nas tabelas do /evolve (pool que explode ao ser tocado cai no default `off`) e o worker agenda o timer (M-03: o modo vem da config a cada passada)", async () => {

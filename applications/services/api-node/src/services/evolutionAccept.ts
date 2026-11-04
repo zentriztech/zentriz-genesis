@@ -281,7 +281,7 @@ export async function runEvolutionAcceptFlow(db: Db, childId: string, opts: { re
   if (!pushOk) {
     await db.query(
       "UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1",
-      [childId, JSON.stringify({ evolution_push_pending: true, evolution_version: version })],
+      [childId, JSON.stringify({ evolution_push_pending: true, evolution_publish_state: "failed", evolution_version: version })],
     ).catch(() => {});
     return true;
   }
@@ -292,6 +292,11 @@ export async function runEvolutionAcceptFlow(db: Db, childId: string, opts: { re
       [childId, JSON.stringify({ evolution_push_pending: false, evolution_republished_at: new Date().toISOString() })],
     ).catch(() => {});
   }
+  // B1: publicação concluída (PR registrado acima, quando houve) — o marcador `pending` do aceite cai AQUI, não antes.
+  await db.query(
+    "UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || '{\"evolution_publish_state\":\"done\"}'::jsonb, updated_at = now() WHERE id = $1",
+    [childId],
+  ).catch(() => {});
 
   try {
     const superseded = await supersedeParent(db, childId, parentId, version);

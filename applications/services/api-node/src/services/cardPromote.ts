@@ -17,7 +17,7 @@ import type { AuthUser } from "../middleware/auth.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { resolveLineageRoot, resolveLineageHead } from "./lineage.js";
 import { runEvolveWithClaim, type EvolveLog, type EvolveResult } from "./evolveClaim.js";
-import { transitionCard, type CardState, type CardTransitionResult } from "./cardState.js";
+import { transitionCard, isSupersededChild, type CardState, type CardTransitionResult } from "./cardState.js";
 import { loadCard, specHashOf, type CardRow, type CardReadySnapshot } from "./cardService.js";
 import { PRE_FACTORY_CHILD_STATUSES } from "./cardsBackfill.js";
 
@@ -162,11 +162,13 @@ export const isBudgetBlockReason = (r: string | null | undefined): boolean => ty
  */
 export async function syncCardWithChild(pool: Pool, ticketId: string): Promise<CardTransitionResult | null> {
   const t = (await pool.query(
-    `SELECT t.card_state, t.blocked_reason, t.child_project_id, p.status AS child_status, p.stopped_by AS child_stopped_by
+    `SELECT t.card_state, t.blocked_reason, t.child_project_id, p.status AS child_status, p.stopped_by AS child_stopped_by, p.extra AS child_extra
        FROM tickets t LEFT JOIN projects p ON p.id = t.child_project_id
       WHERE t.id = $1 AND t.card_state IS NOT NULL`, [ticketId])).rows[0] as
-    { card_state: CardState; blocked_reason: string | null; child_project_id: string | null; child_status: string | null; child_stopped_by: string | null } | undefined;
+    { card_state: CardState; blocked_reason: string | null; child_project_id: string | null; child_status: string | null; child_stopped_by: string | null; child_extra: Record<string, unknown> | null } | undefined;
   if (!t || !t.child_status) return null;
+  // A1: filho arquivado por supersessão foi ACEITO — não bloqueia o card; a entrega (merge do PR) o leva a `delivered`.
+  if (isSupersededChild(t.child_status, t.child_extra)) return null;
   if (DEAD_CHILD.has(t.child_status)) {
     if (t.card_state === "promoted" || t.card_state === "in_factory") {
       return transitionCard(pool, { ticketId, to: "blocked", actorKind: "system", reason: `child_${t.child_status}`, dedupeKey: `child_${t.child_status}` });
@@ -219,7 +221,7 @@ export async function syncCardsWithChildren(pool: Pool, opts: { limit?: number }
     const rows = (await pool.query(
       `SELECT t.id FROM tickets t JOIN projects p ON p.id = t.child_project_id
         WHERE t.card_state IN ('promoted', 'in_factory', 'blocked')
-          AND ( (t.card_state IN ('promoted', 'in_factory') AND p.status IN ('failed', 'archived'))
+          AND ( (t.card_state IN ('promoted', 'in_factory') AND p.status IN ('failed', 'archived') AND COALESCE(p.extra->>'superseded_by', '') = '')
              OR (t.card_state IN ('promoted', 'in_factory') AND p.status = 'stopped' AND p.stopped_by = 'budget')
              OR (t.card_state = 'blocked' AND t.blocked_reason LIKE 'budget:%')
              OR (t.card_state = 'promoted' AND p.status <> ALL($2::text[])) )
