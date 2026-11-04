@@ -352,17 +352,55 @@ files_allowed:
     expect(res.warnings.some((w) => /Compatibilidade efetiva/.test(w) && /MAJOR/.test(w))).toBe(true);
   });
 
-  it("🔴 (c) um RFC vizinho MENOR não transforma o default silencioso 'minor' em compat DECLARADA", async () => {
+  it("🔴 (c) um RFC vizinho MENOR não rebaixa a compat do plano; D-6: o planner DECLARA a compat no RFC (o gate a lê)", async () => {
     const p = await mkProject("gap60-implicito", [{ path: "docs/rfc/RFC-0001-ajuste.md", content: rfcBody("PATCH") }]);
     const ctx = await buildEvolutionPlanContext(p.db as never, "gap60-implicito");
-    // Sem `compat` no JSON e sem seção Compatibilidade no RFC → o "minor" é default do código.
+    // Sem `compat` no JSON e sem seção Compatibilidade no RFC: o default "minor" do código passa a ser ESCRITO no RFC.
     const res = await applyEvolutionPlan(p.db as never, ctx, parseEvolutionPlan(JSON.stringify({
       summary: "plano", rfcs: [{ slug: "sem-compat", title: "Sem compat", content: rfcBody(null) }], changelog: { added: ["x"] },
     })));
     expect(res.compat).toBe("minor");
     const patch = extraPatch(p.updates);
     expect(patch.evolution_compat).toBe("minor");
-    expect(patch.evolution_compat_explicit).toBe(false);     // PATCH < MINOR ⇒ o que vale não foi declarado
+    expect(patch.evolution_compat_explicit).toBe(true);      // D-6: antes false (o RFC não trazia a seção) ⇒ merge pedia confirmação
+  });
+
+  it("🔴 D-6: RFC sem `## Compatibilidade` sai do planner COM a seção, no formato que o gate lê", async () => {
+    const p = await mkProject("d6-section", []);
+    const ctx = await buildEvolutionPlanContext(p.db as never, "d6-section");
+    const res = await applyEvolutionPlan(p.db as never, ctx, planJson({ compat: "patch", rfcs: [{ slug: "sem-secao", title: "Sem seção", content: rfcBody(null) }] }));
+    const rel = res.written.find((w) => w.path.startsWith("docs/rfc"))!.path;
+    const onDisk = await fs.readFile(path.join(p.dir, rel), "utf-8");
+    expect(onDisk).toMatch(/## Compatibilidade\n\n- Tipo \(SemVer\): PATCH/);
+    const { parseRfcMarkdown } = await import("./evolutionGate.js");
+    expect(parseRfcMarkdown(rel, onDisk).compat).toBe("patch");   // ANTES: null ⇒ gate.compat:null
+    expect(extraPatch(p.updates).evolution_compat_explicit).toBe(true);
+  });
+
+  it("D-6: ensureCompatSection não rebaixa nem duplica; completa seção sem tipo reconhecido", () => {
+    const { ensureCompatSection } = mod;
+    const withMajor = "# R\n\n## Compatibilidade\n- breaking: true\n";
+    expect(ensureCompatSection(withMajor, "patch")).toBe(withMajor);                    // declarado ⇒ intocado
+    const vague = "# R\n\n## Compatibilidade\nNada a declarar.\n\n## Impacto\nx\n";
+    const fixed = ensureCompatSection(vague, "minor");
+    expect(fixed).toMatch(/## Compatibilidade\n\n- Tipo \(SemVer\): MINOR/);
+    expect((fixed.match(/## Compatibilidade/g) ?? []).length).toBe(1);
+    expect(ensureCompatSection("# R\n\n## Sumário\nx\n", "major")).toMatch(/\n## Compatibilidade\n\n- Tipo \(SemVer\): MAJOR\n$/);
+  });
+
+  it("🔴 D-6: card de CORREÇÃO sem compat declarada vira PATCH (nunca o 'minor' que o gate de tipo recusa)", async () => {
+    const { withKindDefaultCompat } = mod;
+    const p = await mkProject("d6-fix", []);
+    const base = await buildEvolutionPlanContext(p.db as never, "d6-fix");
+    const ctx = { ...base, card: { ticketId: "t1", code: "TK-0001", scopeInstruction: "x", kind: "fix" } };
+    const semCompat = parseEvolutionPlan(JSON.stringify({ summary: "plano", rfcs: [{ slug: "corrige", title: "Corrige", content: rfcBody(null) }] }));
+    expect(withKindDefaultCompat(semCompat, "fix").compat).toBe("patch");
+    expect(withKindDefaultCompat(semCompat, "feature").compat).toBe("minor");
+    // declarada pelo arquiteto: respeitada (o gate de tipo é quem recusa MINOR em Correção — nada é afrouxado)
+    expect(withKindDefaultCompat(planJson({ compat: "minor" }), "fix").compat).toBe("minor");
+    const prompt = String(buildEvolutionPlanRequest(ctx as never).user_message);
+    expect(prompt).toMatch(/CORREÇÃO: a compatibilidade deve ser PATCH/);
+    expect(prompt).toMatch(/seção `## Compatibilidade`/);
   });
 });
 

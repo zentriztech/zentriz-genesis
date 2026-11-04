@@ -489,6 +489,65 @@ export async function advisorSpentUsd(db: Queryable, ownerId: string): Promise<n
   return num(r.rows[0]?.s);
 }
 
+// ── D-9 (AR): Advisor em `shadow` e divergência de LLM_ROLES_MODE entre API e runner ──────────────────────────────
+// Em `shadow` (e `on`) o Advisor É chamado e COBRADO: só o modo `off` o desliga. Quando a API roda `on` e o runner `shadow` (ou o
+// inverso), a premissa "Advisor desligado" não vale e nada avisava. O chamador (runner/agents) informa o PRÓPRIO modo no corpo das
+// rotas internas (`rolesMode`, aditivo/opcional); o Guard guarda o último valor visto por modo e expõe a divergência no GET de
+// settings. A divergência é registrada como evento `roles_mode_divergence` na transição (uma vez por par api/runner).
+const callerRolesModes = new Map<string, number>();
+let lastDivergenceKey = "";
+
+/** Registra o modo informado por um chamador interno. Valor ausente/inválido é ignorado (compatível com chamadores antigos). */
+export async function noteCallerRolesMode(db: Queryable, raw: unknown, projectId: string | null): Promise<void> {
+  const v = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (v !== "off" && v !== "shadow" && v !== "on") return;
+  callerRolesModes.set(v, Date.now());
+  const api = llmRolesMode();
+  if (v === api) return;
+  const key = `${api}|${v}`;
+  if (key === lastDivergenceKey) return;
+  lastDivergenceKey = key;
+  console.warn(`[llmGuard] LLM_ROLES_MODE divergente: API=${api}, chamador=${v}. Advisor só está desligado com off nos DOIS lados.`);
+  await logEvent(db, "roles_mode_divergence", projectId, { apiRolesMode: api, callerRolesMode: v, message: "LLM_ROLES_MODE difere entre a API e o runner/agents: em shadow o Advisor também consome orçamento." });
+}
+
+export interface AdvisorStatus {
+  apiRolesMode: string;
+  /** Modos informados por chamadores nas últimas 24 h (vazio = nenhum chamador informou — chamadores antigos). */
+  callerRolesModes: string[];
+  divergent: boolean;
+  advisorPolicyGlobal: boolean;
+  spend24hUsd: number;
+  calls24h: number;
+  warnings: string[];
+}
+
+/** Estado do Advisor para o GET de settings: modo, divergência, gasto real (ledger) e avisos em português. */
+export async function advisorStatus(db: Queryable): Promise<AdvisorStatus> {
+  const api = llmRolesMode();
+  const cutoff = Date.now() - 24 * 3600_000;
+  const callers = [...callerRolesModes.entries()].filter(([, at]) => at >= cutoff).map(([m]) => m).sort();
+  const divergent = callers.some((m) => m !== api);
+  const r = (await db.query(
+    `SELECT COALESCE(SUM(cost_usd), 0) AS s, COUNT(*) AS n FROM llm_call_ledger
+      WHERE created_at > now() - interval '24 hours' AND COALESCE(effective_role, llm_role) = 'advisor'`,
+  )).rows[0] ?? {};
+  const spend = num(r.s), calls = num(r.n);
+  let policy = false;
+  try { policy = !!(await getEffectivePolicy(db, "advisor_pct", null)); } catch { /* sem política legível: tratado como ausente */ }
+  const warnings: string[] = [];
+  if (api !== "off") warnings.push(`LLM_ROLES_MODE=${api} nesta API: o Advisor NÃO está desligado (em shadow ele também é chamado e cobrado). Para desligar, use off na API e no runner.`);
+  if (divergent) warnings.push(`LLM_ROLES_MODE diverge entre a API (${api}) e o chamador (${callers.join(", ")}): alinhe os dois lados.`);
+  if (spend > 0 && !policy) warnings.push(`O Advisor gastou US$ ${spend.toFixed(2)} em ${calls} chamada(s) nas últimas 24 h e não há política advisor_pct: o Guard não limita esse gasto (defina advisor_pct ou ADVISOR_LEGACY_CAP_USD).`);
+  return { apiRolesMode: api, callerRolesModes: callers, divergent, advisorPolicyGlobal: policy, spend24hUsd: spend, calls24h: calls, warnings };
+}
+
+/** Teto opcional (ADVISOR_LEGACY_CAP_USD, padrão desligado) para o modo `legacy` — sem política o Guard não limitava nada. */
+function advisorLegacyCapUsd(): number {
+  const v = Number((process.env.ADVISOR_LEGACY_CAP_USD ?? "").trim());
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+
 /**
  * C4' — o Guard decide se UMA escalada ao Advisor pode sair (desenho 27 §3.2 passo 2). Soberano e fail-closed PARA O ADVISOR:
  *   teto = `advisor_pct` % × `budget_usd` do projeto-dono (limitado por `abs_cap_usd`); gasto = ledger `llm_role='advisor'`
@@ -533,7 +592,20 @@ export async function advisorGate(
     }
     // Sem política (mas com orçamento) o Guard não impõe teto de Advisor — comportamento anterior à C4': o chamador usa o
     // fallback em env (`ADVISOR_MAX_USD_PER_RUN`, em memória). Explícito: `mode:"legacy"`.
-    if (!p) return { allow: true, mode: "legacy" };
+    if (!p) {
+      // D-9: teto opt-in (env) por projeto-dono, contado no ledger; sem a env o comportamento é o de sempre.
+      const legacyCap = advisorLegacyCapUsd();
+      if (legacyCap > 0) {
+        const spentLegacy = await advisorSpentUsd(db, owner.ownerId);
+        const need = Math.max(0, num(input.projectedUsd)) + Math.max(0, num(input.inflightUsd));
+        if (spentLegacy + need > legacyCap + 1e-9) {
+          return await deny("advisor_cap_reached",
+            `Teto legado do Advisor atingido: US$ ${spentLegacy.toFixed(4)} gastos + US$ ${need.toFixed(4)} previstos > US$ ${legacyCap} (ADVISOR_LEGACY_CAP_USD).`,
+            { ...detailBase, reason: "legacy_cap_reached", baseUsd: owner.budgetUsd, capUsd: legacyCap, spentUsd: spentLegacy });
+        }
+      }
+      return { allow: true, mode: "legacy" };
+    }
     if (llmRolesMode() === "off") {
       return await deny("advisor_denied_no_base", "Há política do Advisor, mas o registro de papéis está desligado nesta API (LLM_ROLES_MODE=off): o gasto do Advisor não seria contabilizado ⇒ Advisor negado.",
         { ...detailBase, reason: "roles_off", baseUsd: owner.budgetUsd });

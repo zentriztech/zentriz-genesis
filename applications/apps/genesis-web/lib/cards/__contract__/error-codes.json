@@ -14,6 +14,11 @@
     "area": "geral",
     "message": "Esta ação não é permitida para a sua conta."
   },
+  "UNAUTHORIZED": {
+    "http": 401,
+    "area": "geral",
+    "message": "Sua sessão não identifica um usuário. Entre de novo para criar ou alterar cards."
+  },
   "INVALID_ID": {
     "http": 400,
     "area": "geral",

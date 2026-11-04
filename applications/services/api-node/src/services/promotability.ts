@@ -329,7 +329,23 @@ async function safeProjectNormalized(
 
 export type EvolutionReadiness =
   | { ok: true }
-  | { ok: false; reason: "EVOLUTION_RFC" | "CONNECT_MISSING" | "NOT_VALIDATED" | "BUDGET_BLOCKED"; code: string; message: string; projectId: string };
+  | { ok: false; reason: "EVOLUTION_RFC" | "CONNECT_MISSING" | "NOT_VALIDATED" | "BUDGET_BLOCKED"; code: string; message: string; projectId: string;
+      /** D-7 (AR): ação da API/UI que destrava a recusa (hoje só `CONNECT_MISSING`: gerar o connect.yaml no filho). */
+      action?: { method: "POST"; path: string; label: string } };
+
+/**
+ * D-7 (AR): o filho de evolução herda a árvore da versão corrente; se ela nunca teve `connect.yaml` (produto gerado antes do
+ * gate Connect), não há o que herdar. O gate NÃO é afrouxado: a recusa passa a dizer a causa e a ação exata, em vez de um
+ * 409 sem contexto da jornada do card.
+ */
+export function connectMissingForEvolution(projectId: string, message: string): { message: string; action: { method: "POST"; path: string; label: string } } {
+  const path = `/api/projects/${projectId}/connect-declaration`;
+  return {
+    message: `${message} Esta evolução herda a árvore da versão corrente, que não traz um connect.yaml válido (passo da jornada do card, antes de promover o filho): `
+      + `gere-o neste filho — botão "Gerar connect.yaml" ou POST ${path} — e promova de novo. As evoluções seguintes herdam o arquivo.`,
+    action: { method: "POST", path, label: "Gerar connect.yaml" },
+  };
+}
 
 /**
  * Prontidão do filho de evolução, na ORDEM do que o usuário destrava: RFC → connect.yaml/validação → orçamento.
@@ -344,7 +360,10 @@ export async function assessEvolutionReadiness(
   const gate = await evaluateEvolutionGate(db as never, projectId, extra ?? null, { readOnly: opts.readOnly });
   if (!gate.ok) return { ok: false, reason: "EVOLUTION_RFC", code: gate.code, message: gate.message, projectId };
   const ready = await assessProjectReadiness(db, projectId);
-  if (!ready.ok) return { ok: false, reason: ready.reason, code: ready.code, message: ready.message, projectId };
+  if (!ready.ok) {
+    if (ready.reason === "CONNECT_MISSING") return { ok: false, reason: ready.reason, code: ready.code, projectId, ...connectMissingForEvolution(projectId, ready.message) };
+    return { ok: false, reason: ready.reason, code: ready.code, message: ready.message, projectId };
+  }
   const budget = await checkProjectBudgetGate(db as never, projectId);
   if (!budget.ok) return { ok: false, reason: "BUDGET_BLOCKED", code: budget.code, message: budget.message, projectId };
   return { ok: true };

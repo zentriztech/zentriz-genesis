@@ -73,7 +73,7 @@ export interface EvolutionPlanContext {
    * Fase 3 (3.3): o alvo é o RASCUNHO de um card (`card_draft`). A spec vigente vem da versão CORRENTE (somente leitura), o pedido é o
    * texto do card, e o planner grava SÓ `docs/rfc/**` e `docs/adr/**` do rascunho (nada de CHANGELOG nem connect.yaml). Ausente ⇒ fluxo de sempre.
    */
-  card?: { ticketId: string; code: string; scopeInstruction: string } | null;
+  card?: { ticketId: string; code: string; scopeInstruction: string; /** Tipo do card (change_kind); `fix` ⇒ compat ≤ patch. */ kind?: string | null } | null;
 }
 
 async function readCapped(p: string, cap: number): Promise<string> {
@@ -130,7 +130,7 @@ export async function buildEvolutionPlanContext(db: Db, childId: string, request
   // Fase 3 (3.3): rascunho de card — o pedido é o texto do card (ticket ligado ao rascunho).
   const cardInfo = row.status === "card_draft" ? await loadCardDraftInfo(db as never, childId, row.status) : null;
   const cardTicket = cardInfo?.ticketId
-    ? (await db.query("SELECT title, body FROM tickets WHERE id = $1", [cardInfo.ticketId])).rows[0] as { title?: string; body?: string } | undefined
+    ? (await db.query("SELECT title, body, change_kind FROM tickets WHERE id = $1", [cardInfo.ticketId])).rows[0] as { title?: string; body?: string; change_kind?: string } | undefined
     : undefined;
   const request = (requestOverride ?? "").trim()
     || (cardTicket ? `${cardTicket.title ?? ""}\n\n${cardTicket.body ?? ""}`.trim() : "")
@@ -214,7 +214,7 @@ export async function buildEvolutionPlanContext(db: Db, childId: string, request
 
   return {
     childId, parentId, productId: row.product_id, title: row.title, request, specMarkdown, charter, repoMap, connectYaml, existingRfcs, existingAdrs, existingChangelog, nextRfcSeq, nextAdrSeq, extra,
-    ...(cardInfo?.ticketId && cardInfo.code ? { card: { ticketId: cardInfo.ticketId, code: cardInfo.code, scopeInstruction: cardScopeInstruction(cardInfo.code) } } : {}),
+    ...(cardInfo?.ticketId && cardInfo.code ? { card: { ticketId: cardInfo.ticketId, code: cardInfo.code, scopeInstruction: cardScopeInstruction(cardInfo.code), kind: cardTicket?.change_kind ?? null } } : {}),
   };
 }
 
@@ -235,7 +235,10 @@ export function buildEvolutionPlanRequest(ctx: EvolutionPlanContext): Record<str
   ];
   if (ctx.card) {
     parts.push("", "--- ESCOPO DO CARD ---", ctx.card.scopeInstruction,
-      "Devolva SÓ `rfcs` (e `adrs`, se houver decisão): `changelog` e `connect_yaml` NÃO são gravados no rascunho do card.", "--- FIM DO ESCOPO ---");
+      "Devolva SÓ `rfcs` (e `adrs`, se houver decisão): `changelog` e `connect_yaml` NÃO são gravados no rascunho do card.",
+      "Todo RFC DEVE ter a seção `## Compatibilidade` com `- Tipo (SemVer): PATCH|MINOR|MAJOR` (o gate lê esta linha)."
+        + (ctx.card.kind === "fix" ? " Este card é uma CORREÇÃO: a compatibilidade deve ser PATCH (nunca MINOR/MAJOR)." : ""),
+      "--- FIM DO ESCOPO ---");
   }
   if (ctx.charter) parts.push("", "--- CHARTER DO CTO (arquitetura vigente; respeite) ---", ctx.charter, "--- FIM DO CHARTER ---");
   if (ctx.repoMap) parts.push("", "--- MAPA DO REPOSITÓRIO (apps/ — use estes caminhos REAIS no `files_allowed`) ---", ctx.repoMap, "--- FIM DO MAPA ---");
@@ -504,7 +507,29 @@ async function upsertCardAware(db: Db, ctx: EvolutionPlanContext, relPath: strin
   }
 }
 
+/**
+ * D-6 (AR): o gate de promoção/merge lê a compatibilidade da seção `## Compatibilidade` do RFC (não do campo JSON do
+ * plano). Se o arquiteto não escreveu a seção (ou ela não traz patch/minor/major), o planner a declara aqui com o
+ * valor do plano — sem isso `/ready` devolvia `gate.compat:null` e o merge pedia `blocked_compat_implicit`.
+ * Nunca rebaixa: uma seção que já declara um tipo reconhecido é mantida como está.
+ */
+export function ensureCompatSection(content: string, compat: Compat): string {
+  if (parseRfcMarkdown("RFC-0000-x.md", content).compat !== null) return content;
+  const line = `- Tipo (SemVer): ${compat.toUpperCase()}`;
+  const lines = content.split("\n");
+  const h = lines.findIndex((l) => /^#{1,3}\s/.test(l) && /(compatibilidade|compatibility)/i.test(l));
+  if (h >= 0) { lines.splice(h + 1, 0, "", line); return lines.join("\n"); }
+  return `${content.trimEnd()}\n\n## Compatibilidade\n\n${line}\n`;
+}
+
+/** Tipo do card sem compat declarada pelo arquiteto: Correção ⇒ patch (o gate de tipo recusa > patch); demais tipos mantêm o default. */
+export function withKindDefaultCompat(plan: EvolutionPlan, kind: string | null | undefined): EvolutionPlan {
+  return !plan.compatExplicit && kind === "fix" ? { ...plan, compat: "patch" } : plan;
+}
+
 export async function applyEvolutionPlan(db: Db, ctx: EvolutionPlanContext, plan: EvolutionPlan): Promise<ApplyResult> {
+  // Tipo do card sem compat declarada: Correção ⇒ patch (o gate de tipo recusa > patch); demais ⇒ minor.
+  plan = withKindDefaultCompat(plan, ctx.card?.kind);
   const written: ApplyResult["written"] = [];
   const rfcProblems: ApplyResult["rfcProblems"] = [];
   const warnings: string[] = [];
@@ -530,7 +555,7 @@ export async function applyEvolutionPlan(db: Db, ctx: EvolutionPlanContext, plan
     const relPath = `${RFC_DIR}/${filename}`;
     // Título numerado no topo (o modelo não numera); preserva o resto do conteúdo.
     const body = d.content.replace(/^#\s+[^\n]*\n?/, "").trimStart();
-    const content = `# RFC-${num} — ${d.title}\n\n> Compatibilidade declarada pelo arquiteto: **${plan.compat.toUpperCase()}** · gerado pela Bancada (Evoluir) — revise antes de promover.\n\n${body}\n`;
+    const content = ensureCompatSection(`# RFC-${num} — ${d.title}\n\n> Compatibilidade declarada pelo arquiteto: **${plan.compat.toUpperCase()}** · gerado pela Bancada (Evoluir) — revise antes de promover.\n\n${body}\n`, plan.compat);
     const parsed = parseRfcMarkdown(relPath, content);
     if (parsed.problems.length) rfcProblems.push({ path: relPath, problems: parsed.problems });
     written.push({ path: relPath, action: await upsertCardAware(db, ctx, relPath, content, warnings) });

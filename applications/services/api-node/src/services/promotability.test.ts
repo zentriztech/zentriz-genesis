@@ -28,7 +28,12 @@ vi.mock("./specValidation.js", () => ({
   specValidationGateEnabled: gateOnMock,
 }));
 
+vi.mock("./evolutionGate.js", async (o) => ({ ...(await o<typeof import("./evolutionGate.js")>()), evaluateEvolutionGate: async () => ({ ok: true }) }));
+vi.mock("./llmGuard.js", async (o) => ({ ...(await o<typeof import("./llmGuard.js")>()), checkProjectBudgetGate: async () => ({ ok: true }) }));
+
 import {
+  assessEvolutionReadiness,
+  connectMissingForEvolution,
   decidePromotability,
   decideSpecPromotability,
   evaluateProductPromotability,
@@ -258,5 +263,33 @@ describe("prontidão (achado do Jean 2026-10-16, VNX Judge) — normalizado NÃO
     expect(v.reason).toBe("NOT_VALIDATED");
     // A tela leva direto à spec que travou (16/10): id + título no veredito, não só no texto.
     expect(v).toMatchObject({ code: "SPEC_VALIDATION_BLOCKED", blockingProjectId: "b", blockingProjectTitle: "Judge Worker" });
+  });
+});
+
+
+describe("D-7 (AR) — filho de evolução sem connect.yaml: causa e ação explícitas, gate intacto", () => {
+  const CHILD = "77777777-7777-4777-8777-777777777777";
+  beforeEach(() => { gateOnMock.mockReturnValue(true); assessMock.mockReset(); });
+
+  it("sem connect.yaml: continua RECUSANDO (CONNECT_MISSING), agora com mensagem da jornada e ação POST connect-declaration", async () => {
+    assessMock.mockResolvedValue(assessment([]));
+    const r = await assessEvolutionReadiness(DB, CHILD);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe("CONNECT_MISSING");
+    expect(r.code).toBe("CONNECT_DECLARATION_MISSING");
+    expect(r.message).toMatch(/herda a árvore da versão corrente/);
+    expect(r.action).toEqual({ method: "POST", path: `/api/projects/${CHILD}/connect-declaration`, label: "Gerar connect.yaml" });
+  });
+
+  it("com connect.yaml válido herdado: libera (sem ação)", async () => {
+    assessMock.mockResolvedValue(assessment([connectFile(CONNECT_OK)]));
+    expect(await assessEvolutionReadiness(DB, CHILD)).toEqual({ ok: true });
+  });
+
+  it("connectMissingForEvolution preserva a mensagem original e aponta o endpoint do filho", () => {
+    const x = connectMissingForEvolution(CHILD, "Falta X.");
+    expect(x.message.startsWith("Falta X.")).toBe(true);
+    expect(x.message).toContain(`POST /api/projects/${CHILD}/connect-declaration`);
   });
 });

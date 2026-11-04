@@ -21,6 +21,7 @@ import { resolveLineageRoot } from "./lineage.js";
 import { projectRootCandidates } from "./connectManifestsDisk.js";
 import { sha256Hex } from "../lib/specTreeHash.js";
 import { ticketStamp, TICKET_KIND_LABEL } from "./tickets.js";
+import { readEvolutionCheckpoint } from "./evolutionState.js";
 
 type Db = Pick<Pool, "query">;
 export type Compat = "patch" | "minor" | "major";
@@ -151,6 +152,61 @@ export async function findLineageRepo(db: Db, childId: string, parentId: string 
   return null;
 }
 
+export type GateStatus = "passed" | "failed" | "not_run";
+export interface GateOutcome { status: GateStatus; detail: string }
+export interface FactoryGateOutcomes { scope: GateOutcome; symbols: GateOutcome; qa: GateOutcome }
+
+const GATE_LABEL: Record<GateStatus, string> = { passed: "passou", failed: "FALHOU", not_run: "não executado/sem evidência" };
+
+/**
+ * D-13 (AR): resultado REAL de cada gate da fábrica, lido do que ficou registrado — nunca presumido.
+ *  · escopo (RFC `files_allowed`) e símbolos preservados: `evolution_violations` do checkpoint do runner (mensagens "FORA DO ESCOPO" /
+ *    "SÍMBOLOS REMOVIDOS"); sem checkpoint ⇒ `not_run` (não há evidência de que rodaram). Cobrem as escritas do Dev.
+ *  · QA: o diálogo do projeto (`qa.review` = o QA rodou; "QA reportou QA_FAIL … não aprovada"/"QA atingiu máximo" = reprovado).
+ * Falha de leitura de qualquer fonte ⇒ `not_run` com o motivo. O texto do PR só afirma "passou" com evidência.
+ */
+export async function describeFactoryGates(db: Db, childId: string): Promise<FactoryGateOutcomes> {
+  const none = (detail: string): GateOutcome => ({ status: "not_run", detail });
+  let scope = none("checkpoint do runner indisponível"), symbols = scope;
+  try {
+    const cp = await readEvolutionCheckpoint(childId);
+    const v = cp?.evolution_violations;
+    if (cp && v && typeof v === "object") {
+      const msgs = Object.values(v as Record<string, unknown>).flatMap((x) => (Array.isArray(x) ? x.map(String) : []));
+      const sc = msgs.filter((m) => /FORA DO ESCOPO/i.test(m)), sy = msgs.filter((m) => /S[ÍI]MBOLOS REMOVIDOS/i.test(m));
+      scope = sc.length ? { status: "failed", detail: `${sc.length} violação(ões) registrada(s) (ex.: ${sc[0].slice(0, 120)})` } : { status: "passed", detail: "nenhuma violação registrada nas escritas do Dev" };
+      symbols = sy.length ? { status: "failed", detail: `${sy.length} remoção(ões) de símbolos registrada(s) (ex.: ${sy[0].slice(0, 120)})` } : { status: "passed", detail: "nenhuma remoção registrada nas escritas do Dev" };
+    }
+  } catch { /* mantém not_run */ }
+  let qa = none("sem registro do QA no diálogo do projeto");
+  try {
+    const rows = (await db.query(
+      `SELECT event_type, summary_human FROM project_dialogue
+        WHERE project_id = $1 AND (event_type = 'qa.review' OR summary_human ILIKE '%QA reportou QA_FAIL%' OR summary_human ILIKE '%QA atingiu m%ximo%')`,
+      [childId],
+    )).rows as Array<{ event_type?: string | null; summary_human?: string | null }>;
+    const unapproved = rows.filter((r) => /n[ãa]o aprovada|QA atingiu m[aá]ximo|BLOCKED \(BLOCKER/i.test(String(r.summary_human ?? "")));
+    const ran = rows.some((r) => r.event_type === "qa.review");
+    if (unapproved.length) qa = { status: "failed", detail: `${unapproved.length} task(s) sem aprovação do QA após os reworks` };
+    else if (ran) qa = { status: "passed", detail: "QA executado, sem reprovação final registrada" };
+  } catch (e) { qa = none(`leitura do diálogo falhou (${e instanceof Error ? e.message.slice(0, 80) : "erro"})`); }
+  return { scope, symbols, qa };
+}
+
+/** Linhas do corpo do PR: cada gate com o seu resultado real; nunca afirma o que não rodou. */
+export function renderGateLines(g: FactoryGateOutcomes): string[] {
+  const row = (name: string, o: GateOutcome) => `- ${name}: **${GATE_LABEL[o.status]}** — ${o.detail}`;
+  return [
+    "### Gates da fábrica (resultado registrado)",
+    "",
+    row("Gate de escopo (RFC `files_allowed`)", g.scope),
+    row("Símbolos preservados", g.symbols),
+    row("QA", g.qa),
+    "",
+    "_Escopo e símbolos cobrem as escritas do Dev. Revise o diff antes do merge em `dev`._",
+  ];
+}
+
 /** Corpo do PR: resumo do plano + RFCs + seção liberada do CHANGELOG. */
 export async function buildPullRequestBody(db: Db, childId: string, version: string, extra: Record<string, unknown>): Promise<string> {
   const plan = (extra.evolution_plan as Record<string, unknown> | undefined) ?? {};
@@ -182,7 +238,7 @@ export async function buildPullRequestBody(db: Db, childId: string, version: str
       }
     } catch { /* sem changelog no corpo */ }
   }
-  lines.push("", "_Gate de escopo (RFC `files_allowed`), símbolos preservados e QA rodaram na fábrica; revise o diff antes do merge em `dev`._");
+  lines.push("", ...renderGateLines(await describeFactoryGates(db, childId)));
   return lines.filter((l) => l !== undefined).join("\n");
 }
 

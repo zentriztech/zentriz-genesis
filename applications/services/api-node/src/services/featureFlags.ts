@@ -62,12 +62,31 @@ export function parseEnvFlag(raw: string | undefined | null, kind: FlagKind): nu
   return null;
 }
 
-function parseConfigValue(raw: unknown, kind: FlagKind, key: string, level: string): number | null {
+/**
+ * D-8 (AR): interpreta o valor GRAVADO na tabela. Aceita o inteiro canônico ("0"/"1"/"2") e também os sinônimos do ambiente
+ * ("on"/"true"/"off"/"false"/"shadow"), de forma CONSISTENTE com `parseEnvFlag` — antes `'on'` era ignorado em silêncio e a
+ * flag ficava morta. `null` = valor inválido para esta flag. Puro (sem log).
+ */
+export function parseFlagConfigValue(raw: unknown, kind: FlagKind): number | null {
+  const txt = String(raw ?? "").trim();
+  if (txt === "") return null;
   const max = kind === "tri" ? 2 : 1;
-  const n = Number(String(raw ?? "").trim());
-  if (String(raw ?? "").trim() === "" || !Number.isInteger(n) || n < 0 || n > max) {
-    console.warn(`[FeatureFlags] ${key} (${level})=${JSON.stringify(raw)} IGNORADO: esperado inteiro em [0, ${max}]`);
-    return null;
+  const n = Number(txt);
+  if (Number.isInteger(n)) return n >= 0 && n <= max ? n : null;
+  return parseEnvFlag(txt, kind);
+}
+
+/** Forma canônica ("0"/"1"/"2") para GRAVAR; `null` = recusar com erro claro. */
+export function normalizeFlagValueForWrite(raw: unknown, kind: FlagKind): string | null {
+  const n = parseFlagConfigValue(raw, kind);
+  return n === null ? null : String(n);
+}
+
+function parseConfigValue(raw: unknown, kind: FlagKind, key: string, level: string): number | null {
+  const n = parseFlagConfigValue(raw, kind);
+  if (n === null) {
+    const max = kind === "tri" ? 2 : 1;
+    console.warn(`[FeatureFlags] ${key} (${level})=${JSON.stringify(raw)} IGNORADO: esperado inteiro em [0, ${max}] ou on/off/true/false${kind === "tri" ? "/shadow" : ""}`);
   }
   return n;
 }

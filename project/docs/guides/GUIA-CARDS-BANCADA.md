@@ -72,6 +72,7 @@ Com o card **Pronto**, o botão **Promover** cria a nova versão do serviço (o 
 - A promoção é **segura de repetir**: clicar duas vezes, ou de novo depois de uma queda, não duplica nada; ela continua de onde parou.
 - Se a versão do produto mudou desde a validação, a promoção é recusada com **base vencida** e o card volta a Refinando. Clique em **Revalidar** (o sistema confere o card contra a versão atual), ajuste se pedido e valide de novo.
 - Depois de promovido, a especificação do card é histórica: não edita mais.
+- **Antes de promover o projeto filho à fábrica, ele precisa de um `connect.yaml` válido.** O filho herda a árvore da versão corrente; se essa versão nunca teve o arquivo (serviço gerado antes dessa exigência), o filho não tem o que herdar e a promoção do filho responde **`CONNECT_MISSING`** (409) com a ação indicada. Gere a declaração no filho (botão **Gerar connect.yaml** ou `POST /api/projects/<id-do-filho>/connect-declaration`), revise e promova de novo. É um passo único: as evoluções seguintes herdam o arquivo.
 
 ## 6. Acompanhar
 
@@ -109,6 +110,7 @@ Abra o card e leia a **situação** e o motivo na aba Estado. As situações mai
 | **Orçamento** (`budget:…`, por exemplo "O orçamento de IA está pausado" ou "O saldo de IA não comporta a próxima atividade") | O controle de custo parou o filho. O card **não falhou**: só aguarda saldo | Peça ao dono do orçamento para **aumentar o orçamento** da versão (ou, se o bloqueio for `CARD_BUDGET_CAP`, ao administrador para **subir o percentual por card**) e clique em **Retomar**. Se o card voltar a Na fábrica mas a execução continuar parada, **reinicie o projeto filho** (liberar o saldo não religa a execução sozinho) |
 | **Falha da fábrica** (`child_failed`, `materialization_failed:…`) | O projeto filho falhou | Veja o porquê no histórico do projeto filho. Corrigida a causa, clique em **Retomar**: o card volta a **Pronto** (se o filho morreu) e você **promove de novo** |
 | **Filho arquivado** (`child_archived`) | O projeto filho foi arquivado fora do fluxo | **Retomar** e promover de novo, ou **Rejeitar** se o pedido foi abandonado |
+| **`CONNECT_MISSING`** ao promover o projeto filho ("herda a árvore da versão corrente, que não traz um connect.yaml válido") | A versão corrente nunca teve `connect.yaml`; o filho herdou a árvore sem ele | Clique em **Gerar connect.yaml** no filho (ou `POST /api/projects/<id-do-filho>/connect-declaration`, resposta traz a `action`), revise e promova de novo. Passo feito uma vez por serviço |
 | "A versão-base mudou desde a validação" | O produto avançou de versão | **Revalidar** e depois **Validar** |
 | "A spec está travada" | O card está Pronto | **Reabrir para edição** |
 | "O arquivo já existe na versão corrente" | O rascunho tenta reescrever (ou reusar o número de) um arquivo da versão atual | Use outro nome/número de RFC ou ADR |

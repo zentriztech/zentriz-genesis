@@ -29,7 +29,7 @@ describe("tabela de erros de card", () => {
       expect(def.message.length, code).toBeGreaterThan(15);
       expect(def.message.length, code).toBeLessThanOrEqual(160);
       expect(def.message, code).toMatch(/[a-zá-ú]/);
-      expect([400, 402, 403, 404, 409, 410, 422, 500]).toContain(def.http);
+      expect([400, 401, 402, 403, 404, 409, 410, 422, 500]).toContain(def.http);
       expect(["geral", "estado", "spec", "gate", "orcamento", "promocao", "anexo"]).toContain(def.area);
     }
     expect(cardUserMessage("CARD_SPEC_LOCKED")).toContain("Reabra o card");

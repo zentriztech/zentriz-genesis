@@ -93,3 +93,25 @@ describe("resolveFlag — precedência", () => {
     expect(await resolveFlag(fakeDb([]), "EVOLVE_CLAIM", "A", "1")).toEqual({ value: 1, source: "env" });
   });
 });
+
+describe("D-8 (AR) — valores gravados na tabela: sinônimos de ligado valem, em leitura e escrita", () => {
+  it("parseFlagConfigValue: 0/1/2 canônicos E on/true/off/false (+shadow no tri); lixo e fora de faixa ⇒ null", async () => {
+    const { parseFlagConfigValue, normalizeFlagValueForWrite } = await import("./featureFlags.js");
+    expect(["on", "true", "1", " ON "].map((v) => parseFlagConfigValue(v, "bool"))).toEqual([1, 1, 1, 1]);
+    expect(["off", "false", "0"].map((v) => parseFlagConfigValue(v, "bool"))).toEqual([0, 0, 0]);
+    expect(parseFlagConfigValue("on", "tri")).toBe(2);
+    expect(parseFlagConfigValue("shadow", "tri")).toBe(1);
+    expect(parseFlagConfigValue("shadow", "bool")).toBeNull();
+    expect(parseFlagConfigValue("2", "bool")).toBeNull();
+    expect(parseFlagConfigValue("banana", "bool")).toBeNull();
+    expect(parseFlagConfigValue("", "bool")).toBeNull();
+    expect(normalizeFlagValueForWrite("on", "bool")).toBe("1");
+    expect(normalizeFlagValueForWrite("shadow", "tri")).toBe("1");
+    expect(normalizeFlagValueForWrite("x", "tri")).toBeNull();
+  });
+  it("resolveFlag: linha global 'on' liga a flag (antes: IGNORADA, caía no default off); CARDS_BANCADA idem", async () => {
+    expect(await resolveFlag(fakeDb([{ key: "EVOLVE_CLAIM", tenant_id: null, value: "on" }]), "EVOLVE_CLAIM", "A", "")).toEqual({ value: 1, source: "global" });
+    expect(await resolveFlag(fakeDb([{ key: "CARDS_BANCADA", tenant_id: "A", value: "true" }]), "CARDS_BANCADA", "A", "")).toEqual({ value: 1, source: "tenant" });
+    expect(await resolveFlag(fakeDb([{ key: "EVOLVE_RECONCILER", tenant_id: null, value: "on" }]), "EVOLVE_RECONCILER", null, "")).toEqual({ value: 2, source: "global" });
+  });
+});

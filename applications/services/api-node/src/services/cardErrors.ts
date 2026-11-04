@@ -23,6 +23,7 @@ export const CARD_ERRORS = {
   BAD_REQUEST: { http: 400, area: "geral", message: "Não entendemos o pedido. Confira os campos e tente de novo." },
   NOT_FOUND: { http: 404, area: "geral", message: "Não encontramos este item (ou ele não está disponível para você)." },
   FORBIDDEN: { http: 403, area: "geral", message: "Esta ação não é permitida para a sua conta." },
+  UNAUTHORIZED: { http: 401, area: "geral", message: "Sua sessão não identifica um usuário. Entre de novo para criar ou alterar cards." },
   INVALID_ID: { http: 400, area: "geral", message: "O identificador informado não é válido. Recarregue a página e tente de novo." },
   CARD_ACTION_NOT_ALLOWED: { http: 403, area: "geral", message: "Só o autor do card ou um administrador do tenant pode fazer isto." },
   MANAGEMENT_ACCOUNT_READONLY_CREATE: { http: 403, area: "geral", message: "Contas de gestão só consultam: peça a alguém do cliente para criar ou alterar cards." },

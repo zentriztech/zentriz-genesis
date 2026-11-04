@@ -93,8 +93,12 @@ vi.mock("../services/productNormalizer.js", () => ({
 // aqui só se prova que a ROTA respeita o veredito.
 type FakeReadiness = { ok: true } | { ok: false; reason: string; code: string; message: string; projectId?: string };
 let readiness: FakeReadiness = { ok: true };
+let evoPromotable = false;
+let evoReadiness: Record<string, unknown> = { ok: true };
 vi.mock("../services/promotability.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../services/promotability.js")>()),
+  isEvolutionPromotable: async () => evoPromotable,
+  assessEvolutionReadiness: async () => evoReadiness,
   assessProjectReadiness: async () => readiness,
   assessProductReadiness: async () => readiness,
 }));
@@ -133,6 +137,7 @@ beforeEach(async () => {
   normState ={ normalized: true, storedHash: "hash-atual", currentHash: "hash-atual" };
   normCheckThrows = false;
   readiness = { ok: true };
+  evoPromotable = false; evoReadiness = { ok: true };
   currentUser = { id: "u1", role: "tenant_admin", tenantId: TENANT };
   const { pipelineRoutes } = await import("./pipeline.js");
   app = Fastify();
@@ -249,6 +254,17 @@ describe("POST /api/projects/:id/promote — trava de normalização", () => {
     const res = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/promote` });
     expect(res.statusCode).toBe(409);
     expect(res.json()).toMatchObject({ code: "CONNECT_MISSING", gate: "CONNECT_DECLARATION_MISSING" });
+    expect(captured.some((c) => c.sql.includes("UPDATE projects SET status = 'promoted'"))).toBe(false);
+  });
+
+  it("D-7: filho de evolução sem connect.yaml → 409 CONNECT_MISSING com a AÇÃO que destrava (gerar o connect.yaml)", async () => {
+    evoPromotable = true;
+    const action = { method: "POST", path: `/api/projects/${PROJ}/connect-declaration`, label: "Gerar connect.yaml" };
+    evoReadiness = { ok: false, reason: "CONNECT_MISSING", code: "CONNECT_DECLARATION_MISSING", message: "Falta o connect.yaml.", projectId: PROJ, action };
+    queryHandler = promoteHandler({});
+    const res = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/promote` });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: "CONNECT_MISSING", gate: "CONNECT_DECLARATION_MISSING", action });
     expect(captured.some((c) => c.sql.includes("UPDATE projects SET status = 'promoted'"))).toBe(false);
   });
 

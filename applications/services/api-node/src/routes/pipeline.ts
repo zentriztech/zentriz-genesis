@@ -219,7 +219,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
             message: "Não foi possível verificar o RFC, a validação e o orçamento desta evolução. Tente de novo.",
           });
         }
-        if (!ready.ok) return reply.status(409).send({ code: ready.reason, gate: ready.code, message: ready.message });
+        if (!ready.ok) return reply.status(409).send({ code: ready.reason, gate: ready.code, message: ready.message, ...("action" in ready && ready.action ? { action: ready.action } : {}) });
       } else {
         let ready: Awaited<ReturnType<typeof assessProjectReadiness>>;
         try {

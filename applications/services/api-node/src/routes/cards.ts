@@ -56,8 +56,19 @@ function safeFilename(name: string): string {
 
 const NOT_AVAILABLE = { code: "NOT_FOUND", message: "Recurso indisponível" } as const;
 
+/**
+ * D-12 (AR): token sem `sub` (autenticado, mas sem identidade de usuário) não tem AUTOR para o card; antes o `created_by` nulo
+ * estourava no INSERT (500 INTERNAL). Agora 401 claro, antes de tocar o banco. `true` = já respondeu.
+ */
+export function denyMissingSubject(user: AuthUser, reply: FastifyReply): boolean {
+  if (typeof user.id === "string" && user.id.trim() !== "") return false;
+  reply.status(401).send({ code: "UNAUTHORIZED", message: "Token sem identidade de usuário (sub): faça login de novo — cards exigem um autor." });
+  return true;
+}
+
 /** Autoria: conta de gestão e token de serviço não criam nem editam cards. `true` = já respondeu. */
 function denyMutation(user: AuthUser, reply: FastifyReply): boolean {
+  if (denyMissingSubject(user, reply)) return true;
   if (denyCreationForManagement(user, reply)) return true;
   if (user.svc) {
     reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não opera cards (autoria humana)." });
@@ -92,6 +103,7 @@ export function canOperateCard(user: AuthUser, card: Pick<CardRow, "created_by">
  * `tenant_admin`) ou o autor do card — o papel `user` comum opera só os próprios cards. Token de serviço nunca. `true` = já respondeu 403.
  */
 function denyOperate(user: AuthUser, card: CardRow, reply: FastifyReply, action: OperateAction = "operate"): boolean {
+  if (denyMissingSubject(user, reply)) return true;
   if (user.svc) {
     reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não opera cards (autoria humana)." });
     return true;

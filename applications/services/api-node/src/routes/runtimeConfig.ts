@@ -14,7 +14,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { resolveScopedTenantId } from "../lib/tenantScope.js";
-import { FLAG_DEFS, FLAG_NAMES, isRolloutFlagKey, resolveFlag } from "../services/featureFlags.js";
+import { FLAG_DEFS, FLAG_NAMES, isRolloutFlagKey, normalizeFlagValueForWrite, parseFlagConfigValue, resolveFlag } from "../services/featureFlags.js";
 import { backfillCardState, backfillSpecOrigin, getCardsBackfillJob, listCardsBackfillJobs, type CardsBackfillOutcome } from "../services/cardsBackfill.js";
 import { findCardStatusDivergences, type CardDivergence } from "../services/cardState.js";
 import { MULTIPART_MAX_FILES, MULTIPART_MAX_FILE_BYTES, MULTIPART_MAX_TOTAL_BYTES } from "../services/ticketAttachments.js";
@@ -181,10 +181,22 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
       [tenantId]
     );
 
-    const resolved: Record<string, string> = {};
+    const resolved: Record<string, unknown> = {};
     for (const row of result.rows) {
       resolved[row.key] = row.value;
     }
+    // D-8 (AR): flags de rollout com o valor EFETIVO, a origem e as linhas IGNORADAS por valor inválido — antes uma linha morta
+    // (`CARDS_BANCADA='on'`) não aparecia em lugar nenhum. Chave nova: os consumidores existentes (runner) filtram por chave.
+    const rolloutFlags: Record<string, { value: number; source: string; ignored?: Array<{ level: "tenant" | "global"; raw: string; reason: string }> }> = {};
+    for (const name of FLAG_NAMES) {
+      const def = FLAG_DEFS[name];
+      const r = await resolveFlag(pool, name, tenantId);
+      const ignored = result.rows
+        .filter((row) => row.key === name && parseFlagConfigValue(row.value, def.kind) === null)
+        .map((row) => ({ level: (row.tenant_id ? "tenant" : "global") as "tenant" | "global", raw: String(row.value), reason: "valor inválido: a linha é ignorada e a resolução segue para o nível seguinte" }));
+      rolloutFlags[name] = { value: r.value, source: r.source, ...(ignored.length ? { ignored } : {}) };
+    }
+    resolved.rolloutFlags = rolloutFlags;
     return reply.send(resolved);
   });
 
@@ -267,7 +279,19 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
       if (meta.adminOnly && user.role !== "zentriz_admin") {
         return reply.status(403).send({ code: "ADMIN_ONLY_KEY", message: `A chave '${key}' só pode ser alterada pelo administrador da plataforma` });
       }
-      const numVal = Number(value);
+      // D-8: flag de rollout aceita on/off/true/false/shadow e grava SEMPRE o inteiro canônico (a leitura aceita os dois, mas o que
+      // fica na tabela é uniforme); valor que não é nenhum deles é recusado aqui — nunca gravado para ser ignorado depois.
+      let numVal = Number(value);
+      if (isRolloutFlagKey(key)) {
+        const canon = normalizeFlagValueForWrite(value, FLAG_DEFS[key].kind);
+        if (canon === null) {
+          return reply.status(400).send({
+            code: "INVALID_FLAG_VALUE",
+            message: `Valor inválido para a flag ${key}: use ${FLAG_DEFS[key].kind === "tri" ? "0, 1, 2, off, shadow ou on" : "0, 1, off ou on"} (recebido ${JSON.stringify(value)}).`,
+          });
+        }
+        numVal = Number(canon);
+      }
       if (isNaN(numVal) || numVal < meta.min || numVal > meta.max) {
         return reply.status(400).send({
           code: "OUT_OF_RANGE",

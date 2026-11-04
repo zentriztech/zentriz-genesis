@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
@@ -175,5 +175,46 @@ describe("evolutionAccept (Evoluir E5)", () => {
     expect(body).toMatch(/RFC-0004-pdf\.md/);
     expect(body).toMatch(/### CHANGELOG\n\n## \[1\.1\.0\] - 2026-09-04\n\n### Added\n- PDF/);
     expect(body).not.toMatch(/\[1\.0\.0\]/);
+  });
+
+  describe("D-13 (AR) — o corpo do PR reflete o resultado REAL de cada gate", () => {
+    const prevRoot = process.env.PROJECT_FILES_ROOT;
+    afterEach(() => { if (prevRoot === undefined) delete process.env.PROJECT_FILES_ROOT; else process.env.PROJECT_FILES_ROOT = prevRoot; });
+
+    const mkDb = (dialogue: Array<{ event_type: string | null; summary_human: string }>) => ({
+      query: vi.fn(async (sql: string) => /FROM project_dialogue/.test(sql) ? { rows: dialogue } : { rows: [] }),
+    });
+    const writeCheckpoint = async (childId: string, violations: Record<string, string[]>) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "d13-"));
+      process.env.PROJECT_FILES_ROOT = root;
+      await fs.mkdir(path.join(root, ".runner-state", childId), { recursive: true });
+      await fs.writeFile(path.join(root, ".runner-state", childId, "checkpoint.json"), JSON.stringify({ evolution_violations: violations }));
+    };
+
+    it("QA reprovado e escopo violado ⇒ o texto diz FALHOU nos dois e NÃO afirma que 'rodaram'", async () => {
+      await writeCheckpoint("d13-a", { "TSK-1": ["FORA DO ESCOPO do RFC: apps/x.ts (permitido: apps/api/**)"] });
+      const db = mkDb([
+        { event_type: "qa.review", summary_human: "QA revisou" },
+        { event_type: "step", summary_human: "QA reportou QA_FAIL (reatempto 3/3). Task TSK-1 marcada como DONE (não aprovada)." },
+      ]);
+      const body = await buildPullRequestBody(db as never, "d13-a", "1.0.1", { evolution_compat: "patch" });
+      expect(body).toMatch(/Gate de escopo[^\n]*\*\*FALHOU\*\*/);
+      expect(body).toMatch(/- QA: \*\*FALHOU\*\*/);
+      expect(body).toMatch(/Símbolos preservados: \*\*passou\*\*/);
+      expect(body).not.toMatch(/rodaram na fábrica/);
+    });
+
+    it("sem checkpoint e sem registro do QA ⇒ 'não executado/sem evidência' (nunca 'passou')", async () => {
+      process.env.PROJECT_FILES_ROOT = await fs.mkdtemp(path.join(os.tmpdir(), "d13-"));
+      const body = await buildPullRequestBody(mkDb([]) as never, "d13-b", "1.0.1", {});
+      expect(body.match(/não executado\/sem evidência/g)?.length).toBe(3);
+      expect(body).not.toMatch(/\*\*passou\*\*/);
+    });
+
+    it("tudo registrado e limpo ⇒ passou nos três", async () => {
+      await writeCheckpoint("d13-c", {});
+      const body = await buildPullRequestBody(mkDb([{ event_type: "qa.review", summary_human: "QA revisou" }]) as never, "d13-c", "1.0.1", {});
+      expect(body.match(/\*\*passou\*\*/g)?.length).toBe(3);
+    });
   });
 });

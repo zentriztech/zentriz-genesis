@@ -17,14 +17,15 @@ import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { authenticateInternal } from "./internalLlm.js";
 import {
   ALERT_STEP_OPTIONS, advisorGate, budgetSummary, getGuardSettings, maybeResumeBudget, preflight, recordCall,
-  resolveBudgetOwner, setGuardSetting, evaluateBudget, type PreflightInput, type RecordInput,
+  resolveBudgetOwner, setGuardSetting, noteCallerRolesMode, advisorStatus, evaluateBudget, type PreflightInput, type RecordInput,
 } from "../services/llmGuard.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
 }
 
-type GuardBody = Partial<RecordInput> & { systemId?: string; serviceId?: string };
+/** `rolesMode`: modo de LLM_ROLES_MODE do CHAMADOR (aditivo/opcional) — permite detectar divergência API×runner (D-9). */
+type GuardBody = Partial<RecordInput> & { systemId?: string; serviceId?: string; rolesMode?: string };
 
 /**
  * Y-14: o Guard de custo para o filho (`status = 'stopped'`, `stopped_by = 'budget'`) dentro de `llmGuard.ts` (que não é tocado aqui),
@@ -108,6 +109,7 @@ export async function llmGuardInternalRoutes(app: FastifyInstance): Promise<void
       return reply.send({ allow: false, code: "PROJECT_NOT_FOUND", message: "Serviço monitorado sem projeto vinculado — sem orçamento para debitar." });
     }
     if (await denyForeignTenant(request, reply, projectId, { allow: false })) return reply;
+    void noteCallerRolesMode(pool, body.rolesMode, projectId).catch(() => undefined);
     const input: PreflightInput = { ...body, projectId };
     const decision = await preflight(pool, input);
     if (!decision.allow) {
@@ -124,6 +126,7 @@ export async function llmGuardInternalRoutes(app: FastifyInstance): Promise<void
     const body = request.body ?? {};
     const projectId = await resolveProjectId(body, runnerProjectOf(request)).catch(() => null);
     if (await denyForeignTenant(request, reply, projectId, { allow: false, mode: "policy" })) return reply;
+    await noteCallerRolesMode(pool, body.rolesMode, projectId).catch(() => undefined);
     if (!projectId) {
       return reply.send({ allow: false, mode: "policy", code: "advisor_denied_no_base", message: "Sem projeto: sem base para o teto do Advisor." });
     }
@@ -200,7 +203,7 @@ export async function llmGuardUserRoutes(app: FastifyInstance): Promise<void> {
               COALESCE(SUM(cost_usd), 0) AS day, COUNT(*) AS calls
          FROM llm_call_ledger WHERE created_at > now() - interval '24 hours'`,
     )).rows[0];
-    return reply.send({ settings: await getGuardSettings(pool), spend: { lastHourUsd: Number(g.hour), last24hUsd: Number(g.day), calls24h: Number(g.calls) } });
+    return reply.send({ settings: await getGuardSettings(pool), spend: { lastHourUsd: Number(g.hour), last24hUsd: Number(g.day), calls24h: Number(g.calls) }, advisor: await advisorStatus(pool) });
   });
 
   app.put<{ Body: Record<string, string | number> }>("/api/admin/llm-guard/settings", async (request, reply) => {
