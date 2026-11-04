@@ -63,6 +63,7 @@ describe("PromotePanel", () => {
     await user.click(screen.getByRole("button", { name: "Revalidar" }));
     await waitFor(() => expect(revalidate).toHaveBeenCalledWith("c1"));
     await waitFor(() => expect(props.onBaseStale).toHaveBeenCalledWith(false));
+    expect(await screen.findByRole("status")).toHaveTextContent("valide o card de novo antes de promover");
   });
 
   it.each([
@@ -77,6 +78,12 @@ describe("PromotePanel", () => {
     await userEvent.click(screen.getByRole("button", { name: "Promover à fábrica" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(re as RegExp);
     expect(screen.getByRole("button", { name: "Promover à fábrica" })).toBeEnabled();
+  });
+
+  it("depois de a base vencer o card volta a 'Refinando': o aviso e o 'Revalidar' continuam visíveis, sem botão de promover", () => {
+    setup({ card: makeDetail({ state: "refining", actions: { ...NO_ACTIONS, ready: true, revalidate: true } }), baseStale: true });
+    expect(screen.getByRole("button", { name: "Revalidar" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Promover à fábrica" })).not.toBeInTheDocument();
   });
 
   it("CARD_NOT_READY recarrega o card (voltou a refinando)", async () => {

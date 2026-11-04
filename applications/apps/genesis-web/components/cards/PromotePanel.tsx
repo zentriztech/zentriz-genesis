@@ -32,6 +32,7 @@ export function PromotePanel({ card, caps, baseStale, onBaseStale, onChanged }: 
 }) {
   const [busy, setBusy] = useState<"promote" | "revalidate" | null>(null);
   const [error, setError] = useState<{ code?: string; message: string } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [done, setDone] = useState<{ childProjectId: string; versionNumber: number; replayed: boolean } | null>(null);
   const inFlight = useRef(false);
 
@@ -42,7 +43,7 @@ export function PromotePanel({ card, caps, baseStale, onBaseStale, onChanged }: 
 
   const run = async (kind: "promote" | "revalidate") => {
     if (inFlight.current) return;            // clique duplo: o segundo é descartado (o servidor também é idempotente)
-    inFlight.current = true; setBusy(kind); setError(null);
+    inFlight.current = true; setBusy(kind); setError(null); setNotice(null);
     try {
       if (kind === "promote") {
         const r = await cardsApi.promote(card.id);
@@ -50,13 +51,15 @@ export function PromotePanel({ card, caps, baseStale, onBaseStale, onChanged }: 
       } else {
         await cardsApi.revalidate(card.id);
         onBaseStale(false);
+        setNotice("Base revalidada contra a versão atual do produto. Confira a especificação e valide o card de novo antes de promover.");
       }
       await onChanged();
     } catch (e) {
       const code = cardErrorCode(e);
       if (code === "CARD_BASE_STALE") onBaseStale(true);
       setError({ code, message: cardErrorMessage(e) });
-      if (code === "CARD_NOT_READY" || code === "CARD_INVALID_TRANSITION") await onChanged();
+      // O servidor devolve o card a "Refinando" nesses casos: recarrega, mantendo o aviso e a ação de revalidar.
+      if (code === "CARD_NOT_READY" || code === "CARD_INVALID_TRANSITION" || code === "CARD_BASE_STALE") await onChanged();
     } finally { inFlight.current = false; setBusy(null); }
   };
 
@@ -71,9 +74,29 @@ export function PromotePanel({ card, caps, baseStale, onBaseStale, onChanged }: 
       </Alert>
     );
   }
+  const revalidateBtn = (
+    <Button color="inherit" size="small" disabled={busy !== null} onClick={() => void run("revalidate")}>{busy === "revalidate" ? "Revalidando…" : "Revalidar"}</Button>
+  );
+  const banners = (
+    <>
+      {notice && <Alert severity="success" role="status" sx={{ mb: 1.5 }}>{notice}</Alert>}
+      {error && (
+        <Alert severity={error.code === "CARD_BASE_STALE" ? "warning" : "error"} role="alert" sx={{ mb: 1.5 }}
+          action={error.code === "CARD_BASE_STALE" ? revalidateBtn : undefined}>
+          {error.message}
+        </Alert>
+      )}
+      {baseStale && !error && (
+        <Alert severity="warning" sx={{ mb: 1.5 }} action={revalidateBtn}>
+          {"A base do card está vencida: o produto avançou de versão. Revalide antes de promover."}
+        </Alert>
+      )}
+    </>
+  );
   if (!ready && !card.actions.promote) {
     return (
       <Box component="section" aria-label="Promoção">
+        {banners}
         <Typography variant="body2" color="text.secondary">Para promover, valide a especificação do card (botão “Validar”). A promoção só fica disponível com o card em “Pronto”.</Typography>
       </Box>
     );
@@ -86,19 +109,7 @@ export function PromotePanel({ card, caps, baseStale, onBaseStale, onChanged }: 
         <Item state={budState}>saldo livre do orçamento{bud?.freeUsd != null && bud?.minFreeUsd != null ? ` (US$ ${bud.freeUsd.toFixed(2)} livres, mínimo US$ ${bud.minFreeUsd.toFixed(2)})` : " acima do mínimo exigido"}.</Item>
         <Item state={baseStale === null ? "unknown" : baseStale ? "pending" : "ok"}>base atual: o produto não mudou de versão desde a validação.</Item>
       </Box>
-      {error && (
-        <Alert severity={error.code === "CARD_BASE_STALE" ? "warning" : "error"} role="alert" sx={{ mb: 1.5 }}
-          action={error.code === "CARD_BASE_STALE"
-            ? <Button color="inherit" size="small" disabled={busy !== null} onClick={() => void run("revalidate")}>{busy === "revalidate" ? "Revalidando…" : "Revalidar"}</Button>
-            : undefined}>
-          {error.message}
-        </Alert>
-      )}
-      {baseStale && !error && (
-        <Alert severity="warning" sx={{ mb: 1.5 }} action={<Button color="inherit" size="small" disabled={busy !== null} onClick={() => void run("revalidate")}>Revalidar</Button>}>
-          {"A base do card está vencida: o produto avançou de versão. Revalide antes de promover."}
-        </Alert>
-      )}
+      {banners}
       <Button variant="contained" color="success" disabled={!card.actions.promote || busy !== null} onClick={() => void run("promote")}
         aria-describedby="promote-title">
         {busy === "promote" ? "Promovendo…" : "Promover à fábrica"}
