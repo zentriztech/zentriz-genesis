@@ -13,10 +13,12 @@ import {
 
 vi.mock("../db/client.js", () => dbClientMock());
 vi.mock("../middleware/auth.js", () => authMock());
-// O aceite real publica no GitHub (rede). Aqui o fluxo de evolução é um stub que "publicou" (handled = true); o PR é semeado no `extra`.
-vi.mock("../services/evolutionAccept.js", async (orig) => ({
-  ...(await orig<typeof import("../services/evolutionAccept.js")>()),
-  runEvolutionAcceptFlow: async () => true,
+// B1: o fluxo de aceite da evolução é o REAL (`runEvolutionAcceptFlow`); só o push ao GitHub (rede) é simulado. Padrão: tenant que não
+// publica (`skipped`). Os cenários de falha/em voo/PR trocam `pushHolder.impl`.
+const pushHolder = vi.hoisted(() => ({ impl: null as null | ((id: string, o: unknown) => Promise<unknown>) }));
+vi.mock("../services/githubPush.js", async (orig) => ({
+  ...(await orig<typeof import("../services/githubPush.js")>()),
+  pushEvolutionToGitHub: (id: string, o: unknown) => (pushHolder.impl ? pushHolder.impl(id, o) : Promise.resolve({ ok: false, mode: "skipped", error: "stub: sem publicação" })),
 }));
 
 import { projectRoutes } from "./projects.js";
@@ -43,7 +45,7 @@ describePg("Fase 4 / 4.3 — card delivered + executed_* (Postgres real)", () =>
     for (const x of seeds) x.cleanup();
     await pool.end();
   });
-  afterEach(() => { __setOctokitFactoryForTests(null); prState = { merged: false }; prCalls.length = 0; });
+  afterEach(() => { pushHolder.impl = null; __setOctokitFactoryForTests(null); prState = { merged: false }; prCalls.length = 0; });
 
   /** Repositório simulado: `pulls.get` devolve o PR conforme `prState`. */
   const fakeGithub = () => __setOctokitFactoryForTests(async () => ({
@@ -113,7 +115,7 @@ describePg("Fase 4 / 4.3 — card delivered + executed_* (Postgres real)", () =>
   it("ponta a ponta: card in_factory → aceite do filho (sem repositório) → delivered, auditado, executed_* só nos arquivos do card", async () => {
     const m = await mkCard();
     await accept(m);
-    await vi.waitFor(async () => expect((await card(m.ticketId)).card_state).toBe("delivered"), { timeout: 5000 });
+    await vi.waitFor(async () => expect((await card(m.ticketId)).card_state).toBe("delivered"), { timeout: 10_000 });
     expect(await card(m.ticketId)).toMatchObject({ card_state: "delivered", status: "delivered" });
     expect((await card(m.ticketId)).delivered_at).not.toBeNull();
     expect((await events(m.ticketId)).filter((e) => e.to_state === "delivered")).toEqual([{ from_state: "in_factory", to_state: "delivered", actor_kind: "system", reason: "accepted_no_repo" }]);
@@ -128,7 +130,7 @@ describePg("Fase 4 / 4.3 — card delivered + executed_* (Postgres real)", () =>
     fakeGithub();
     const m = await mkCard({ repo: true });
     await accept(m);
-    await new Promise((r) => setTimeout(r, 300));          // dá tempo ao gancho assíncrono do aceite
+    await vi.waitFor(() => expect(prCalls.length).toBeGreaterThanOrEqual(1), { timeout: 10_000 });   // o gancho assíncrono do aceite (fluxo real) verificou o PR
     expect((await card(m.ticketId)).card_state).toBe("in_factory");
     expect(stampedNames(await stamps(m))).toEqual([]);
     expect(prCalls.length).toBeGreaterThanOrEqual(1);       // verificou o PR de verdade (nº 7 do repo simulado)
@@ -244,7 +246,7 @@ describePg("Fase 4 / 4.3 — card delivered + executed_* (Postgres real)", () =>
   it("flag/ticket legado: sem card_state nada muda (status, eventos e colunas executed_*), pelo aceite HTTP e pela passada do reconciliador", async () => {
     const m = await mkCard({ legacy: true });
     await accept(m);
-    await new Promise((r) => setTimeout(r, 300));
+    await vi.waitFor(async () => expect((await pool.query("SELECT extra->>'evolution_publish_state' AS s FROM projects WHERE id = $1", [m.child])).rows[0].s).toBe("done"), { timeout: 10_000 });
     expect(await deliverCardsOfChild(pool, m.child)).toEqual([]);
     await deliverAcceptedCards(pool, { tenantId: m.s.tenantId });
     expect(await card(m.ticketId)).toMatchObject({ card_state: null, status: "promoted", delivered_at: null });

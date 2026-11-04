@@ -33,7 +33,7 @@ function watchEnabled(): boolean {
 export async function reconcileEvolutionMerges(db: Db = pool as unknown as Db): Promise<{ scanned: number; merged: number }> {
   const res = await db.query(
     `SELECT id FROM projects
-      WHERE status = 'accepted'
+      WHERE (status = 'accepted' OR (status = 'archived' AND coalesce(extra->>'superseded_by','') <> ''))
         AND extra->>'evolution' = 'true'
         AND extra->>'evolution_pr_number' IS NOT NULL
         AND extra->>'evolution_merged_at' IS NULL

@@ -38,15 +38,16 @@ export function reconcilerMode(env: NodeJS.ProcessEnv = process.env): Reconciler
 
 export const RECONCILER_INTERVAL_KEY = "EVOLVE_RECONCILER_INTERVAL_MIN";
 /** Padrões conservadores (H §7: 5 min; carência de 5 min além do lease de 10; esperas humanas legítimas até 72 h). */
-export const RECONCILER_DEFAULTS = { intervalMin: 5, claimGraceS: 300, stuckHours: 72, orphanGraceS: 300 } as const;
+export const RECONCILER_DEFAULTS = { intervalMin: 5, claimGraceS: 300, stuckHours: 72, orphanGraceS: 300, publishGraceS: 900 } as const;
 
-export interface ReconcilerParams { claimGraceS: number; stuckHours: number; orphanGraceS: number }
+export interface ReconcilerParams { claimGraceS: number; stuckHours: number; orphanGraceS: number; publishGraceS: number }
 export function resolveReconcilerParams(env: NodeJS.ProcessEnv = process.env): ReconcilerParams {
   const num = (k: string, d: number) => { const n = Number(env[k]); return Number.isFinite(n) && n > 0 ? n : d; };
   return {
     claimGraceS: num("EVOLVE_RECONCILER_CLAIM_GRACE_S", RECONCILER_DEFAULTS.claimGraceS),
     stuckHours: num("EVOLVE_RECONCILER_STUCK_HOURS", RECONCILER_DEFAULTS.stuckHours),
     orphanGraceS: num("EVOLVE_RECONCILER_ORPHAN_GRACE_S", RECONCILER_DEFAULTS.orphanGraceS),
+    publishGraceS: num("EVOLVE_RECONCILER_PUBLISH_GRACE_S", RECONCILER_DEFAULTS.publishGraceS),
   };
 }
 
@@ -60,7 +61,7 @@ export const RECONCILER_LOCK_KEY = 0;
 export type FindingKind =
   | "claim_expired_no_effects" | "claim_expired_with_effects" | "ticket_promoted_without_child"
   | "child_ticket_mismatch" | "evolution_in_flight_stuck" | "uniqueness_index_missing" | "reconciler_disk_unverifiable"
-  | "card_status_divergence";
+  | "card_status_divergence" | "evolution_publish_incomplete";
 
 export interface Finding {
   kind: FindingKind;
@@ -91,7 +92,7 @@ const empty = (mode: ReconcilerMode, skipped?: ReconcilerResult["skipped"]): Rec
 const ALL_KINDS: FindingKind[] = [
   "claim_expired_no_effects", "claim_expired_with_effects", "ticket_promoted_without_child",
   "child_ticket_mismatch", "evolution_in_flight_stuck", "uniqueness_index_missing", "reconciler_disk_unverifiable",
-  "card_status_divergence",
+  "card_status_divergence", "evolution_publish_incomplete",
 ];
 
 type Json = Record<string, unknown>;
@@ -280,6 +281,66 @@ async function detectCardDivergences(db: Pool | PoolClient): Promise<Finding[]> 
   }));
 }
 
+// ── Q7 (Fase 4, M1/C1/C3): publicação da evolução aceita que não terminou ─────────────────────────────
+/**
+ * Evolução ACEITA cuja publicação não fechou: (a) o aceite marcou `evolution_publish_state='pending'` e a API morreu antes de fechar
+ * (C1: entre o aceite e o push; C3: entre o registro do repositório e a gravação do número do PR), ou (b) o filho tem repositório da linhagem
+ * registrado mas `evolution_pr_number` nulo (PR não aberto/registrado) — nos dois casos depois de `publishGraceS` (o push legítimo leva minutos).
+ * Filho de `fallback_new_repo` (repositório próprio ≠ linhagem, sem PR por desenho) NÃO é achado. Ação (`on`): `evolution_push_pending=true`
+ * ⇒ a ação "Republicar" aparece e a entrega do card segue bloqueada; republicar reusa o PR aberto (`openPullRequest` lista antes de criar).
+ */
+export interface IncompletePublish { id: string; reason: "publish_pending_stale" | "pr_not_registered"; ageS: number }
+export async function findIncompletePublications(db: Pool | PoolClient, p: Pick<ReconcilerParams, "publishGraceS">): Promise<IncompletePublish[]> {
+  const r = await db.query(
+    `SELECT p.id::text AS id, p.parent_project_id, p.extra, g.repo_full_name AS own_repo,
+            extract(epoch FROM (now() - COALESCE((p.extra->>'evolution_publish_at')::timestamptz, g.pushed_at, p.updated_at)))::int AS age_s
+       FROM projects p LEFT JOIN project_github_repos g ON g.project_id = p.id
+      WHERE p.status = 'accepted' AND p.extra->>'evolution' = 'true'
+        AND COALESCE(p.extra->>'evolution_push_pending', '') <> 'true'
+        AND COALESCE(p.extra->>'evolution_merged_at', '') = ''
+        AND ( ( p.extra->>'evolution_publish_state' = 'pending'
+                AND COALESCE((p.extra->>'evolution_publish_at')::timestamptz, p.updated_at) < now() - ($1::int * interval '1 second') )
+           OR ( g.project_id IS NOT NULL AND COALESCE(p.extra->>'evolution_pr_number', '') = ''
+                AND COALESCE(p.extra->>'evolution_publish_state', '') <> 'pending'
+                AND g.pushed_at < now() - ($1::int * interval '1 second') ) )
+      ORDER BY p.updated_at LIMIT 200`,
+    [Math.floor(p.publishGraceS)],
+  );
+  const { findLineageRepo } = await import("./evolutionAccept.js");
+  const out: IncompletePublish[] = [];
+  for (const x of r.rows) {
+    const ex = (x.extra ?? {}) as Json;
+    const parent = (typeof ex.evolution_parent_id === "string" ? ex.evolution_parent_id : null) ?? (x.parent_project_id as string | null) ?? null;
+    const lineage = await findLineageRepo(db as never, String(x.id), parent);
+    const pendingStale = ex.evolution_publish_state === "pending";
+    // Sem repositório na linhagem e com repositório próprio = fallback_new_repo (sem PR por desenho): não é falha de publicação.
+    if (!pendingStale && (!lineage || (x.own_repo && x.own_repo !== lineage.repo_full_name))) continue;
+    out.push({ id: String(x.id), reason: pendingStale ? "publish_pending_stale" : "pr_not_registered", ageS: Number(x.age_s) });
+  }
+  return out;
+}
+
+async function detectIncompletePublish(db: Pool, p: ReconcilerParams, mode: "shadow" | "on", repaired: Finding[]): Promise<Finding[]> {
+  const out: Finding[] = [];
+  for (const c of await findIncompletePublications(db, p)) {
+    const f: Finding = { kind: "evolution_publish_incomplete", entityHash: hashId(c.id), projectHash: hashId(c.id), ticketHash: null, severity: "critical",
+      detail: { reason: c.reason, age_s: c.ageS, rule: "marks_push_pending_then_republish_reuses_open_pr" } };
+    if (mode === "shadow") { f.action = "shadow_would_mark_push_pending"; out.push(f); continue; }
+    const up = await db.query(
+      `UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || '{"evolution_push_pending":true,"evolution_publish_state":"failed"}'::jsonb, updated_at = now()
+        WHERE id = $1 AND status = 'accepted' AND COALESCE(extra->>'evolution_push_pending','') <> 'true' AND COALESCE(extra->>'evolution_merged_at','') = '' RETURNING id`,
+      [c.id]);
+    if ((up.rowCount ?? up.rows.length) === 0) continue; // outro processo fechou/marcou no meio: não é achado
+    await db.query(
+      "INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)",
+      [c.id, `⚠️ Publicação da evolução não foi concluída (${c.reason === "pr_not_registered" ? "PR não registrado" : "push interrompido"}). Marcada como pendente: use \"Republicar\" — o PR aberto é reaproveitado.`],
+    ).catch(() => undefined);
+    f.action = "cleaned_marked_push_pending";
+    repaired.push(f);
+  }
+  return out;
+}
+
 async function detectMissingIndexes(db: Pool | PoolClient): Promise<Finding[]> {
   const r = await db.query("SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ANY($1::text[])",
     [UNIQUENESS_INDEXES.map((i) => i.name)]);
@@ -414,6 +475,12 @@ export async function runReconcilerPass(pool: Pool, env: NodeJS.ProcessEnv = pro
     await run(["evolution_in_flight_stuck"], async () => { findings.push(...await detectStuckInFlight(pool, p)); });
     await run(["uniqueness_index_missing"], async () => { findings.push(...await detectMissingIndexes(pool)); });
     await run(["card_status_divergence"], async () => { findings.push(...await detectCardDivergences(pool)); });
+    // Fase 4 (M1): publicação do filho aceito que não fechou — detecta em `shadow`; em `on` marca `push_pending` (republicável) e notifica.
+    await run(["evolution_publish_incomplete"], async () => {
+      const before = cleanedNow.length;
+      findings.push(...await detectIncompletePublish(pool, p, mode === "on" ? "on" : "shadow", cleanedNow));
+      res.cleaned += cleanedNow.length - before;
+    });
     // Fase 3 (3.5): card × filho. O Guard de custo pausa o filho (`stopped_by='budget'`) sem saber que há um card ligado a ele; aqui o card
     // vai a `blocked` (reason `budget:<código>`) e, com a pausa liberada, volta a `in_factory` — nunca `failed`. Só em `on` (age sobre dados).
     if (mode === "on") {

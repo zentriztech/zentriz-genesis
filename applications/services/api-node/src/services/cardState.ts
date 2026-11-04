@@ -156,6 +156,38 @@ async function withTx<T>(db: CardDb, fn: (q: Db) => Promise<T>): Promise<T> {
 
 /** Status de projeto filho que contam como "morto" (o card não tem mais o que acompanhar). */
 const DEAD_CHILD_STATUSES = ["failed", "archived"] as const;
+
+/**
+ * Fase 4 (A1): filho `archived` POR SUPERSESSÃO (`extra.superseded_by`) não é filho morto — foi aceito e só foi substituído pela versão
+ * seguinte antes do merge do PR. Para entrega/sync conta como aceito. `archived` por rejeição de card (`extra.card_rejected`) segue morto.
+ */
+export function isSupersededChild(status: unknown, extra: unknown): boolean {
+  if (String(status) !== "archived" || !extra || typeof extra !== "object") return false;
+  const s = (extra as Record<string, unknown>).superseded_by;
+  return typeof s === "string" && s !== "";
+}
+/** Fragmento SQL equivalente (alias da tabela `projects`): aceito OU arquivado por supersessão. */
+export const acceptedLikeChildSql = (alias: string): string =>
+  `(${alias}.status = 'accepted' OR (${alias}.status = 'archived' AND COALESCE(${alias}.extra->>'superseded_by', '') <> ''))`;
+
+/**
+ * B1: o filho "precisa de merge"? Decidido pela LINHAGEM, não pela linha do filho em `project_github_repos` (que só nasce DEPOIS de um push
+ * bem-sucedido). Verdadeiro se: o filho já tem repositório, OU a linhagem (raiz/pai) tem, OU a publicação do filho está pendente/em voo
+ * (`evolution_push_pending` / `evolution_publish_state='pending'`). Falso ⇒ nada a publicar (sem GitHub na linhagem) ⇒ `no_repo`.
+ */
+export async function childNeedsMerge(q: Db, childId: string): Promise<boolean> {
+  const r = (await q.query(
+    `SELECT p.parent_project_id, p.extra,
+            EXISTS (SELECT 1 FROM project_github_repos g WHERE g.project_id = p.id) AS own_repo
+       FROM projects p WHERE p.id = $1`, [childId])).rows[0] as
+    { parent_project_id: string | null; extra: Row | null; own_repo: boolean } | undefined;
+  if (!r) return true; // fail-closed: filho inexistente não prova nada
+  const ex = r.extra ?? {};
+  if (r.own_repo || ex.evolution_push_pending === true || ex.evolution_publish_state === "pending") return true;
+  const { findLineageRepo } = await import("./evolutionAccept.js");
+  const parent = (typeof ex.evolution_parent_id === "string" ? ex.evolution_parent_id : null) ?? r.parent_project_id ?? null;
+  return (await findLineageRepo(q as never, childId, parent)) !== null;
+}
 /** Filho em execução/materialização: não se arquiva por baixo dele ao recusar um card. */
 const ACTIVE_CHILD_STATUSES = ["materializing", "running", "queued", "cto_charter", "pm_backlog", "dev_qa", "devops", "pending_cyborg"] as const;
 
@@ -287,7 +319,7 @@ type ChildPre = { fail?: CardPreconditionCode; archiveChild?: { id: string; stat
 async function childPrecondition(q: Db, cur: Row, from: CardState, to: CardState, args: CardTransitionArgs): Promise<ChildPre> {
   const dead = DEAD_CHILD_STATUSES as readonly string[];
   const loadChild = async (id: string) =>
-    (await q.query("SELECT tenant_id, product_id, status FROM projects WHERE id = $1", [id])).rows[0];
+    (await q.query("SELECT tenant_id, product_id, status, extra FROM projects WHERE id = $1", [id])).rows[0];
   const sameScope = (c: Row) =>
     String(c.status) !== "card_draft"
     && (c.tenant_id ?? null) === (cur.tenant_id ?? null) && (c.product_id ?? null) === (cur.product_id ?? null);
@@ -302,16 +334,16 @@ async function childPrecondition(q: Db, cur: Row, from: CardState, to: CardState
   if (from === "blocked" && to === "in_factory") {
     const c = cur.child_project_id ? await loadChild(String(cur.child_project_id)) : undefined;
     if (!c) return { fail: "child_not_found" };
-    if (dead.includes(String(c.status))) return { fail: "child_dead" };
+    if (dead.includes(String(c.status)) && !isSupersededChild(c.status, c.extra)) return { fail: "child_dead" };
     return {};
   }
   if (from === "in_factory" && to === "delivered") {
     const childId = cur.child_project_id ? String(cur.child_project_id) : null;
     const c = childId ? await loadChild(childId) : undefined;
     if (!c) return { fail: "child_not_found" };
-    if (String(c.status) !== "accepted") return { fail: "child_not_accepted" };
-    const hasRepo = (await q.query("SELECT 1 FROM project_github_repos WHERE project_id = $1 LIMIT 1", [childId])).rows.length > 0;
-    if (hasRepo && !(args.mergeCheck && (await args.mergeCheck(q, childId!)))) return { fail: "merge_unverified" };
+    if (String(c.status) !== "accepted" && !isSupersededChild(c.status, c.extra)) return { fail: "child_not_accepted" };
+    const needsMerge = await childNeedsMerge(q, childId!);
+    if (needsMerge && !(args.mergeCheck && (await args.mergeCheck(q, childId!)))) return { fail: "merge_unverified" };
     return {};
   }
   if (from === "blocked" && to === "rejected" && cur.child_project_id) {

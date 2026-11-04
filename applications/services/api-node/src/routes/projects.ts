@@ -58,6 +58,8 @@ function getUser(request: FastifyRequest): AuthUser {
 // BUGFIX P3: cache in-memory curto do walk de code-files, por projectId. TTL de 3s colapsa a
 // rajada de chamadas (page + grafo + polling) que antes disparavam walks de FS redundantes.
 type CodeFilesPayload = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number; truncated: boolean };
+/** Prefixo das tasks herdadas do pai (seed do runner): nunca são trabalho do card do filho (A3). */
+const INHERITED_TASK_PREFIX = "TSK-INH-";
 const CODE_FILES_TTL_MS = 3000;
 const CODE_FILES_MAX = 5000;
 const codeFilesCache = new Map<string, { at: number; payload: CodeFilesPayload }>();
@@ -560,13 +562,32 @@ export async function projectRoutes(app: FastifyInstance) {
         }
         return projectTicketId;
       };
-      const created: unknown[] = [];
+      let childCardId: string | null | undefined;
+      const resolveChildCardId = async (): Promise<string | null> => {
+        if (childCardId === undefined) {
+          const tid = await resolveTicketId();
+          childCardId = null;
+          if (tid) {
+            // Só ticket que É card (card_state não nulo) e está ligado a ESTE filho (B-3: runner de filho descartado não liga ao card religado).
+            const r = await client.query("SELECT id FROM tickets WHERE id = $1 AND card_state IS NOT NULL AND child_project_id = $2", [tid, id]);
+            childCardId = (r.rows[0]?.id as string | undefined) ?? null;
+          }
+        }
+        return childCardId;
+      };
+      // M2: valida TUDO antes de gravar e grava numa transação — um CARD_MISMATCH (ou erro de FK) no meio da lista não deixa backlog parcial.
+      type Prepared = { taskId: string; module: string; ownerRole: string; requirements: unknown; status: string; cardId: string | null; originSpecFile: string | null };
+      const prepared: Prepared[] = [];
       for (const t of tasks) {
         const rawCard = (t as Record<string, unknown>).cardId ?? t.card_id ?? null;
         const rawOrigin = (t as Record<string, unknown>).originSpecFile ?? t.origin_spec_file ?? null;
+        // Aceita snake_case (task_id, owner_role) e camelCase (taskId, ownerRole) — runner pode enviar qualquer um
+        const taskId = (t as Record<string, unknown>).taskId as string ?? t.task_id ?? "";
         let cardId = typeof rawCard === "string" && rawCard !== "" ? rawCard : null;
         let originSpecFile = typeof rawOrigin === "string" && rawOrigin !== "" ? rawOrigin.slice(0, 500) : null;
-        if (cardId || originSpecFile) {
+        const inherited = String(taskId).startsWith(INHERITED_TASK_PREFIX);
+        if (inherited) cardId = null; // A3: TSK-INH-* vêm do pai, não são trabalho deste card (também B-3: nunca ligar herdadas ao card)
+        if (cardId || originSpecFile || !inherited) {
           // Flag CARDS_BANCADA desligada para o tenant ⇒ o vínculo é ignorado (estado do banco idêntico ao de antes).
           if (cardsOn === undefined) cardsOn = await flagEnabled(client, "CARDS_BANCADA", await tenantOfProject(client, id));
           if (!cardsOn) { cardId = null; originSpecFile = null; }
@@ -574,31 +595,40 @@ export async function projectRoutes(app: FastifyInstance) {
         if (cardId && cardId !== (await resolveTicketId())) {
           return reply.status(400).send({ code: "CARD_MISMATCH", message: "card_id da task não é o card que originou este projeto" });
         }
-        // Aceita snake_case (task_id, owner_role) e camelCase (taskId, ownerRole) — runner pode enviar qualquer um
-        const taskId = (t as Record<string, unknown>).taskId as string ?? t.task_id ?? "";
+        // A3: flag ligada e o filho nasceu de um card ⇒ TODA task não herdada recebe o `card_id` do ticket do próprio projeto, mesmo que o runner não envie.
+        if (!cardId && !inherited && cardsOn) cardId = await resolveChildCardId();
         const module = (t as Record<string, unknown>).module as string ?? "backend";
         const ownerRole = (t as Record<string, unknown>).ownerRole as string ?? t.owner_role ?? "DEV_BACKEND";
-        const requirements = t.requirements ?? null;
-        const status = t.status ?? "ASSIGNED";
-        await client.query(
-          `INSERT INTO project_tasks (project_id, task_id, module, owner_role, requirements, status, card_id, origin_spec_file)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           ON CONFLICT (project_id, task_id) DO UPDATE SET
-             module = EXCLUDED.module,
-             owner_role = EXCLUDED.owner_role,
-             requirements = COALESCE(EXCLUDED.requirements, project_tasks.requirements),
-             card_id = COALESCE(EXCLUDED.card_id, project_tasks.card_id),
-             origin_spec_file = COALESCE(EXCLUDED.origin_spec_file, project_tasks.origin_spec_file),
-             -- IDEMPOTENCY: preserve terminal statuses; reset IN_PROGRESS/WAITING_REVIEW to ASSIGNED on restart
-             status = CASE
-               WHEN project_tasks.status IN ('DONE','QA_PASS','QA_FAIL','BLOCKED') THEN project_tasks.status
-               WHEN project_tasks.status IN ('IN_PROGRESS','WAITING_REVIEW') THEN 'ASSIGNED'
-               ELSE EXCLUDED.status
-             END,
-             updated_at = now()`,
-          [id, taskId, module, ownerRole, requirements, status, cardId, originSpecFile]
-        );
-        created.push({ taskId, module, ownerRole, status });
+        prepared.push({ taskId, module, ownerRole, requirements: t.requirements ?? null, status: t.status ?? "ASSIGNED", cardId, originSpecFile });
+      }
+      const created: unknown[] = [];
+      try {
+        await client.query("BEGIN");
+        for (const t of prepared) {
+          await client.query(
+            `INSERT INTO project_tasks (project_id, task_id, module, owner_role, requirements, status, card_id, origin_spec_file)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (project_id, task_id) DO UPDATE SET
+               module = EXCLUDED.module,
+               owner_role = EXCLUDED.owner_role,
+               requirements = COALESCE(EXCLUDED.requirements, project_tasks.requirements),
+               card_id = COALESCE(EXCLUDED.card_id, project_tasks.card_id),
+               origin_spec_file = COALESCE(EXCLUDED.origin_spec_file, project_tasks.origin_spec_file),
+               -- IDEMPOTENCY: preserve terminal statuses; reset IN_PROGRESS/WAITING_REVIEW to ASSIGNED on restart
+               status = CASE
+                 WHEN project_tasks.status IN ('DONE','QA_PASS','QA_FAIL','BLOCKED') THEN project_tasks.status
+                 WHEN project_tasks.status IN ('IN_PROGRESS','WAITING_REVIEW') THEN 'ASSIGNED'
+                 ELSE EXCLUDED.status
+               END,
+               updated_at = now()`,
+            [id, t.taskId, t.module, t.ownerRole, t.requirements, t.status, t.cardId, t.originSpecFile]
+          );
+          created.push({ taskId: t.taskId, module: t.module, ownerRole: t.ownerRole, status: t.status });
+        }
+        await client.query("COMMIT");
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw e;
       }
       return reply.status(201).send({ ok: true, tasks: created });
     } finally {
@@ -763,14 +793,20 @@ export async function projectRoutes(app: FastifyInstance) {
         });
       }
       // Gravar accepted_by e evidence no campo extra (jsonb merge)
-      await client.query(
+      // M7 (CAS): só UM aceite concorrente vence a transição (`WHERE status = <lido>`); o perdedor responde "já aceito" e NÃO roda os efeitos
+      // (push/PR/CHANGELOG/entrega). Evolução: marca `evolution_publish_state='pending'` NA MESMA escrita do aceite — se a API morrer antes do
+      // push, o filho não parece publicado (B1) e o reconciliador detecta e repara (M1/C1).
+      const accepted = await client.query(
         `UPDATE projects
          SET status = $1,
-             extra = COALESCE(extra, '{}') || $2::jsonb,
+             extra = COALESCE(extra, '{}') || $2::jsonb
+                     || CASE WHEN extra->>'evolution' = 'true' THEN $5::jsonb ELSE '{}'::jsonb END,
              updated_at = now()
-         WHERE id = $3`,
-        ["accepted", JSON.stringify({ accepted_by: acceptedBy, ...(evidence ? { accepted_evidence: evidence } : {}) }), id]
+         WHERE id = $3 AND status = $4 RETURNING id`,
+        ["accepted", JSON.stringify({ accepted_by: acceptedBy, ...(evidence ? { accepted_evidence: evidence } : {}) }), id, current,
+          JSON.stringify({ evolution_publish_state: "pending", evolution_publish_at: new Date().toISOString() })]
       );
+      if ((accepted.rowCount ?? accepted.rows.length) === 0) return reply.send({ ok: true, status: "accepted", message: "Projeto já aceito" });
       // Notificação ops (fire-and-forget): projeto produzido 100% (aceite explícito).
       scheduleFactoryDone(pool, id);
       // SKILL_FEEDBACK (ADR-025): aceite HUMANO é oráculo (b). Aceite do Cyborg (LLM) é sinal fraco e

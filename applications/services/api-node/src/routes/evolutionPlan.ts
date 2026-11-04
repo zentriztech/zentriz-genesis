@@ -17,6 +17,7 @@ import { SPEC_EDITABLE_STATUSES } from "../services/projectStatus.js";
 import { httpPost } from "./specs.js";
 import { createPlanJob, getPlanJob, runEvolutionPlan } from "../services/evolutionPlanner.js";
 import { cardBudgetBlock, cardSpecWriteBlock, noteCardSpecWrite } from "../services/cardSpecGuard.js";
+import { isSupersededChild } from "../services/cardState.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -227,7 +228,7 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
       if (!proj || !canAccessProjectRow(user, proj)) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
       if (user.role !== "tenant_admin" && !isProjectOwner(user, proj)) return reply.status(403).send({ code: "FORBIDDEN", message: "Só o administrador do tenant ou o dono do projeto mergeia." });
       if (proj.extra?.evolution !== true) return reply.status(409).send({ code: "NOT_EVOLUTION", message: "Este projeto não é uma evolução." });
-      if (proj.status !== "accepted") return reply.status(409).send({ code: "NOT_ACCEPTED", message: "Só evoluções aceitas podem ser mergeadas." });
+      if (proj.status !== "accepted" && !isSupersededChild(proj.status, proj.extra)) return reply.status(409).send({ code: "NOT_ACCEPTED", message: "Só evoluções aceitas podem ser mergeadas." });
       const ex = proj.extra ?? {};
       if (typeof ex.evolution_pr_number !== "number" || ex.evolution_push_pending === true) {
         return reply.status(409).send({ code: "NO_PR", message: "Não há PR publicado para esta evolução (verifique a publicação)." });

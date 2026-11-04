@@ -1,7 +1,7 @@
 /**
  * cardDelivery.ts — tarefa 4.3 da Fase 4 (plano EVOLUIR-PROJETO-BANCADA): marcação automática de EXECUTADO.
  *
- * Regra: filho `accepted` + PR mergeado (quando o filho tem repositório) ⇒ o card vai a `delivered` pela máquina de estados
+ * Regra: filho `accepted` (ou arquivado por supersessão) + PR mergeado (quando a LINHAGEM tem repositório) ⇒ o card vai a `delivered` pela máquina de estados
  * (`transitionCard`, ator `system`, auditado em `ticket_card_events`) e os arquivos de spec do card recebem
  * `executed_in_project` / `executed_at` (migration 149) NA MESMA TRANSAÇÃO da transição. As tasks do filho não têm coluna
  * `executed_*` (migration 150 só criou `card_id` e `origin_spec_file`): "task executada" é derivada — `project_tasks.project_id` =
@@ -21,7 +21,7 @@
  *   • card `promoted`/`blocked` com filho já aceito e prova de merge é levado antes a `in_factory` (`child_accepted`), na mesma transação.
  */
 import type { Pool } from "pg";
-import { transitionCard, type CardState, type CardTransitionResult } from "./cardState.js";
+import { transitionCard, isSupersededChild, acceptedLikeChildSql, type CardState, type CardTransitionResult } from "./cardState.js";
 import { ticketCode } from "./tickets.js";
 
 type Json = Record<string, unknown>;
@@ -39,25 +39,36 @@ export type MergeProof =
   | { required: true; merged: false; source: "unverified"; detail: string };
 
 /**
- * O PR do filho está mergeado? Sem repositório GitHub no filho não há o que mergear (`no_repo`). Com repositório: `extra.evolution_merged_at`
- * (merge feito pelo Genesis) ou consulta ao PR (`extra.evolution_pr_number` + instalação viva do tenant). Qualquer dúvida ⇒ não mergeado.
+ * O PR do filho está mergeado? Decisão de "sem repositório" pela LINHAGEM (B1): a linha do filho em `project_github_repos` só nasce DEPOIS de
+ * um push bem-sucedido, então "filho sem linha" quase sempre significa "código ainda não publicado". Ordem (fail-closed):
+ *   1. publicação pendente/em voo (`evolution_push_pending` ou `evolution_publish_state='pending'`) ⇒ `push_pending` (precedência máxima);
+ *   2. `extra.evolution_merged_at` (merge feito pelo Genesis) ⇒ provado;
+ *   3. nem o filho nem a linhagem têm repositório ⇒ `no_repo` (nada a publicar/mergear);
+ *   4. há repositório: exige `evolution_pr_number` + instalação viva e consulta o PR no GitHub. Qualquer dúvida ⇒ não mergeado.
  */
 export async function verifyChildPrMerged(pool: Pick<Pool, "query">, childId: string, deps: DeliveryDeps = {}): Promise<MergeProof> {
   const row = (await pool.query(
-    `SELECT p.extra, p.tenant_id, r.repo_full_name, gi.installation_id, gi.revoked_at
+    `SELECT p.extra, p.tenant_id, p.parent_project_id, r.repo_full_name, gi.installation_id, gi.revoked_at
        FROM projects p
        LEFT JOIN project_github_repos r ON r.project_id = p.id
        LEFT JOIN tenant_github_installations gi ON gi.tenant_id = p.tenant_id
       WHERE p.id = $1`, [childId])).rows[0] as
-    { extra: Json | null; repo_full_name: string | null; installation_id: number | string | null; revoked_at: string | null } | undefined;
+    { extra: Json | null; parent_project_id: string | null; repo_full_name: string | null; installation_id: number | string | null; revoked_at: string | null } | undefined;
   if (!row) return { required: true, merged: false, source: "unverified", detail: "child_not_found" };
-  if (!row.repo_full_name) return { required: false, merged: true, source: "no_repo" };
   const extra = row.extra ?? {};
+  if (extra.evolution_push_pending === true || extra.evolution_publish_state === "pending") return { required: true, merged: false, source: "unverified", detail: "push_pending" };
   if (typeof extra.evolution_merged_at === "string" && extra.evolution_merged_at) return { required: true, merged: true, source: "genesis_merge" };
+  let repoFull = row.repo_full_name;
+  if (!repoFull) {
+    const { findLineageRepo } = await import("./evolutionAccept.js");
+    const parent = (typeof extra.evolution_parent_id === "string" ? extra.evolution_parent_id : null) ?? row.parent_project_id ?? null;
+    repoFull = (await findLineageRepo(pool as never, childId, parent))?.repo_full_name ?? null;
+  }
+  if (!repoFull) return { required: false, merged: true, source: "no_repo" };
   const prNumber = typeof extra.evolution_pr_number === "number" ? extra.evolution_pr_number : null;
-  if (!prNumber || extra.evolution_push_pending === true) return { required: true, merged: false, source: "unverified", detail: "no_pr" };
+  if (!prNumber) return { required: true, merged: false, source: "unverified", detail: "no_pr" };
   if (!row.installation_id || row.revoked_at) return { required: true, merged: false, source: "unverified", detail: "no_installation" };
-  const [owner, repo] = row.repo_full_name.split("/");
+  const [owner, repo] = repoFull.split("/");
   if (!owner || !repo) return { required: true, merged: false, source: "unverified", detail: "bad_repo" };
   const lookup = deps.getPullRequest ?? (await import("./github.js")).getPullRequest;
   const pr = await lookup(Number(row.installation_id), { owner, repo, number: prNumber }).catch(() => ({ ok: false as const }));
@@ -78,8 +89,9 @@ export type CardDeliveryOutcome =
  */
 export async function deliverCardsOfChild(pool: Pool, childId: string, deps: DeliveryDeps = {}): Promise<CardDeliveryOutcome[]> {
   try {
-    const child = (await pool.query("SELECT status FROM projects WHERE id = $1", [childId])).rows[0] as { status: string } | undefined;
-    if (!child || child.status !== "accepted") return [];
+    const child = (await pool.query("SELECT status, extra FROM projects WHERE id = $1", [childId])).rows[0] as { status: string; extra: Json | null } | undefined;
+    // A1: filho arquivado por SUPERSESSÃO (aceito e substituído pela versão seguinte antes do merge) também entrega quando o PR é mergeado.
+    if (!child || (child.status !== "accepted" && !isSupersededChild(child.status, child.extra))) return [];
     const cards = (await pool.query(
       `SELECT id FROM tickets
         WHERE child_project_id = $1 AND card_state IN ('promoted', 'in_factory', 'blocked', 'delivered')
@@ -157,7 +169,7 @@ export async function deliverAcceptedCards(pool: Pool, opts: { limit?: number; t
   try {
     const rows = (await pool.query(
       `SELECT t.child_project_id AS id FROM tickets t JOIN projects p ON p.id = t.child_project_id
-        WHERE t.card_state IN ('promoted', 'in_factory', 'blocked') AND p.status = 'accepted'
+        WHERE t.card_state IN ('promoted', 'in_factory', 'blocked') AND ${acceptedLikeChildSql("p")}
           AND ($2::uuid IS NULL OR t.tenant_id = $2)
         GROUP BY t.child_project_id ORDER BY t.child_project_id LIMIT $1`, [opts.limit ?? 100, opts.tenantId ?? null])).rows as Array<{ id: string }>;
     for (const r of rows) {
@@ -166,4 +178,17 @@ export async function deliverAcceptedCards(pool: Pool, opts: { limit?: number; t
     }
   } catch { /* detector nunca derruba a passada */ }
   return n;
+}
+
+/**
+ * M4: tasks "executadas" de um card ENTREGUE — derivadas (sem coluna `executed_*` em `project_tasks`): tasks do filho do card, não herdadas,
+ * em estado de sucesso (`DONE`/`QA_PASS`). `CANCELLED`, `QA_FAIL`, `BLOCKED` e as ainda não rodadas NÃO contam. Card não entregue ⇒ vazio.
+ */
+export async function listExecutedTasksOfCard(pool: Pick<Pool, "query">, ticketId: string): Promise<Array<{ taskId: string; status: string }>> {
+  const r = await pool.query(
+    `SELECT pt.task_id, pt.status FROM tickets t JOIN project_tasks pt ON pt.project_id = t.child_project_id
+      WHERE t.id = $1 AND t.card_state = 'delivered'
+        AND pt.task_id NOT LIKE 'TSK-INH-%' AND pt.status IN ('DONE', 'QA_PASS')
+      ORDER BY pt.task_id`, [ticketId]);
+  return (r.rows as Array<{ task_id: string; status: string }>).map((x) => ({ taskId: x.task_id, status: x.status }));
 }
