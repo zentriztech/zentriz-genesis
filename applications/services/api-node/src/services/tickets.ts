@@ -222,7 +222,7 @@ export async function runAttachmentConversions(db: Db, ticketId: string): Promis
 export async function materializeTicketIntoSpecTree(
   db: Db,
   args: { ticket: TicketRow; childProjectId: string; authorEmail?: string | null; projectTitle?: string | null; versionLabel?: string | null },
-): Promise<{ ok: boolean; relDir: string; files: string[]; error?: string }> {
+): Promise<{ ok: boolean; relDir: string; files: string[]; error?: string; errorKind?: "permanent" | "transient" }> {
   const code = ticketCode(args.ticket.number);
   const relDir = `tickets/${code}`;
   const written: string[] = [];
@@ -286,7 +286,8 @@ export async function materializeTicketIntoSpecTree(
     }
     return { ok: true, relDir, files: written };
   } catch (err) {
-    return { ok: false, relDir, files: written, error: err instanceof Error ? err.message : String(err) };
+    // M-05: anexo de texto ilegível (ATTACHMENTS_STRICT) não melhora repetindo ⇒ permanente; o resto (disco, banco) é transitório.
+    return { ok: false, relDir, files: written, error: err instanceof Error ? err.message : String(err), errorKind: err instanceof AttachmentUnreadableError ? "permanent" : "transient" };
   }
 }
 

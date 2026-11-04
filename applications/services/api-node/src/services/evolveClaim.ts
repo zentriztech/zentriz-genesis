@@ -13,6 +13,10 @@
  *     spec_tree → code → ticket → triages → dialogue → finalize. Cada passo renova o lease (CAS por dono) e
  *     grava o marcador; uma repetição da mesma requisição retoma do ponto da falha (lease vencido) sem
  *     duplicar nada. O `git reset --hard` do passo `code` só roda enquanto o filho está 'materializing'.
+ *     M-04: durante o passo o lease é PULSADO (heartbeat a cada LEASE/3, CAS por `lease_owner`); perdeu o lease ⇒ o
+ *     trabalho aborta antes de qualquer efeito destrutivo e `failTerminal` só vale para quem ainda é o dono.
+ *     M-05: erro TRANSITÓRIO de git/rede/disco ⇒ lança (500 MATERIALIZATION_FAILED, lease liberado, a repetição retoma);
+ *     PERMANENTE ⇒ TerminalFailure. O marcador do passo só é gravado quando ele concluiu de fato.
  *
  * Respostas (H §2): 201 criado · 200 {replayed|resumed} · 409 EVOLUTION_IN_FLIGHT | MATERIALIZATION_IN_PROGRESS |
  * PARENT_SUPERSEDED | NO_ACCEPTED_HEAD | EVOLUTION_BUSY | TICKET_ALREADY_PROMOTED · 422 IDEMPOTENCY_KEY_REUSED ·
@@ -61,7 +65,13 @@ export interface EvolveClaimInput {
 export class SimulatedCrash extends Error {
   constructor(public readonly point: string) { super(`SimulatedCrash@${point}`); }
 }
-export const evolveTestHooks: { fault?: (point: string) => void } = {};
+export const evolveTestHooks: {
+  fault?: (point: string) => void;
+  /** SÓ testes: await no meio do trabalho de cada passo (`during:<passo>`) — simula passo longo (M-04). */
+  stall?: (point: string) => Promise<void>;
+  /** SÓ testes: período do heartbeat do lease, em ms (padrão LEASE/3). */
+  heartbeatMs?: number;
+} = {};
 const fault = (point: string) => evolveTestHooks.fault?.(point);
 
 class LeaseLost extends Error {}
@@ -79,12 +89,38 @@ const retry = (s = 2) => ({ "Retry-After": String(s) });
  * do dono da versão corrente, então um filho que esgota o saldo PAUSA a versão em produção).
  * O Guard continua soberano: aqui só se consome `checkProjectBudgetGate`, `resolveBudgetOwner` e `getBudgetSpend`.
  */
-async function budgetPreflight(pool: Pool, headCandidateId: string, tenantId: string | null): Promise<EvolveResult | null> {
-  const gate = await checkProjectBudgetGate(pool, headCandidateId);
-  if (!gate.ok) return { status: 402, body: { code: gate.code, message: gate.message } };
+/**
+ * M-23: dono do orçamento com herança. Linhagem mista (HEAD criado pelo /evolve legado, `budget_usd` NULL e sem dono) não
+ * pode travar a evolução se um ANCESTRAL (avô…raiz) tem orçamento: sobe `parent_project_id` (≤ 8 níveis) até achar um dono
+ * com `budget_usd`. Devolve o projeto-âncora (para o Guard) e o dono terminal; `null` = nenhum na cadeia.
+ */
+async function resolveBudgetAnchor(db: Pick<Pool | PoolClient, "query">, projectId: string): Promise<{ anchorId: string; ownerId: string; inherited: boolean } | null> {
+  let cur: string | null = projectId;
+  for (let depth = 0; cur && depth < 8; depth++) {
+    const owner = await resolveBudgetOwner(db, cur);
+    if (owner && owner.budgetUsd != null) return { anchorId: cur, ownerId: owner.ownerId, inherited: depth > 0 };
+    cur = ((await db.query("SELECT parent_project_id FROM projects WHERE id = $1", [cur])).rows[0]?.parent_project_id as string | null | undefined) ?? null;
+  }
+  return null;
+}
+
+async function budgetPreflight(pool: Pool, headCandidateId: string, tenantId: string | null, versionNumber: number): Promise<EvolveResult | null> {
+  const anchor = await resolveBudgetAnchor(pool, headCandidateId);
+  const gateTarget = anchor?.anchorId ?? headCandidateId;
+  const gate = await checkProjectBudgetGate(pool, gateTarget);
+  if (!gate.ok) {
+    if (gate.code === "BUDGET_MISSING") {
+      return { status: 402, body: {
+        code: "BUDGET_MISSING",
+        message: `A versão corrente (v${versionNumber}) não tem orçamento de LLM e nenhuma versão anterior da linhagem tem (linhagem mista, criada pelo fluxo antigo). Defina o orçamento em US$ na página da versão corrente antes de evoluir.`,
+        projectId: headCandidateId,
+      } };
+    }
+    return { status: 402, body: { code: gate.code, message: gate.message } };
+  }
   const min = await readEvolveMinFreeBudgetUsd(pool, tenantId);
   if (min != null && min > 0) {
-    const owner = await resolveBudgetOwner(pool, headCandidateId);
+    const owner = await resolveBudgetOwner(pool, gateTarget);
     if (owner && owner.budgetUsd != null) {
       const spend = await getBudgetSpend(pool, owner.ownerId);
       const free = owner.budgetUsd - spend.totalUsd;
@@ -167,6 +203,12 @@ async function respondExisting(
     if (r.status === 201) return { status: 200, body: { ...r.body, resumed: true } };
     return r;
   }
+  // M-21: crash entre o COMMIT do finalize e o recompute deixaria o lifecycle do produto velho. Replay de um filho
+  // finalizado há pouco (< 15 min) reexecuta o recompute (idempotente, best-effort).
+  const finalizedAt = Date.parse(String(((extra.materialization ?? {}) as Json).finalized_at ?? ""));
+  if (Number.isFinite(finalizedAt) && Date.now() - finalizedAt < 15 * 60_000) {
+    await recomputeProductLifecycle(pool, ex.product_id);
+  }
   return { status: 200, body: replayBody(ex, extra) };
 }
 
@@ -222,7 +264,7 @@ export async function runEvolveWithClaim(pool: Pool, input: EvolveClaimInput): P
   }
 
   // 1.3 — Guard e saldo mínimo ANTES do claim: negativa ⇒ nenhum filho nasce.
-  const denied = await budgetPreflight(pool, parentId, tenantId);
+  const denied = await budgetPreflight(pool, parentId, tenantId, Number(parentRow.version_number ?? 1));
   if (denied) return denied;
 
   // Produto da nova versão (§4.6, migration 064) — mesma regra do caminho histórico; find-or-create idempotente, fora do lock.
@@ -372,8 +414,9 @@ async function claim(pool: Pool, a: {
     }
 
     // 1.3 — dono TERMINAL do orçamento da versão corrente (resolveBudgetOwner só sobe um nível)
-    const owner = await resolveBudgetOwner(client, head.id);
-    const ownerId = owner?.ownerId ?? head.id;
+    // M-23: sem orçamento no HEAD (linhagem mista) herda o dono do ancestral mais próximo que tem (o preflight já validou).
+    const anchor = await resolveBudgetAnchor(client, head.id);
+    const ownerId = anchor?.ownerId ?? (await resolveBudgetOwner(client, head.id))?.ownerId ?? head.id;
 
     const claimId = randomUUID();
     const extra: Json = {
@@ -454,6 +497,55 @@ async function releaseLease(pool: Pool, childId: string, me: string): Promise<vo
     [childId, me],
   ).catch(() => undefined);
 }
+/** Renovação ESTRITA (heartbeat): só o dono atual do lease renova — nunca assume o de outro (≠ `takeOrRenewLease`). */
+async function renewLease(pool: Pool, childId: string, me: string): Promise<boolean> {
+  const r = await pool.query(
+    `UPDATE projects
+        SET extra = jsonb_set(extra, '{materialization,lease_until}', to_jsonb(now() + interval '${LEASE_SECONDS} seconds')), updated_at = now()
+      WHERE id = $1 AND status = 'materializing' AND extra->'materialization'->>'lease_owner' = $2::text
+      RETURNING id`,
+    [childId, me],
+  );
+  return (r.rowCount ?? 0) > 0;
+}
+
+/** Contexto entregue a cada passo: aborta o trabalho quando o lease se perde (M-04). */
+export interface StepCtx {
+  signal: AbortSignal;
+  /** Lança LeaseLost se o heartbeat já viu o lease perdido. */
+  assertAlive(): void;
+  /** Renovação estrita imediata: chamar ANTES de qualquer efeito destrutivo (rm/reset --hard/cópia). */
+  ensureLease(): Promise<void>;
+}
+
+/** Heartbeat do lease: `setTimeout` encadeado a cada LEASE/3 (CAS por dono). Erro de banco no pulso não derruba o passo. */
+function startHeartbeat(pool: Pool, childId: string, me: string): StepCtx & { stop(): void } {
+  const ac = new AbortController();
+  let stopped = false;
+  let lost = false;
+  const periodMs = evolveTestHooks.heartbeatMs ?? Math.floor((LEASE_SECONDS * 1000) / 3);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const markLost = () => { lost = true; ac.abort(); };
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      if (!(await renewLease(pool, childId, me))) { markLost(); return; }
+    } catch { /* erro transitório de banco: tenta no próximo pulso */ }
+    if (!stopped && !lost) timer = setTimeout(() => { void tick(); }, periodMs);
+  };
+  timer = setTimeout(() => { void tick(); }, periodMs);
+  const assertAlive = () => { if (lost || ac.signal.aborted) throw new LeaseLost(); };
+  return {
+    signal: ac.signal,
+    assertAlive,
+    async ensureLease() {
+      assertAlive();
+      if (!(await renewLease(pool, childId, me))) { markLost(); throw new LeaseLost(); }
+    },
+    stop() { stopped = true; if (timer) clearTimeout(timer); },
+  };
+}
+
 async function markStep(pool: Pool, childId: string, me: string, name: string, value: Json): Promise<void> {
   const r = await pool.query(
     `UPDATE projects
@@ -492,12 +584,32 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
       { id: string; title: string; product_id: string | null } | undefined;
     if (!head) throw new TerminalFailure("HEAD_NOT_FOUND", "A versão corrente da linhagem não existe mais.");
     const ticket = ticketId ? (await loadTicket(pool, ticketId)) ?? null : null;
+    // M-11: nunca materializar filho para um pedido que o humano recusou (ou que deixou de estar 'promoted') enquanto o claim esperava.
+    if (ticketId && (!ticket || ticket.status !== "promoted" || ticket.child_project_id !== childId)) {
+      throw new TerminalFailure(ticket?.status === "rejected" ? "TICKET_REJECTED" : "TICKET_NOT_PROMOTED",
+        `O pedido deixou de estar promovido para esta evolução (status ${ticket?.status ?? "inexistente"}); a evolução foi cancelada.`);
+    }
 
-    const runStep = async (name: string, work: () => Promise<Json>) => {
+    const runStep = async (name: string, work: (ctx: StepCtx) => Promise<Json>) => {
       if (steps[name]) return; // já marcado em tentativa anterior
       if (!(await takeOrRenewLease(pool, childId, me))) throw new LeaseLost();
+      // M-15: marcador `_started` ANTES do primeiro efeito em disco — o reconciliador (Q1) distingue "sem efeitos" só pelo banco.
+      if (!steps._started) {
+        const m = { at: iso() };
+        await markStep(pool, childId, me, "_started", m);
+        steps._started = m;
+      }
       fault(`before:${name}`);
-      const out = await work();
+      const hb = startHeartbeat(pool, childId, me); // M-04: lease pulsado enquanto o passo roda
+      let out: Json;
+      try {
+        await evolveTestHooks.stall?.(`during:${name}`);
+        hb.assertAlive();
+        out = await work(hb);
+        hb.assertAlive(); // lease perdido durante o trabalho ⇒ não grava marcador
+      } finally {
+        hb.stop();
+      }
       fault(`after_work:${name}`);
       const marker = { ...out, at: iso() };
       await markStep(pool, childId, me, name, marker);
@@ -506,17 +618,23 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
     };
 
     // S1 — árvore de spec: copia os arquivos da versão corrente (upsert + arquivo temporário/rename)
-    await runStep("spec_tree", () => stepSpecTree(pool, { childId, headId, version, requestText, ticket }));
+    await runStep("spec_tree", (ctx) => stepSpecTree(pool, { childId, headId, version, requestText, ticket, ctx }));
     // S2 — código: clone do repo `dev` em evolution/vN (ou cópia do apps/ da versão corrente)
-    await runStep("code", () => stepCode(pool, { childId, headId, rootId, version, headProductId: head.product_id, log }));
+    await runStep("code", (ctx) => stepCode(pool, { childId, headId, rootId, version, headProductId: head.product_id, log, ctx }));
     // S3 — request.md do ticket (+ anexos) na árvore da spec
     if (ticket) {
       await runStep("ticket", async () => {
         const mat3 = await materializeTicketIntoSpecTree(pool, {
           ticket, childProjectId: childId, authorEmail: user.email, projectTitle: String(head.title ?? ""), versionLabel: `v${version}`,
         });
-        if (!mat3.ok) log.warn({ childId, ticketId: ticket.id, err: mat3.error }, "[evolve] materialização do ticket falhou");
-        return { files: mat3.files, error: mat3.ok ? null : (mat3.error ?? "falhou") };
+        if (!mat3.ok) {
+          // M-05: anexo de texto ilegível (ATTACHMENTS_STRICT) é PERMANENTE ⇒ falha terminal explícita; o resto (disco, banco) é
+          // transitório ⇒ lança (500, lease liberado) e a repetição refaz o passo. Marcador só quando concluiu de fato.
+          log.warn({ childId, ticketId: ticket.id, err: mat3.error }, "[evolve] materialização do ticket falhou");
+          if (mat3.errorKind === "permanent") throw new TerminalFailure("ATTACHMENT_UNREADABLE", mat3.error ?? "anexo ilegível");
+          throw new Error(`materialização do ticket falhou: ${mat3.error ?? "erro desconhecido"}`);
+        }
+        return { files: mat3.files, error: null };
       });
     }
     // S4 — triagens de GAPs vivas da versão corrente
@@ -551,6 +669,7 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
       evolution_inherited_spec: steps.spec_tree?.inherited_spec ?? [],
       ...(ticket ? { ticket_files: steps.ticket?.files ?? [], ticket_materialize_error: steps.ticket?.error ?? null } : {}),
     };
+    // M-11: CAS conjunto — o filho só finaliza se o pedido AINDA estiver 'promoted' apontando para ele.
     const fin = await pool.query(
       `UPDATE projects
           SET status = $3,
@@ -559,10 +678,20 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
         WHERE id = $1 AND status = 'materializing'
           AND extra->'materialization'->>'claim_id' = $2::text
           AND extra->'materialization'->>'lease_owner' = $5::text
+          AND ( COALESCE(extra->>'ticket_id', '') = ''
+                OR EXISTS (SELECT 1 FROM tickets t WHERE t.id::text = projects.extra->>'ticket_id'
+                            AND t.status = 'promoted' AND t.child_project_id = projects.id) )
         RETURNING id`,
       [childId, claimId, inheritedFiles > 0 ? "spec_submitted" : "draft", JSON.stringify(finalExtra), me],
     );
-    if ((fin.rowCount ?? 0) === 0) throw new LeaseLost();
+    if ((fin.rowCount ?? 0) === 0) {
+      const tNow = ticketId ? await loadTicket(pool, ticketId) : null;
+      if (ticketId && (!tNow || tNow.status !== "promoted" || tNow.child_project_id !== childId)) {
+        throw new TerminalFailure(tNow?.status === "rejected" ? "TICKET_REJECTED" : "TICKET_NOT_PROMOTED",
+          `O pedido deixou de estar promovido para esta evolução (status ${tNow?.status ?? "inexistente"}); a evolução foi cancelada.`);
+      }
+      throw new LeaseLost();
+    }
     await recomputeProductLifecycle(pool, childRow.product_id); // best-effort por contrato (nunca lança)
     fault("after_finalize");
 
@@ -586,7 +715,7 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
   } catch (e) {
     if (e instanceof SimulatedCrash) throw e; // processo "morto": lease e marcadores ficam como estão
     if (e instanceof LeaseLost) return inProgress(childId, version);
-    if (e instanceof TerminalFailure) return failTerminal(pool, childId, rootId, e);
+    if (e instanceof TerminalFailure) return failTerminal(pool, { childId, rootId, me, version, productId: childRow.product_id }, e);
     await releaseLease(pool, childId, me); // falha recuperável: libera para a repetição retomar já
     log.warn({ err: e, childId }, "[evolve] materialização interrompida — repetir a requisição retoma");
     return {
@@ -596,46 +725,64 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
   }
 }
 
-/** Falha terminal: filho `failed` + ticket volta a `open` (a execução morreu, o pedido não — RFC-0009 inv. 3). */
-async function failTerminal(pool: Pool, childId: string, rootId: string, f: TerminalFailure): Promise<EvolveResult> {
+/**
+ * Falha terminal: filho `failed` + ticket volta a `open` (a execução morreu, o pedido não — RFC-0009 inv. 3).
+ * M-04: o `UPDATE` confere `lease_owner` — quem perdeu o lease NÃO mata o filho que outro executor está materializando
+ * (nesse caso nada muda: 409 MATERIALIZATION_IN_PROGRESS). M-06: recomputa o lifecycle do produto depois do commit.
+ */
+async function failTerminal(
+  pool: Pool,
+  c: { childId: string; rootId: string; me: string; version: number; productId: string | null },
+  f: TerminalFailure,
+): Promise<EvolveResult> {
+  const { childId, rootId } = c;
   const client = await pool.connect();
+  let marked = false;
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock($1::int, hashtext($2::text))", [NS_EVOLVE, rootId]);
-    await client.query(
+    const up = await client.query(
       `UPDATE projects
           SET status = 'failed',
               extra = jsonb_set(COALESCE(extra, '{}'::jsonb), '{materialization,error}', $2::jsonb),
               updated_at = now()
-        WHERE id = $1 AND status = 'materializing'`,
-      [childId, JSON.stringify({ code: f.code, message: f.message, at: iso() })],
+        WHERE id = $1 AND status = 'materializing' AND extra->'materialization'->>'lease_owner' = $3::text
+        RETURNING id`,
+      [childId, JSON.stringify({ code: f.code, message: f.message, at: iso() }), c.me],
     );
-    const reopened = await client.query(
-      `UPDATE tickets SET status = 'open', child_project_id = NULL, promoted_at = NULL, updated_at = now()
-        WHERE child_project_id = $1 AND status = 'promoted'
-      RETURNING id, tenant_id`,
-      [childId],
-    );
-    // 1.4 (TICKET_TRANSITIONS=on): auditoria promoted → open (falha terminal do filho).
-    for (const t of reopened.rows) {
-      if (await ticketTransitionsEnabled(client, { tenantId: t.tenant_id ? String(t.tenant_id) : null })) {
-        await recordTicketEvent(client, { ticketId: String(t.id), from: "promoted", to: "open", actorKind: "system", reason: `materialization_failed:${f.code}`, childProjectId: childId });
+    marked = (up.rowCount ?? 0) > 0;
+    if (!marked) {
+      await client.query("ROLLBACK");
+    } else {
+      const reopened = await client.query(
+        `UPDATE tickets SET status = 'open', child_project_id = NULL, promoted_at = NULL, updated_at = now()
+          WHERE child_project_id = $1 AND status = 'promoted'
+        RETURNING id, tenant_id`,
+        [childId],
+      );
+      // 1.4 (TICKET_TRANSITIONS=on): auditoria promoted → open (falha terminal do filho).
+      for (const t of reopened.rows) {
+        if (await ticketTransitionsEnabled(client, { tenantId: t.tenant_id ? String(t.tenant_id) : null })) {
+          await recordTicketEvent(client, { ticketId: String(t.id), from: "promoted", to: "open", actorKind: "system", reason: `materialization_failed:${f.code}`, childProjectId: childId });
+        }
       }
+      await client.query("COMMIT");
     }
-    await client.query("COMMIT");
   } catch (e) {
     try { await client.query("ROLLBACK"); } catch { /* noop */ }
     throw e;
   } finally {
     client.release();
   }
+  if (!marked) return inProgress(childId, c.version); // perdeu o lease: outro executor é o dono, não derruba o filho dele
+  await recomputeProductLifecycle(pool, c.productId); // M-06: o produto deixa de mostrar o filho vivo
   return { status: 422, body: { code: f.code, message: f.message, childProjectId: childId } };
 }
 
 // ── Passos ────────────────────────────────────────────────────────────────────────────────
 async function stepSpecTree(
   pool: Pool,
-  a: { childId: string; headId: string; version: number; requestText: string; ticket: TicketRow | null },
+  a: { childId: string; headId: string; version: number; requestText: string; ticket: TicketRow | null; ctx: StepCtx },
 ): Promise<Json> {
   const rows = (await pool.query(
     "SELECT file_path, filename, mime_type, rel_dir, is_primary FROM project_spec_files WHERE project_id = $1 ORDER BY is_primary DESC, created_at ASC",
@@ -652,6 +799,7 @@ async function stepSpecTree(
     mkdirSync(childSpecDir, { recursive: true });
     const primary = rows.find((r) => r.is_primary) ?? rows[0];
     for (const r of rows) {
+      a.ctx.assertAlive(); // M-04: lease perdido ⇒ para de escrever na árvore do filho
       if (!r.file_path || !existsSync(r.file_path)) continue;
       const isPrimary = r === primary;
       const relDir = (r.rel_dir ?? "").replace(/^\/+|\/+$/g, "");
@@ -683,68 +831,86 @@ async function stepSpecTree(
   return { files: inherited, inherited_spec: inheritedSpec };
 }
 
+/** Erros de git que NÃO se resolvem repetindo (repo/credencial/ref inexistentes, git ausente). O resto é tratado como transitório. */
+const PERMANENT_GIT_ERROR = /repository not found|authentication failed|permission denied|could not read username|invalid credentials|couldn't find remote ref|remote branch .* not found|not a git repository|does not appear to be a git repository|requested url returned error: 40[134]|bin[aá]rio `git` ausente/i;
+export function isPermanentGitError(msg: string | null | undefined): boolean {
+  return !!msg && PERMANENT_GIT_ERROR.test(msg);
+}
+/** Mensagem de erro de git sem credencial (header Basic / x-access-token) — defesa em profundidade para log e exceção. */
+function redactGit(msg: string | null | undefined): string {
+  return String(msg ?? "").replace(/Basic [A-Za-z0-9+/=]{8,}/g, "Basic ***").replace(/x-access-token:[^@\s]+/g, "x-access-token:***");
+}
+
 async function stepCode(
   pool: Pool,
-  a: { childId: string; headId: string; rootId: string; version: number; headProductId: string | null; log: EvolveLog },
+  a: { childId: string; headId: string; rootId: string; version: number; headProductId: string | null; log: EvolveLog; ctx: StepCtx },
 ): Promise<Json> {
   let source: "git-clone" | "disk-copy" | "none" = "none";
   let error: string | null = null;
-  try {
-    const { existsSync, mkdirSync, cpSync, rmSync, readdirSync } = await import("fs");
-    const { join } = await import("path");
-    const filesRoot = (process.env.PROJECT_FILES_ROOT ?? "").trim();
-    if (filesRoot) {
-      const childApps = join(filesRoot, a.childId, "apps");
-      mkdirSync(childApps, { recursive: true });
-      const repoRow = (await pool.query(
-        `SELECT gr.repo_url, gi.installation_id
-           FROM project_github_repos gr
-           JOIN projects p ON p.id = gr.project_id
-           LEFT JOIN tenant_github_installations gi ON gi.tenant_id = p.tenant_id
-          WHERE gr.project_id = ANY($1::uuid[])
-          ORDER BY (gr.project_id = $2) DESC LIMIT 1`,
-        [[a.rootId, a.headId], a.rootId],
-      )).rows[0] as { repo_url: string; installation_id: number | null } | undefined;
-      const fullName = repoRow?.repo_url ? repoRow.repo_url.replace(/^https?:\/\/github\.com\//, "").replace(/\.git$/, "") : null;
-      if (fullName && repoRow?.installation_id) {
-        // Reexecutável: `git init` em repo existente, remote remove/add, fetch --depth=1 + checkout -B + reset --hard
-        // origin/dev. O reset é seguro SÓ porque o filho está 'materializing' (nada foi trabalhado nele ainda).
-        const link = await gitLinkProjectFolder({ projectId: a.childId, fullName, installationId: Number(repoRow.installation_id), branch: "dev" });
-        if (link.ok) {
-          const br = await checkoutNewBranch(a.childId, `evolution/v${a.version}`);
-          source = "git-clone";
-          if (!br.ok) error = `branch local não criado: ${br.error}`;
-        } else {
-          error = link.error ?? "git-link falhou";
-        }
-      }
-      if (source !== "git-clone") {
-        const hasContent = (dir: string) => {
-          try { return readdirSync(dir).some((n) => ![".git", "node_modules", ".next", "dist"].includes(n)); } catch { return false; }
-        };
-        const candidates = [
-          join(filesRoot, a.headId, "apps"),
-          ...(a.headProductId ? [join(filesRoot, a.headProductId, a.headId, "apps")] : []),
-        ];
-        const src = candidates.find((c) => existsSync(c) && hasContent(c));
-        if (src) {
-          // Reexecução: começa do zero (cópia parcial anterior) — seguro só em 'materializing'.
-          rmSync(childApps, { recursive: true, force: true });
-          mkdirSync(childApps, { recursive: true });
-          cpSync(src, childApps, { recursive: true, filter: (s) => !/(^|\/)(node_modules|\.next|dist|__pycache__|\.venv|venv)(\/|$)/.test(s) });
-          source = "disk-copy";
-          if (existsSync(join(childApps, ".git"))) {
-            const br = await checkoutNewBranch(a.childId, `evolution/v${a.version}`);
-            if (!br.ok) error = `branch local não criado (disk-copy): ${br.error}`;
-          } else {
-            error = (error ? error + "; " : "") + "cópia sem .git — sem branch evolution/vN";
-          }
-        }
+  const { existsSync, mkdirSync, rmSync, readdirSync } = await import("fs");
+  const { cp } = await import("fs/promises");
+  const { join } = await import("path");
+  const filesRoot = (process.env.PROJECT_FILES_ROOT ?? "").trim();
+  // M-05: nada aqui engole exceção — fs/git/rede transitórios sobem (500 MATERIALIZATION_FAILED, a repetição retoma) e o
+  // marcador do passo só é gravado quando ele concluiu. `source:"none"` sem erro = nada a copiar (configuração, não falha).
+  if (filesRoot) {
+    const childApps = join(filesRoot, a.childId, "apps");
+    mkdirSync(childApps, { recursive: true });
+    const repoRow = (await pool.query(
+      `SELECT gr.repo_url, gi.installation_id
+         FROM project_github_repos gr
+         JOIN projects p ON p.id = gr.project_id
+         LEFT JOIN tenant_github_installations gi ON gi.tenant_id = p.tenant_id
+        WHERE gr.project_id = ANY($1::uuid[])
+        ORDER BY (gr.project_id = $2) DESC LIMIT 1`,
+      [[a.rootId, a.headId], a.rootId],
+    )).rows[0] as { repo_url: string; installation_id: number | null } | undefined;
+    const fullName = repoRow?.repo_url ? repoRow.repo_url.replace(/^https?:\/\/github\.com\//, "").replace(/\.git$/, "") : null;
+    if (fullName && repoRow?.installation_id) {
+      // Reexecutável: `git init` em repo existente, remote remove/add, fetch --depth=1 + checkout -B + reset --hard
+      // origin/dev. O reset é seguro SÓ porque o filho está 'materializing' E (M-04) o lease foi reconfirmado agora.
+      await a.ctx.ensureLease();
+      const link = await gitLinkProjectFolder({ projectId: a.childId, fullName, installationId: Number(repoRow.installation_id), branch: "dev" });
+      a.ctx.assertAlive();
+      if (link.ok) {
+        const br = await checkoutNewBranch(a.childId, `evolution/v${a.version}`);
+        if (!br.ok) throw new Error(`branch local evolution/v${a.version} não criado: ${redactGit(br.error)}`);
+        source = "git-clone";
+      } else if (isPermanentGitError(link.error)) {
+        error = redactGit(link.error ?? "git-link falhou"); // permanente: cai no fallback do disco, se houver
+      } else {
+        throw new Error(`git-link falhou (transitório): ${redactGit(link.error)}`);
       }
     }
-  } catch (err) {
-    error = err instanceof Error ? err.message : String(err);
-    a.log.warn({ err, childId: a.childId }, "[evolve] Falha ao preparar o código do filho");
+    if (source !== "git-clone") {
+      const hasContent = (dir: string) => {
+        try { return readdirSync(dir).some((n) => ![".git", "node_modules", ".next", "dist"].includes(n)); } catch { return false; }
+      };
+      const candidates = [
+        join(filesRoot, a.headId, "apps"),
+        ...(a.headProductId ? [join(filesRoot, a.headProductId, a.headId, "apps")] : []),
+      ];
+      const src = candidates.find((c) => existsSync(c) && hasContent(c));
+      if (src) {
+        // Reexecução: começa do zero (cópia parcial anterior) — seguro só em 'materializing' e com o lease reconfirmado (M-04).
+        await a.ctx.ensureLease();
+        rmSync(childApps, { recursive: true, force: true });
+        mkdirSync(childApps, { recursive: true });
+        // `fs.promises.cp` (assíncrono): o heartbeat do lease continua pulsando durante a cópia (o cpSync bloqueava o event loop).
+        await cp(src, childApps, { recursive: true, filter: (s) => !/(^|\/)(node_modules|\.next|dist|__pycache__|\.venv|venv)(\/|$)/.test(s) });
+        a.ctx.assertAlive();
+        source = "disk-copy";
+        if (existsSync(join(childApps, ".git"))) {
+          const br = await checkoutNewBranch(a.childId, `evolution/v${a.version}`);
+          if (!br.ok) error = `branch local não criado (disk-copy): ${redactGit(br.error)}`;
+        } else {
+          error = (error ? error + "; " : "") + "cópia sem .git — sem branch evolution/vN";
+        }
+      } else if (error) {
+        // git permanentemente indisponível E sem cópia do disco: não há código-base a entregar.
+        throw new TerminalFailure("CODE_BASE_UNAVAILABLE", `Não foi possível obter o código-base da versão corrente (${error}) e não há cópia no disco.`);
+      }
+    }
   }
   return { source, error };
 }

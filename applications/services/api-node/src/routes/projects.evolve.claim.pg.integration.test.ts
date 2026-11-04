@@ -272,7 +272,8 @@ describePg("Fase 1' / 1.1+1.3 — /evolve com claim (EVOLVE_CLAIM=on), Postgres 
         expect(kids).toHaveLength(1);
         expect(kids[0].status).toBe("spec_submitted");
         expect((kids[0].extra.materialization as { finalized_at?: string }).finalized_at).toBeTruthy();
-        expect(Object.keys((kids[0].extra.materialization as { steps: object }).steps).sort()).toEqual([...STEPS].sort());
+        // M-15: `_started` é gravado antes do primeiro efeito em disco (o reconciliador distingue "sem efeitos" só pelo banco)
+        expect(Object.keys((kids[0].extra.materialization as { steps: object }).steps).sort()).toEqual([...STEPS, "_started"].sort());
         expect(files).toEqual(["/spec-evolution-v2.md", "docs/rfc/RFC-0001.md", "tickets/TK-0001/request.md"]);
         // única duplicação tolerada (cosmética, H §1.3 S5): mensagem do diálogo se o crash for entre o INSERT e o marcador
         expect(dlg).toBe(point === "after_work:dialogue" ? 2 : 1);
