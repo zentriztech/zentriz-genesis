@@ -1194,6 +1194,68 @@ def _domain_incoherence_findings(audit: dict) -> list:
     return out
 
 
+# ── D-1 (AQ): gate de escopo/preservação também para as escritas do Cyborg ───────────────────────
+# O Dev passa por `runner._evolution_scope_check` (files_allowed do RFC + símbolos exportados + testes).
+# O rework autônomo do Cyborg gravava direto em apps/ e NÃO passava por ele: no TK-0001 reescreveu 4
+# specs fora do escopo (−304/−96/−85/−26 linhas) e 1 arquivo de produção, e `violations` ficou `{}`.
+
+def _cyborg_evolution_scope(project_id: str) -> list[str] | None:
+    """Globs `evolution_scope` (RFC) do projeto se ele é uma EVOLUÇÃO; `[]` se não é evolução / sem escopo
+    (gate inativo, como no Dev); `None` se a API não respondeu (gate não pôde ser avaliado — log alto)."""
+    status, text = _http("GET", f"{API_BASE_URL}/api/projects/{project_id}", timeout=15)
+    if status != 200:
+        logger.error("[Cyborg scope] não consegui ler o projeto %s (HTTP %s) — gate de escopo NÃO avaliado", project_id, status)
+        return None
+    try:
+        extra = (json.loads(text) or {}).get("extra") or {}
+        if isinstance(extra, str):
+            extra = json.loads(extra)
+    except Exception:
+        return None
+    if not isinstance(extra, dict) or extra.get("evolution") is not True:
+        return []
+    raw = extra.get("evolution_scope")
+    return [str(g) for g in raw if g] if isinstance(raw, list) else []
+
+
+def cyborg_scope_gate(project_id: str, arts: list[dict], scope: list[str] | None) -> tuple[list[dict], list[str]]:
+    """Aplica o MESMO gate do Dev (`runner._evolution_scope_check`: escopo do RFC, símbolos exportados e
+    testes não reduzidos) às escritas do Cyborg. Devolve (artefatos permitidos, violações).
+    `scope` vazio/None → passthrough. Os `path` do Cyborg são relativos a apps/ (ou `project/…`)."""
+    if not scope or not arts:
+        return arts, []
+    from types import SimpleNamespace
+    from orchestrator.project_storage import get_apps_dir
+    try:
+        from orchestrator.runner import _evolution_scope_check
+    except Exception as e:  # pragma: no cover — runner é importável no container do cyborg
+        logger.error("[Cyborg scope] gate do runner indisponível (%s) — escritas NÃO filtradas", e)
+        return arts, []
+    items: list[dict] = []
+    for i, a in enumerate(arts):
+        p = (a.get("path") or "").strip().lstrip("/")
+        is_project = p.startswith("project/") or p.endswith("api_contract.md")
+        items.append({"path": p if is_project else f"apps/{p}", "content": a.get("content"), "_i": i})
+    allowed_items, violations = _evolution_scope_check(
+        SimpleNamespace(evolution_scope=list(scope)), items, get_apps_dir(project_id) or Path("."))
+    return [arts[it["_i"]] for it in allowed_items], list(violations)
+
+
+def _persist_cyborg_violations(project_id: str, prod_id: str | None, violations: list[str]) -> None:
+    """Registro durável (`docs/cyborg/scope_violations.json`): o Cyborg não monta o volume do checkpoint
+    do runner, então `evolution-state.violations` não o enxerga — este arquivo é a evidência."""
+    if not violations:
+        return
+    try:
+        d = _resolve_proj_dir(project_id, prod_id) / "docs" / "cyborg"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "scope_violations.json").write_text(
+            json.dumps({"project_id": project_id, "violations": violations[-200:]}, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+    except Exception as e:
+        logger.warning("[Cyborg scope] violações não persistidas: %s", e)
+
+
 def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_id: str,
                       max_rounds: int = 2, mode: str = "surgical") -> dict:
     """Correção AUTÔNOMA via /invoke/dev quando o engineer-bridge (Claude CLI) está ausente.
@@ -1219,6 +1281,8 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
     from orchestrator.project_storage import write_apps_artifact
     proj_dir = _resolve_proj_dir(project_id, prod_id)
     cur_audit = audit
+    _evo_scope = _cyborg_evolution_scope(project_id)   # D-1: None = não avaliado (log alto); [] = sem gate
+    _scope_violations: list[str] = []
 
     def _count_blk(a: dict) -> int:
         return sum(sum(1 for f in getattr(ar, "findings", []) or [] if f.severity == "BLOCKER")
@@ -1353,7 +1417,8 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
                 if f.severity in ("BLOCKER", "MAJOR"):
                     findings.append(f"[{f.severity}] {f.area}: {f.description}")
         if not findings:
-            return {"ok": True, "rounds": rnd - 1, "final_audit": cur_audit, "delivered": True}
+            return {"ok": True, "rounds": rnd - 1, "final_audit": cur_audit, "delivered": True,
+                    "scope_violations": _scope_violations}
 
         # Achado #55: no modo feature, se a auditoria sinaliza DOMÍNIO ERRADO, esta rodada roda em
         # submodo REGENERAÇÃO DE MODELO (reescreve o núcleo do domínio p/ bater com a spec canônica)
@@ -1565,6 +1630,16 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
                 "(substitua o shape errado pelo da spec, removendo o que a spec não define):\n"
                 + "\n".join(_parts) + "\n"
             )
+        _scope_block = ""
+        if _evo_scope:
+            _scope_block = (
+                "## ESCOPO DA EVOLUÇÃO (INVIOLÁVEL — gate determinístico)\n"
+                "Só é permitido criar/alterar arquivos que casem com: " + ", ".join(_evo_scope[:12]) + ". "
+                "Specs/testes existentes NÃO podem perder casos de teste; exports existentes não podem sumir. "
+                "Escritas fora disso são DESCARTADAS.\n"
+                + (("Rejeitadas nas rodadas anteriores: " + "; ".join(_scope_violations[-3:]) + "\n") if _scope_violations else "")
+                + "\n"
+            )
         _fix_user = (
             f"## Spec (PRODUCT_SPEC)\n{ctx.get('spec','')[:_spec_budget]}\n\n"
             f"## Arquitetura do Engineer\n{ctx.get('engineer_architecture','')[:_arch_budget]}\n\n"
@@ -1574,6 +1649,7 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
             f"## Código atual (amostra)\n{ctx.get('source_sample','')[:_src_budget]}\n\n"
             f"## Árvore atual\n{ctx.get('apps_tree','')[:_tree_budget]}\n"
             f"{_build_block}\n"
+            f"{_scope_block}"
             f"## Problemas a corrigir ({len(findings)}) — priorize BLOCKERs, no máx {_max_files} arquivos nesta rodada\n"
             + "\n".join(f"- {x}" for x in findings[:20])
         )
@@ -1656,6 +1732,18 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
             logger.warning("[Cyborg rework] sem JSON de artifacts após %d tentativa(s) — encerrando rework", _max_llm_attempts)
             break
         arts = _obj.get("artifacts", []) or []
+        # D-1: mesmo gate do Dev (escopo do RFC + símbolos + testes) ANTES de gravar. Violação ⇒ o artefato
+        # é rejeitado (não gravado), registrado em `scope_violations` e a rodada segue com o que passou;
+        # se nada passou, `written == 0` encerra o rework (nunca "repara" fora do escopo).
+        arts, _rnd_viol = cyborg_scope_gate(project_id, arts, _evo_scope)
+        if _rnd_viol:
+            _scope_violations.extend(_rnd_viol)
+            _persist_cyborg_violations(project_id, prod_id, _scope_violations)
+            logger.warning("[Cyborg scope] rodada %d: %d escrita(s) REJEITADA(S) pelo gate de escopo: %s",
+                           rnd, len(_rnd_viol), "; ".join(_rnd_viol[:5]))
+            _post_dialogue(project_id,
+                f"⛔ Cyborg — {len(_rnd_viol)} escrita(s) rejeitada(s) pelo gate de escopo do RFC "
+                f"(não gravadas): " + "; ".join(_rnd_viol[:3]) + ("…" if len(_rnd_viol) > 3 else ""))
         written = 0
         # Achado #33: snapshot dos arquivos que ESTA rodada vai sobrescrever, p/ permitir
         # rollback se ela regredir. Guarda (abs_path, conteúdo_anterior | None se novo).
@@ -1832,7 +1920,8 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
                 pass
 
     total_blk = _count_blk(cur_audit)
-    return {"ok": total_blk == 0, "rounds": rnd, "final_audit": cur_audit, "delivered": total_blk == 0}
+    return {"ok": total_blk == 0, "rounds": rnd, "final_audit": cur_audit, "delivered": total_blk == 0,
+            "scope_violations": _scope_violations}
 
 
 # ── Fase 3: Parse resultado do Claude Code ────────────────────────────────────

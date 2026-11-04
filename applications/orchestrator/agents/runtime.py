@@ -418,6 +418,32 @@ def _prompt_census_record(
     return censo
 
 
+def response_format_instruction() -> str:
+    """Instrução de formato de saída que fecha toda mensagem de usuário dos agentes.
+
+    🔴 D-2 (EVOLUIR-PROJETO-AQ, 2026-11-04) — CAUSA-RAIZ do "QA nunca devolve JSON" (9/9) e de ~43 %
+    das chamadas do Dev: a instrução antiga pedia "seu raciocínio dentro de tags <thinking>...</thinking>".
+    No Sonnet 5.5 (Bedrock) esse pedido de raciocínio literal faz a API encerrar a resposta com
+    `stop_reason="refusal"`, `content=[]` e `output_tokens=0` (HTTP 200, ~2 s, input cobrado). O parser
+    nunca recebeu texto: "Resposta sem JSON" era a resposta VAZIA, não JSON malformado. Medido ao vivo
+    com o mesmo prompt do QA: instrução antiga → refusal 3/3; só trocando-a por "apenas o JSON" →
+    resposta normal 3/3. O raciocínio do modelo é adaptativo e fica fora do texto de qualquer forma.
+
+    `GENESIS_ASK_THINKING_TAGS=1` restaura a instrução antiga (modelos que a aceitam). Padrão: não pedir.
+    """
+    if os.environ.get("GENESIS_ASK_THINKING_TAGS", "").strip() == "1":
+        return (
+            "Responda primeiro com seu raciocínio dentro de tags <thinking>...</thinking>, "
+            "depois com o JSON ResponseEnvelope dentro de tags <response>...</response>. "
+            "O JSON deve ser válido (sem comentários, sem vírgula trailing)."
+        )
+    return (
+        "Responda apenas com o JSON ResponseEnvelope dentro de tags <response>...</response>. "
+        "Não escreva texto fora das tags. "
+        "O JSON deve ser válido (sem comentários, sem vírgula trailing)."
+    )
+
+
 def build_user_message(message: dict, role: str = "", model: str = "") -> str:
     """
     Monta a mensagem do usuário com TODO o contexto necessário (AGENT_LLM_COMMUNICATION_ANALYSIS).
@@ -767,11 +793,7 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
                 "- só entregue `content` completo se a mudança for uma reescrita de fato do documento."
             )
 
-    instruction = (
-        "Responda primeiro com seu raciocínio dentro de tags <thinking>...</thinking>, "
-        "depois com o JSON ResponseEnvelope dentro de tags <response>...</response>. "
-        "O JSON deve ser válido (sem comentários, sem vírgula trailing)."
-    )
+    instruction = response_format_instruction()
     parts.append(f"## Instrução\n{instruction}")
     _prompt = "\n\n".join(parts)
     # GAP-146: o censo é a ÚLTIMA coisa antes do return — assim ele mede o prompt que de fato saiu,
@@ -2862,6 +2884,9 @@ def run_agent(
         stop_reason = getattr(response, "stop_reason", None) if response else None
         if stop_reason == "max_tokens":
             logger.warning("[%s] Resposta truncada pela API (stop_reason=max_tokens). Raw gravado com %d chars.", agent_name, len(raw_text))
+        if stop_reason == "refusal":
+            logger.warning("[%s] API encerrou com stop_reason=refusal (content vazio) — não é JSON malformado: "
+                           "o modelo não produziu texto. Verifique o prompt de saída (D-2/AQ).", agent_name)
         _persist_raw_llm_response(role, message, raw_text)
         try:
             from orchestrator.envelope import extract_thinking
@@ -2937,6 +2962,19 @@ def run_agent(
             if "next_actions" in out and isinstance(out["next_actions"], list):
                 out["next_actions"] = {}
 
+        # D-2 (AQ): resposta SEM texto (refusal / vazia) tem causa e erro PRÓPRIOS. Antes caía em
+        # "Resposta sem JSON (ResponseEnvelope)" — igual a um JSON malformado — e o QA era contado
+        # como "rodou". Agora o envelope sai marcado (`_refusal` / `_empty_response`) e com o motivo.
+        _refused = stop_reason == "refusal"
+        _empty_resp = not (raw_text or "").strip()
+        if _refused or _empty_resp:
+            _why = ("LLM_REFUSAL: o modelo encerrou com stop_reason=refusal e nenhum texto (output_tokens=%d)" % int(_output_tokens or 0)
+                    if _refused else
+                    "LLM_EMPTY_RESPONSE: o modelo devolveu resposta vazia (stop_reason=%s, output_tokens=%d)" % (stop_reason, int(_output_tokens or 0)))
+            parse_errors = [_why] + [e for e in parse_errors if "não contém JSON" not in e]
+            out["summary"] = _why
+            out["_refusal" if _refused else "_empty_response"] = True
+
         # F1 — materialização do formato `edits` do CTO ANTES dos gates: daqui para baixo o artefato
         # é um `content` completo como sempre foi. Falha de casamento vira erro de validação e,
         # portanto, repair da LEI 5 com o trecho real que não casou (nunca aplicação parcial).
@@ -2975,7 +3013,10 @@ def run_agent(
             log_agent_call(agent_name, mode, budget, out, duration_ms, request_id=request_id)
             return _normalize_response_envelope(out, request_id, raw_text)
 
-        if repair_attempt < MAX_REPAIRS:
+        # Recusa do modelo: UM reparo (o feedback muda o prompt) e basta. Repetir indefinidamente o mesmo
+        # pedido recusado só queima input (QA: 35 mil tokens x 3 por tarefa, 0 de saída).
+        _refusal_exhausted = _refused and repair_attempt >= 1
+        if repair_attempt < MAX_REPAIRS and not _refusal_exhausted:
             # 2A.7: fato duro "schema/envelope reprovado após o reparo do Orchestrator" ⇒ o ÚLTIMO
             # reparo vai ao Advisor. Truncamento, resposta vazia e falha de qualidade NÃO escalam.
             if _roles_on and _llm_roles.schema_escalation_eligible(

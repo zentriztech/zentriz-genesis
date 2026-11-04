@@ -342,6 +342,27 @@ def extract_json_from_text(text: str) -> str | None:
             pass
     if text.startswith("{"):
         return text
+    # 4) Prosa/raciocínio ANTES do JSON, sem <response> nem cerca: procura o 1º objeto JSON COMPLETO
+    #    que seja um envelope (tem `status`). Seguro: `raw_decode` só aceita JSON bem formado, o
+    #    objeto precisa parecer envelope e o resultado segue para a validação de schema/paths do
+    #    chamador — nada aqui concede confiança ao conteúdo (D-2, EVOLUIR-PROJETO-AQ).
+    return _first_envelope_object(text)
+
+
+def _first_envelope_object(text: str, max_tries: int = 25) -> str | None:
+    """1º objeto JSON bem formado de `text` com chave `status` (candidato a ResponseEnvelope), ou None."""
+    dec = json.JSONDecoder()
+    idx = text.find("{")
+    tries = 0
+    while idx != -1 and tries < max_tries:
+        tries += 1
+        try:
+            obj, end = dec.raw_decode(text, idx)
+            if isinstance(obj, dict) and "status" in obj:
+                return text[idx:end]
+        except json.JSONDecodeError:
+            pass
+        idx = text.find("{", idx + 1)
     return None
 
 
