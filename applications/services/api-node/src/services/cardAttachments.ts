@@ -86,3 +86,28 @@ export async function listCardAttachments(pool: Pool, card: { id: string; tenant
   });
   return { items, strict, conversionEnabled, summary };
 }
+
+// ── Y-07: o conjunto de anexos (com o estado da conversão) faz parte do carimbo "pronto" ───────────────────
+
+/** Estados em que uma conversão pdf/doc/docx → .md ainda pode produzir um derivado. */
+export const CONVERSION_OPEN_STATES: readonly ConversionState[] = ["queued", "pending", "running"];
+
+export interface CardAttachmentsSnapshot {
+  /** sha256 do conjunto ordenado `(id, sha256 do conteúdo, estado da conversão, derivado)`: muda se um anexo entra/sai ou a conversão avança. */
+  hash: string;
+  /** Anexos cuja conversão ainda não terminou (bloqueiam o `ready`). */
+  open: Array<{ id: string; filename: string; state: ConversionState }>;
+}
+
+export async function cardAttachmentsSnapshot(pool: Pool, card: { id: string; tenant_id: string | null }): Promise<CardAttachmentsSnapshot> {
+  const { items } = await listCardAttachments(pool, card);
+  const norm = items
+    .map((a) => ({ id: a.id, sha: a.contentSha256, state: a.conversion.state, derived: a.conversion.derivedAttachmentId, from: a.derivedFromAttachmentId }))
+    .sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  const { sha256Hex } = await import("../lib/specTreeHash.js");
+  return {
+    hash: sha256Hex(Buffer.from(JSON.stringify(norm), "utf-8")),
+    open: items.filter((a) => (CONVERSION_OPEN_STATES as readonly string[]).includes(a.conversion.state))
+      .map((a) => ({ id: a.id, filename: a.filename, state: a.conversion.state })),
+  };
+}

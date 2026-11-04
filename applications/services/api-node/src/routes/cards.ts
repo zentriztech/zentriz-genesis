@@ -13,14 +13,17 @@
  *
  * Tudo exige `CARDS_BANCADA` ligada para o tenant do recurso (flag off ⇒ 404 "Recurso indisponível", como M-19) e a autorização
  * por tenant/produto dos tickets (a autorização vem PRIMEIRO: outro tenant recebe o mesmo 404 de sempre). Toda mudança de
- * `card_state` passa por `transitionCard` (cardState.ts). Mutações: conta de gestão (zentriz_admin) e token de serviço são recusados
- * (a autoria do card é do tenant).
+ * `card_state` passa por `transitionCard` (cardState.ts). Papéis (Y-06, decisão do Jean, reversível):
+ *   • criar / editar / anexar / refinar / validar ("ready") = `user` ou acima (conta de gestão `zentriz_admin` e token de serviço NÃO criam nem editam);
+ *   • PROMOVER, rejeitar, retomar, revalidar, reabrir e excluir = `tenant_admin`, `zentriz_admin` ou o AUTOR do card (`tickets.created_by`);
+ *   • token de serviço (`svc`) não muta nem LÊ card (Y-21: o runner não usa a API de cards).
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
-import { canAccessProjectRow } from "../lib/projectAccess.js";
+import { canAccessProjectRow, isProjectOwner } from "../lib/projectAccess.js";
+import { isCanonicalUuid } from "../lib/uuid.js";
 import { ticketCode } from "../services/tickets.js";
 import { kickTicketConversions } from "../services/attachmentConversionQueue.js";
 import {
@@ -51,14 +54,34 @@ function safeFilename(name: string): string {
 
 const NOT_AVAILABLE = { code: "NOT_FOUND", message: "Recurso indisponível" } as const;
 
-/** Autoria: conta de gestão e token de serviço não mutam cards. `true` = já respondeu. */
+/** Autoria: conta de gestão e token de serviço não criam nem editam cards. `true` = já respondeu. */
 function denyMutation(user: AuthUser, reply: FastifyReply): boolean {
   if (denyCreationForManagement(user, reply)) return true;
-  if (user.svc === "runner") {
+  if (user.svc) {
     reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não opera cards (autoria humana)." });
     return true;
   }
   return false;
+}
+
+/** Papéis que operam o ciclo do card de qualquer autor (Y-06). */
+const OPERATOR_ROLES = new Set(["tenant_admin", "zentriz_admin"]);
+
+/**
+ * Y-06: promover, rejeitar, retomar, revalidar, reabrir e excluir exigem `tenant_admin`, `zentriz_admin` ou o autor do card — o papel
+ * `user` comum opera só os próprios cards. Token de serviço nunca. `true` = já respondeu 403.
+ */
+function denyOperate(user: AuthUser, card: CardRow, reply: FastifyReply): boolean {
+  if (user.svc) {
+    reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não opera cards (autoria humana)." });
+    return true;
+  }
+  if (OPERATOR_ROLES.has(user.role) || isProjectOwner(user, { created_by: card.created_by ?? null })) return false;
+  reply.status(403).send({
+    code: "CARD_ACTION_NOT_ALLOWED",
+    message: "Promover, rejeitar, retomar, revalidar, reabrir ou excluir um card exige ser o autor dele ou administrador do tenant.",
+  });
+  return true;
 }
 
 function transitionFailure(reply: FastifyReply, card: CardRow, to: CardState, r: CardTransitionResult) {
@@ -85,6 +108,16 @@ export async function cardRoutes(app: FastifyInstance) {
   /** Produto acessível + flag do tenant. `null` ⇒ já respondeu 404. */
   async function productGuard(request: FastifyRequest, reply: FastifyReply, productId: string, opts: { capabilities?: boolean } = {}) {
     const user = getUser(request);
+    // Y-16: id que não é UUID canônico nunca chega ao Postgres (22P02 vazava a mensagem do banco no corpo).
+    if (!isCanonicalUuid(productId)) {
+      reply.status(404).send({ code: "NOT_FOUND", message: "Produto não encontrado" });
+      return null;
+    }
+    // Y-21: o runner (token de serviço) não consome a API de cards.
+    if (user.svc) {
+      reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não opera cards (autoria humana)." });
+      return null;
+    }
     const product = (await pool.query("SELECT id, tenant_id, created_by, name, status FROM products WHERE id = $1", [productId])).rows[0] as
       { id: string; tenant_id: string | null; created_by: string | null; name: string; status: string } | undefined;
     if (!product || !canAccessProjectRow(user, product)) {
@@ -102,6 +135,10 @@ export async function cardRoutes(app: FastifyInstance) {
   /** Card acessível + flag do tenant. Ticket legado (sem `card_state`) não é card ⇒ 404. */
   async function cardGuard(request: FastifyRequest, reply: FastifyReply, id: string): Promise<CardRow | null> {
     const user = getUser(request);
+    if (user.svc) {
+      reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não opera cards (autoria humana)." });
+      return null;
+    }
     const card = await loadCard(pool, id);
     if (!card || !canAccessProjectRow(user, card)) {
       reply.status(404).send({ code: "NOT_FOUND", message: "Card não encontrado" });
@@ -320,7 +357,7 @@ export async function cardRoutes(app: FastifyInstance) {
       const user = getUser(request);
       const card = await cardGuard(request, reply, request.params.id);
       if (!card) return;
-      if (denyMutation(user, reply)) return;
+      if ((path === "reject" ? denyOperate(user, card, reply) : denyMutation(user, reply))) return;
       const r = await transitionCard(pool, { ticketId: card.id, to, actorKind: "user", actorId: user.id, reason });
       if (r.kind === "applied" || r.kind === "noop") {
         return reply.send({ ok: true, replayed: r.kind === "noop", card: await fresh(card.id) });
@@ -349,6 +386,18 @@ export async function cardRoutes(app: FastifyInstance) {
       case "budget": return reply.status(r.status).send(r.body);
       case "no_head": return reply.status(409).send({ code: "NO_ACCEPTED_HEAD", message: "A linhagem do card não tem versão aceita para evoluir." });
       case "draft_unreadable": return reply.status(409).send({ code: "CARD_DRAFT_UNREADABLE", message: "O rascunho do card não tem spec legível no disco." });
+      case "conversion_pending":
+        return reply.status(409).send({
+          code: "CARD_ATTACHMENT_CONVERSION_PENDING", pending: r.open,
+          message: `Há ${r.open.length} anexo(s) com a conversão para texto ainda em andamento (${r.open.map((a) => `${a.filename}: ${a.state}`).join(", ")}). Aguarde o fim da conversão e valide de novo.`,
+        });
+      case "base_collision":
+        return reply.status(409).send({
+          code: "CARD_PATH_COLLIDES_WITH_BASE", paths: r.paths,
+          message: `O rascunho tem arquivo(s) que já existem na versão corrente e seriam reescritos na promoção: ${r.paths.join(", ")}. Renomeie ou remova do card.`,
+        });
+      case "spec_changed":
+        return reply.status(409).send({ code: "CARD_SPEC_CHANGED", message: "A spec (ou os anexos) do rascunho mudou durante a validação. Nada foi carimbado: valide de novo." });
       default: return transitionFailure(reply, card, "ready", r.result);
     }
   });
@@ -358,7 +407,7 @@ export async function cardRoutes(app: FastifyInstance) {
     const user = getUser(request);
     const card = await cardGuard(request, reply, request.params.id);
     if (!card) return;
-    if (denyMutation(user, reply)) return;
+    if (denyOperate(user, card, reply)) return;
     const r = await revalidateCard(pool, card, user);
     switch (r.kind) {
       case "revalidated": {
@@ -388,7 +437,7 @@ export async function cardRoutes(app: FastifyInstance) {
     const user = getUser(request);
     const card = await cardGuard(request, reply, request.params.id);
     if (!card) return;
-    if (denyMutation(user, reply)) return;
+    if (denyOperate(user, card, reply)) return;
     const r = await reopenCard(pool, card, user);
     switch (r.kind) {
       case "reopened": return reply.send({ ok: true, replayed: r.replayed, card: await fresh(card.id), message: "Card reaberto: a spec voltou a aceitar edição. Valide de novo antes de promover." });
@@ -420,7 +469,7 @@ export async function cardRoutes(app: FastifyInstance) {
     const user = getUser(request);
     const card = await cardGuard(request, reply, request.params.id);
     if (!card) return;
-    if (denyMutation(user, reply)) return;
+    if (denyOperate(user, card, reply)) return;
     const r = await promoteCard(pool, card, user, request.log);
     for (const [h, v] of Object.entries(r.headers ?? {})) reply.header(h, v);
     return reply.status(r.status).send(r.body);
@@ -431,7 +480,7 @@ export async function cardRoutes(app: FastifyInstance) {
     const user = getUser(request);
     const card = await cardGuard(request, reply, request.params.id);
     if (!card) return;
-    if (denyMutation(user, reply)) return;
+    if (denyOperate(user, card, reply)) return;
     // Antes de decidir, alinha o card ao estado real do filho (idempotente).
     await syncCardWithChild(pool, card.id).catch(() => undefined);
     const current = (await loadCard(pool, card.id)) ?? card;
@@ -468,7 +517,7 @@ export async function cardRoutes(app: FastifyInstance) {
     const user = getUser(request);
     const card = await cardGuard(request, reply, request.params.id);
     if (!card) return;
-    if (denyMutation(user, reply)) return;
+    if (denyOperate(user, card, reply)) return;
     const r = await deleteCard(pool, card.id);
     if (r.kind === "deleted") return reply.status(204).send();
     if (r.kind === "not_found") return reply.status(404).send({ code: "NOT_FOUND", message: "Card não encontrado" });
@@ -488,6 +537,8 @@ export async function cardRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string; attachmentId: string } }>("/api/cards/:id/attachments/:attachmentId", async (request, reply) => {
     const card = await cardGuard(request, reply, request.params.id);
     if (!card) return;
+    // Y-16: attachmentId malformado ⇒ 404 limpo (antes: 500 com a mensagem 22P02 do Postgres).
+    if (!isCanonicalUuid(request.params.attachmentId)) return reply.status(404).send({ code: "NOT_FOUND", message: "Anexo não encontrado" });
     const att = (await pool.query("SELECT id, filename, file_path FROM ticket_attachments WHERE id = $1 AND ticket_id = $2", [request.params.attachmentId, card.id]))
       .rows[0] as { id: string; filename: string; file_path: string } | undefined;
     if (!att) return reply.status(404).send({ code: "NOT_FOUND", message: "Anexo não encontrado" });

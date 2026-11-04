@@ -148,11 +148,22 @@ export function parseRfcMarkdown(pathOrName: string, content: string): ParsedRfc
  * CTO reimplementaria o RFC antigo. Herdados vêm em `extra.evolution_inherited_spec` [{path, sha}]; só são
  * ignorados enquanto o sha for idêntico (editar/ampliar um RFC herdado o torna RFC desta versão).
  */
-export async function collectEvolutionRfcs(db: Db, projectId: string, extra?: Record<string, unknown> | null): Promise<ParsedRfc[]> {
-  const rows = (await db.query(
-    "SELECT filename, file_path, rel_dir, content_sha256 FROM project_spec_files WHERE project_id = $1 ORDER BY filename ASC",
-    [projectId],
-  )).rows as Array<{ filename: string; file_path: string; rel_dir: string | null; content_sha256: string | null }>;
+/**
+ * Arquivo da spec JÁ LIDO (conteúdo em memória). O gate do card (Y-01) avalia o MESMO conteúdo que serviu ao hash do carimbo:
+ * lendo o banco/disco de novo entre o gate e o hash, uma escrita concorrente (apagar o RFC) passava pelo gate e ficava coberta pelo carimbo.
+ */
+export interface PreloadedSpecFile { filename: string; rel_dir: string | null; content: string; contentSha256?: string | null }
+
+export async function collectEvolutionRfcs(
+  db: Db, projectId: string, extra?: Record<string, unknown> | null, preloaded?: PreloadedSpecFile[],
+): Promise<ParsedRfc[]> {
+  const rows = (preloaded
+    ? preloaded.map((f) => ({ filename: f.filename, file_path: "", rel_dir: f.rel_dir, content_sha256: f.contentSha256 ?? null, content: f.content as string | undefined }))
+      .sort((a, b) => (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0))
+    : (await db.query(
+      "SELECT filename, file_path, rel_dir, content_sha256 FROM project_spec_files WHERE project_id = $1 ORDER BY filename ASC",
+      [projectId],
+    )).rows as Array<{ filename: string; file_path: string; rel_dir: string | null; content_sha256: string | null; content?: string }>);
   const inherited = new Map<string, string>();
   for (const it of (extra?.evolution_inherited_spec as Array<{ path?: string; sha?: string }> | undefined) ?? []) {
     if (it?.path && it?.sha) inherited.set(String(it.path).toLowerCase(), String(it.sha));
@@ -164,7 +175,8 @@ export async function collectEvolutionRfcs(db: Db, projectId: string, extra?: Re
     const inheritedSha = inherited.get(`${rel}/${r.filename}`.toLowerCase());
     if (inheritedSha && r.content_sha256 && inheritedSha === r.content_sha256) continue; // herdado sem alteração
     let content = "";
-    try { content = await readFile(r.file_path, "utf-8"); } catch { continue; }
+    if (r.content !== undefined) content = r.content;
+    else { try { content = await readFile(r.file_path, "utf-8"); } catch { continue; } }
     out.push(parseRfcMarkdown(`${rel}/${r.filename}`, content));
   }
   return out;
@@ -193,10 +205,10 @@ export function compatMax(list: Array<RfcCompat | null>): RfcCompat | null {
  * TELA (GET), que não pode escrever. O gate em si (RFC presente + válido) é UM só: nenhum caminho paralelo.
  */
 export async function evaluateEvolutionGate(
-  db: Db, projectId: string, extra: Record<string, unknown> | null | undefined, opts: { readOnly?: boolean } = {},
+  db: Db, projectId: string, extra: Record<string, unknown> | null | undefined, opts: { readOnly?: boolean; files?: PreloadedSpecFile[] } = {},
 ): Promise<EvolutionGateResult> {
   if (!extra || extra.evolution !== true) return { ok: true, applied: false };
-  const rfcs = await collectEvolutionRfcs(db, projectId, extra);
+  const rfcs = await collectEvolutionRfcs(db, projectId, extra, opts.files);
   if (rfcs.length === 0) {
     return {
       ok: false, code: "EVOLUTION_RFC_REQUIRED",
@@ -283,14 +295,14 @@ export function checkCardKindRequirements(kind: CardKind, rfcs: ParsedRfc[]): Ex
  * `extra`): quem grava o carimbo é o gate da fábrica na promoção do filho. Gate base primeiro; só se passar o tipo é avaliado.
  */
 export async function evaluateCardKindGate(
-  db: Db, draftProjectId: string, extra: Record<string, unknown> | null | undefined, kind: CardKind,
+  db: Db, draftProjectId: string, extra: Record<string, unknown> | null | undefined, kind: CardKind, opts: { files?: PreloadedSpecFile[] } = {},
 ): Promise<CardKindGateResult> {
-  const base = await evaluateEvolutionGate(db, draftProjectId, extra, { readOnly: true });
+  const base = await evaluateEvolutionGate(db, draftProjectId, extra, { readOnly: true, ...(opts.files ? { files: opts.files } : {}) });
   if (!base.ok) return base;
   if (!base.applied) {
     return { ok: false, code: "EVOLUTION_RFC_REQUIRED", message: "O rascunho do card não está marcado como evolução (extra.evolution)." };
   }
-  const rfcs = await collectEvolutionRfcs(db, draftProjectId, extra);
+  const rfcs = await collectEvolutionRfcs(db, draftProjectId, extra, opts.files);
   const miss = checkCardKindRequirements(kind, rfcs);
   if (miss) return miss;
   return { ok: true, kind, rfcs: base.rfcs, scope: base.scope, compat: base.compat };

@@ -23,7 +23,7 @@ import { projectRootCandidates } from "./connectManifestsDisk.js";
 import { parseSpecPath } from "../routes/specFiles.js";
 import { sha256Hex, SPEC_TREE_MAX_FILES, SPEC_TREE_MAX_FILE_BYTES } from "../lib/specTreeHash.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
-import { cardScopeInstruction, loadCardDraftInfo, noteCardSpecWrite } from "./cardSpecGuard.js";
+import { cardPathCollidesBody, cardScopeInstruction, findBaseCollision, listBaseFilenames, loadCardDraftInfo, noteCardSpecWrite } from "./cardSpecGuard.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROMPT_FILE = path.resolve(__dirname, "..", "assets", "EVOLVE_PLAN_PROMPT.md");
@@ -161,8 +161,15 @@ export async function buildEvolutionPlanContext(db: Db, childId: string, request
   const connectYaml = cardInfo ? baseConnectYaml : (connectRow ? (await readCapped(connectRow.file_path, 16_000) || null) : null);
   const changelogRow = files.find((f) => f.filename.toLowerCase() === "changelog.md" && norm(f.rel_dir) === "");
   const existingChangelog = changelogRow ? (await readCapped(changelogRow.file_path, 16_000) || null) : null;
-  const existingRfcs = files.filter((f) => norm(f.rel_dir).toLowerCase() === RFC_DIR).map((f) => f.filename);
-  const existingAdrs = files.filter((f) => norm(f.rel_dir).toLowerCase() === ADR_DIR).map((f) => f.filename);
+  let existingRfcs = files.filter((f) => norm(f.rel_dir).toLowerCase() === RFC_DIR).map((f) => f.filename);
+  let existingAdrs = files.filter((f) => norm(f.rel_dir).toLowerCase() === ADR_DIR).map((f) => f.filename);
+  if (cardInfo) {
+    // Y-08: o rascunho não tem RFC/ADR herdados; a numeração e a lista "não repita" valem sobre a árvore do HEAD SOMADA à do rascunho
+    // (senão o primeiro ADR do card sai `ADR-001` em cima do `ADR-001` herdado).
+    const [baseRfcs, baseAdrs] = await Promise.all([listBaseFilenames(db as never, childId, RFC_DIR), listBaseFilenames(db as never, childId, ADR_DIR)]);
+    existingRfcs = [...new Set([...baseRfcs, ...existingRfcs])];
+    existingAdrs = [...new Set([...baseAdrs, ...existingAdrs])];
+  }
 
   const filesRoot = (process.env.PROJECT_FILES_ROOT ?? process.env.HOST_PROJECT_FILES_ROOT ?? "").trim();
   let charter = "";
@@ -340,8 +347,10 @@ function resolvePhysical(projectId: string, relDir: string, filename: string): s
 export async function nextRfcNumber(db: Db, projectId: string): Promise<number> {
   const row = (await db.query("SELECT product_id FROM projects WHERE id = $1", [projectId])).rows[0] as { product_id: string | null } | undefined;
   const files = (await db.query("SELECT filename FROM project_spec_files WHERE project_id = $1 AND lower(coalesce(rel_dir,'')) = $2", [projectId, RFC_DIR])).rows as Array<{ filename: string }>;
+  // Y-08: rascunho de card ⇒ o piso local também considera os RFCs da versão corrente.
+  const baseNames = await listBaseFilenames(db as never, projectId, RFC_DIR).catch(() => [] as string[]);
   let localNext = 1;
-  for (const f of files) { const n = Number(f.filename.match(/^RFC-(\d{4})/i)?.[1] ?? 0); if (n >= localNext) localNext = n + 1; }
+  for (const f of [...files.map((x) => x.filename), ...baseNames].map((filename) => ({ filename }))) { const n = Number(f.filename.match(/^RFC-(\d{4})/i)?.[1] ?? 0); if (n >= localNext) localNext = n + 1; }
   if (!row?.product_id) return localNext;
   const r = (await db.query(
     "UPDATE products SET next_rfc_seq = GREATEST(next_rfc_seq, $2) + 1 WHERE id = $1 RETURNING next_rfc_seq",
@@ -449,6 +458,23 @@ export interface ApplyResult {
   questions: string[];
 }
 
+/**
+ * `upsertSpecFile` com a regra do card (Y-02/Y-08): arquivo que a versão corrente já tem NÃO é gravado no rascunho (a promoção o
+ * sobrescreveria no filho). Devolve `skipped` e avisa. Fora de card, é `upsertSpecFile` puro.
+ */
+async function upsertCardAware(db: Db, ctx: EvolutionPlanContext, relPath: string, content: string, warnings: string[]): Promise<"created" | "updated" | "skipped"> {
+  if (ctx.card) {
+    const parsed = parseSpecPath(relPath);
+    const info = parsed ? await loadCardDraftInfo(db as never, ctx.childId) : null;
+    const hit = parsed && info ? await findBaseCollision(db as never, info, parsed.relDir, parsed.filename) : null;
+    if (hit && info) {
+      warnings.push(String(cardPathCollidesBody(info, hit).message));
+      return "skipped";
+    }
+  }
+  return upsertSpecFile(db, ctx.childId, relPath, content, false);
+}
+
 export async function applyEvolutionPlan(db: Db, ctx: EvolutionPlanContext, plan: EvolutionPlan): Promise<ApplyResult> {
   const written: ApplyResult["written"] = [];
   const rfcProblems: ApplyResult["rfcProblems"] = [];
@@ -478,14 +504,14 @@ export async function applyEvolutionPlan(db: Db, ctx: EvolutionPlanContext, plan
     const content = `# RFC-${num} — ${d.title}\n\n> Compatibilidade declarada pelo arquiteto: **${plan.compat.toUpperCase()}** · gerado pela Bancada (Evoluir) — revise antes de promover.\n\n${body}\n`;
     const parsed = parseRfcMarkdown(relPath, content);
     if (parsed.problems.length) rfcProblems.push({ path: relPath, problems: parsed.problems });
-    written.push({ path: relPath, action: await upsertSpecFile(db, ctx.childId, relPath, content, false) });
+    written.push({ path: relPath, action: await upsertCardAware(db, ctx, relPath, content, warnings) });
   }
   for (let i = 0; i < plan.adrs.length; i++) {
     const d = plan.adrs[i];
     const num = String(adrBase + i).padStart(3, "0");
     const relPath = `${ADR_DIR}/ADR-${num}-${d.slug}.md`;
     const body = d.content.replace(/^#\s+[^\n]*\n?/, "").trimStart();
-    written.push({ path: relPath, action: await upsertSpecFile(db, ctx.childId, relPath, `# ADR-${num} — ${d.title}\n\n${body}\n`, false) });
+    written.push({ path: relPath, action: await upsertCardAware(db, ctx, relPath, `# ADR-${num} — ${d.title}\n\n${body}\n`, warnings) });
   }
   const hasChangelogItems = CHANGELOG_KEYS.some((k) => plan.changelog[k].length > 0);
   if (ctx.card) {

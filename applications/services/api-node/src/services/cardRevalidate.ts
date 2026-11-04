@@ -19,7 +19,11 @@
  */
 import fsp from "fs/promises";
 import path from "path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { projectRootCandidates } from "./connectManifestsDisk.js";
+
+const execFileAsync = promisify(execFile);
 
 type Row = Record<string, unknown>;
 export type CheckDb = { query(sql: string, params?: unknown[]): Promise<{ rows: Row[] }> };
@@ -71,15 +75,36 @@ export function isAlwaysAllowedGlob(glob: string): boolean {
   return /^(tests?|__tests__|docs)(\/|$)/i.test(g) || /^\*\*\/(tests?|__tests__)\//i.test(g) || /\.(test|spec)\.[a-z*]+$/i.test(g) || /\.md$/i.test(g);
 }
 
-export interface RepoTree { available: boolean; files: string[]; capped: boolean; root: string | null }
+export interface RepoTree {
+  available: boolean; files: string[]; capped: boolean; root: string | null;
+  /** `git-ls-tree` = árvore do COMMIT aceito (Y-13); `working-tree` = cópia de trabalho do disco (pode ter alterações não aceitas). */
+  source?: "git-ls-tree" | "working-tree";
+}
 
-/** Arquivos de `<PROJECT_FILES_ROOT>/[produto/]<projeto>/apps` (relativos a `apps/`). Sem clone/raiz ⇒ `available:false`. */
-export async function listRepoTree(projectId: string, productId: string | null, env: NodeJS.ProcessEnv = process.env): Promise<RepoTree> {
+/** Commit aceito: SHA hexadecimal curto/longo (nunca opção do git). */
+const COMMIT_SHA_RE = /^[0-9a-f]{7,64}$/i;
+
+/**
+ * Arquivos de `<PROJECT_FILES_ROOT>/[produto/]<projeto>/apps` (relativos a `apps/`). Sem clone/raiz ⇒ `available:false`.
+ * Y-13: com `opts.ref` (o commit aceito do HEAD, `extra.evolution_head_sha`) e um repositório git em `apps/`, a lista vem de
+ * `git ls-tree -r --name-only <ref>` — a árvore do commit aceito, não a cópia de trabalho. Sem `ref`/sem `.git`/erro do git ⇒ cópia de trabalho.
+ */
+export async function listRepoTree(projectId: string, productId: string | null, env: NodeJS.ProcessEnv = process.env, opts: { ref?: string | null } = {}): Promise<RepoTree> {
   const root = (env.PROJECT_FILES_ROOT ?? env.HOST_PROJECT_FILES_ROOT ?? "").trim();
   if (!root) return { available: false, files: [], capped: false, root: null };
   for (const cand of projectRootCandidates(root, projectId, productId)) {
     const apps = path.join(cand, "apps");
     try { if (!(await fsp.stat(apps)).isDirectory()) continue; } catch { continue; }
+    if (opts.ref && COMMIT_SHA_RE.test(opts.ref)) {
+      try {
+        await fsp.stat(path.join(apps, ".git"));
+        const out = await execFileAsync("git", ["-C", apps, "ls-tree", "-r", "--name-only", opts.ref], { timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
+        const all = String(out.stdout).split("\n").map((l) => l.trim()).filter(Boolean)
+          .filter((f) => !f.split("/").some((seg) => SKIP_DIRS.has(seg) || (seg.startsWith(".") && seg !== ".env.example")));
+        const capped = all.length > REPO_TREE_MAX_FILES;
+        return { available: true, files: capped ? all.slice(0, REPO_TREE_MAX_FILES) : all, capped, root: cand, source: "git-ls-tree" };
+      } catch { /* commit ausente do clone / git indisponível: cai na cópia de trabalho */ }
+    }
     const files: string[] = [];
     let capped = false;
     const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
@@ -95,7 +120,7 @@ export async function listRepoTree(projectId: string, productId: string | null, 
       }
     };
     await walk(apps, "", 0);
-    return { available: true, files, capped, root: cand };
+    return { available: true, files, capped, root: cand, source: "working-tree" };
   }
   return { available: false, files: [], capped: false, root: null };
 }
@@ -134,6 +159,11 @@ export interface RevalidateOutcome {
   /** O HEAD é outro (ou a spec do HEAD mudou): rebasear o ponteiro é necessário. */
   moved: boolean;
   repo: { available: boolean; filesNow: number; filesBefore: number | null; capped: boolean };
+  /**
+   * Y-13: o HEAD andou e os globs de `files_allowed` NÃO puderam ser conferidos (sem clone). O veredito é `stale` com
+   * `NEEDS_HUMAN_REVIEW`, e a jornada mostra o bloqueador "globs não conferidos" até alguém revalidar de novo.
+   */
+  globsUnverified: boolean;
   specDiff: { added: string[]; removed: string[]; changed: string[] };
 }
 
@@ -200,6 +230,14 @@ export function evaluateRevalidation(i: RevalidateInput): RevalidateOutcome {
       }
     }
   }
+  const globsUnverified = !i.treeNow.available && moved && i.rfcs.some((r) => r.filesAllowed.some((g) => !isAlwaysAllowedGlob(g)));
+  if (globsUnverified && !reasons.some((r) => r.code === "NEEDS_HUMAN_REVIEW")) {
+    reasons.push({
+      code: "NEEDS_HUMAN_REVIEW", severity: "warning",
+      message: "A versão corrente avançou e os globs de files_allowed não puderam ser conferidos (sem repositório/clone do HEAD): um humano precisa conferir o escopo do RFC antes de validar.",
+      details: { globsUnverified: true },
+    });
+  }
   const verdict: RevalidateVerdict = reasons.some((r) => r.severity === "conflict") ? "conflict" : moved ? "stale" : "ok";
-  return { verdict, reasons, globs, moved, repo, specDiff };
+  return { verdict, reasons, globs, moved, repo, globsUnverified, specDiff };
 }

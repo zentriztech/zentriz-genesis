@@ -22,6 +22,7 @@
 import { transitionCard, type CardState } from "./cardState.js";
 import { readRuntimeNumber, type RuntimeConfigDb } from "./runtimeTunables.js";
 import { cardUserMessage } from "./cardErrors.js";
+import { toCanonicalUuid } from "../lib/uuid.js";
 
 type Row = Record<string, unknown>;
 export type GuardDb = { query(sql: string, params?: unknown[]): Promise<{ rows: Row[]; rowCount?: number | null }> };
@@ -33,6 +34,10 @@ export const CARD_EXTRA_WRITABLE_DIRS = ["docs/rfc", "docs/adr"] as const;
 /** Chave de configuração do teto (em caracteres) do bloco de spec-base entregue à IA. calibrado=falso (o número do código só vale sem a chave). */
 export const CARD_BASE_CONTEXT_CHARS_KEY = "CARD_BASE_CONTEXT_CHARS";
 export const CARD_BASE_CONTEXT_FALLBACK_CHARS = 14_000;
+/** Teto de segurança do bloco de contexto (Y-09): o `zentriz_admin` pode configurar até 200 000; sem a chave vale o piso de 14 000. */
+export const CARD_BASE_CONTEXT_MAX_CHARS = 200_000;
+/** Teto de caracteres da LISTA de arquivos dentro do bloco (Y-22): a lista conta no orçamento e é truncada. */
+export const CARD_BASE_FILE_LIST_MAX_CHARS = 4_000;
 
 export interface CardDraftInfo {
   projectId: string;
@@ -42,6 +47,8 @@ export interface CardDraftInfo {
   /** `TK-0001`; `null` se o rascunho ficou órfão (sem ticket). */
   code: string | null;
   state: CardState | null;
+  /** Raiz da linhagem do serviço-alvo (`extra.card_target_root_id`): de lá sai o HEAD que o rascunho não pode reescrever. */
+  targetRootId?: string | null;
 }
 
 const code4 = (n: number) => `TK-${String(n).padStart(4, "0")}`;
@@ -52,19 +59,23 @@ const code4 = (n: number) => `TK-${String(n).padStart(4, "0")}`;
  */
 export async function loadCardDraftInfo(db: GuardDb, projectId: string, knownStatus?: string | null): Promise<CardDraftInfo | null> {
   if (knownStatus !== undefined && knownStatus !== null && knownStatus !== CARD_DRAFT_STATUS) return null;
-  if (!/^[0-9a-f-]{36}$/i.test(projectId)) return null;
+  // Y-04: o Postgres aceita UUID sem hífens ou entre chaves. O id é normalizado UMA vez aqui e a linha é resolvida por `::uuid`;
+  // `info.projectId` é sempre o id canônico lido do banco, nunca o texto cru da requisição.
+  const canonical = toCanonicalUuid(projectId);
+  if (!canonical) return null;
   const r = (await db.query(
-    `SELECT p.status, p.tenant_id, t.id AS ticket_id, t.number, t.card_state
+    `SELECT p.id, p.status, p.tenant_id, p.extra->>'card_target_root_id' AS target_root_id, t.id AS ticket_id, t.number, t.card_state
        FROM projects p LEFT JOIN tickets t ON t.draft_project_id = p.id
-      WHERE p.id = $1`,
-    [projectId],
+      WHERE p.id = $1::uuid`,
+    [canonical],
   )).rows[0];
   if (!r || String(r.status) !== CARD_DRAFT_STATUS) return null;
   const n = r.number === null || r.number === undefined ? null : Number(r.number);
   return {
-    projectId, tenantId: r.tenant_id ? String(r.tenant_id) : null,
+    projectId: r.id ? String(r.id) : canonical, tenantId: r.tenant_id ? String(r.tenant_id) : null,
     ticketId: r.ticket_id ? String(r.ticket_id) : null, number: n, code: n === null ? null : code4(n),
     state: r.card_state ? (String(r.card_state) as CardState) : null,
+    targetRootId: r.target_root_id ? String(r.target_root_id) : null,
   };
 }
 
@@ -116,6 +127,72 @@ export function cardPathOutOfScopeBody(info: CardDraftInfo, path: string): Recor
   };
 }
 
+/** Corpo da recusa por colisão com a árvore da versão corrente (409 `CARD_PATH_COLLIDES_WITH_BASE`, Y-02/Y-08). */
+export function cardPathCollidesBody(info: CardDraftInfo, path: string): Record<string, unknown> {
+  return {
+    code: "CARD_PATH_COLLIDES_WITH_BASE",
+    message: `'${path}' já existe na spec da versão corrente (somente leitura): o card não pode reescrever RFC/ADR herdado. Crie um arquivo novo com outro número ou nome${info.code ? ` (${info.code})` : ""}.`,
+    userMessage: cardUserMessage("CARD_PATH_COLLIDES_WITH_BASE"),
+    path,
+  };
+}
+
+const lowerNorm = (d: string | null | undefined) => normDir(d).toLowerCase();
+
+/**
+ * Colisão `(rel_dir, filename)` com a árvore do HEAD da linhagem (comparação sem diferenciar maiúsculas: conservador). A pasta do
+ * próprio card (`tickets/TK-NNNN/**`) é regenerada pelo passo `ticket` da promoção e fica fora da regra. `null` = sem colisão
+ * (ou sem HEAD legível: contexto a menos nunca derruba a escrita; o claim da promoção confere de novo).
+ */
+export async function findBaseCollision(db: GuardDb, info: CardDraftInfo, relDir: string | null | undefined, filename: string): Promise<string | null> {
+  const dir = lowerNorm(relDir);
+  const own = info.code ? `tickets/${info.code}`.toLowerCase() : null;
+  if (own && (dir === own || dir.startsWith(`${own}/`))) return null;
+  if (!info.targetRootId) return null;
+  const { resolveLineageHead } = await import("./lineage.js");
+  const head = await resolveLineageHead(db as never, info.targetRootId).catch(() => null);
+  if (!head) return null;
+  const hit = (await db.query(
+    "SELECT rel_dir, filename FROM project_spec_files WHERE project_id = $1 AND lower(btrim(COALESCE(rel_dir, ''), '/')) = $2 AND lower(filename) = $3 LIMIT 1",
+    [head.id, dir, filename.toLowerCase()],
+  )).rows[0];
+  return hit ? `${normDir(String(hit.rel_dir ?? "")) ? `${normDir(String(hit.rel_dir))}/` : ""}${String(hit.filename)}` : null;
+}
+
+/** Todos os caminhos do conjunto `files` que já existem no HEAD (fora da pasta do próprio card). Uma consulta só. */
+export async function findBaseCollisions(db: GuardDb, info: CardDraftInfo, files: Array<{ rel_dir: string | null; filename: string }>): Promise<string[]> {
+  if (!info.targetRootId || files.length === 0) return [];
+  const own = info.code ? `tickets/${info.code}`.toLowerCase() : null;
+  const { resolveLineageHead } = await import("./lineage.js");
+  const head = await resolveLineageHead(db as never, info.targetRootId).catch(() => null);
+  if (!head) return [];
+  const rows = (await db.query("SELECT rel_dir, filename FROM project_spec_files WHERE project_id = $1", [head.id])).rows;
+  const key = (d: string | null | undefined, f: string) => `${lowerNorm(d)}\u0000${f.toLowerCase()}`;
+  const inHead = new Map(rows.map((r) => [key(r.rel_dir as string | null, String(r.filename)), `${normDir(r.rel_dir as string | null) ? `${normDir(r.rel_dir as string | null)}/` : ""}${String(r.filename)}`]));
+  const out: string[] = [];
+  for (const f of files) {
+    const dir = lowerNorm(f.rel_dir);
+    if (own && (dir === own || dir.startsWith(`${own}/`))) continue;
+    const hit = inHead.get(key(f.rel_dir, f.filename));
+    if (hit) out.push(hit);
+  }
+  return out;
+}
+
+/** Nomes de arquivo que a versão corrente (HEAD) tem em `relDir` — base da numeração de RFC/ADR do planner para o rascunho (Y-08). */
+export async function listBaseFilenames(db: GuardDb, projectId: string, relDir: string): Promise<string[]> {
+  const info = await loadCardDraftInfo(db, projectId);
+  if (!info?.targetRootId) return [];
+  const { resolveLineageHead } = await import("./lineage.js");
+  const head = await resolveLineageHead(db as never, info.targetRootId).catch(() => null);
+  if (!head) return [];
+  const rows = (await db.query(
+    "SELECT filename FROM project_spec_files WHERE project_id = $1 AND lower(btrim(COALESCE(rel_dir, ''), '/')) = $2",
+    [head.id, lowerNorm(relDir)],
+  )).rows;
+  return rows.map((r) => String(r.filename));
+}
+
 /**
  * A porta única dos escritores. `null` = pode escrever (ou o projeto não é rascunho de card). `relPath`/`relDir`+`filename` (quando o
  * escritor sabe o destino) também são checados contra o escopo. Chamar ANTES de escrever.
@@ -128,13 +205,21 @@ export async function cardSpecWriteBlock(
   if (!info) return null;
   if (info.state !== "draft" && info.state !== "refining") return { status: 409, body: cardSpecLockedBody(info) };
   const code = info.code ?? "";
+  let target: { dir: string; filename: string; path: string } | null = null;
   if (opts.relPath != null && opts.relPath !== "") {
     if (!isCardWritablePath(code, opts.relPath)) return { status: 400, body: cardPathOutOfScopeBody(info, opts.relPath) };
+    const clean = normDir(opts.relPath);
+    const i = clean.lastIndexOf("/");
+    target = { dir: i >= 0 ? clean.slice(0, i) : "", filename: clean.slice(i + 1), path: clean };
   } else if (opts.filename != null) {
-    if (!isCardWritablePath(code, opts.relDir ?? "", opts.filename)) {
-      const p = normDir(opts.relDir) ? `${normDir(opts.relDir)}/${opts.filename}` : opts.filename;
-      return { status: 400, body: cardPathOutOfScopeBody(info, p) };
-    }
+    const p = normDir(opts.relDir) ? `${normDir(opts.relDir)}/${opts.filename}` : opts.filename;
+    if (!isCardWritablePath(code, opts.relDir ?? "", opts.filename)) return { status: 400, body: cardPathOutOfScopeBody(info, p) };
+    target = { dir: normDir(opts.relDir), filename: opts.filename, path: p };
+  }
+  // Y-02/Y-08: o card nunca reescreve um arquivo (RFC/ADR) que a versão corrente já tem — a promoção faria o upsert em cima dele no filho.
+  if (target) {
+    const hit = await findBaseCollision(db, info, target.dir, target.filename);
+    if (hit) return { status: 409, body: cardPathCollidesBody(info, hit) };
   }
   return null;
 }
@@ -183,10 +268,24 @@ export async function noteCardSpecWrite(
 ): Promise<void> {
   try {
     const info = await loadCardDraftInfo(db, projectId, opts.knownStatus);
-    if (!info || !info.ticketId || info.state !== "draft") return;
-    await transitionCard(db, { ticketId: info.ticketId, to: "refining", actorKind: "system", actorId: opts.actorId ?? null, reason: "spec_write" });
+    if (!info || !info.ticketId) return;
+    if (info.state === "draft" || info.state === "ready") {
+      // `draft → refining` na 1ª escrita. Y-01: o estado lido pode estar atrasado — o `ready` pode ter sido carimbado entre a leitura e a
+      // transição (a máquina trava o ticket e vê `ready`); a escrita passou pela guarda ANTES do `ready` e terminou DEPOIS dele, então o
+      // carimbo não vale: o card cai para `refining` e o carimbo é descartado, nunca fica `ready` sobre uma árvore que mudou.
+      const t = await transitionCard(db, {
+        ticketId: info.ticketId, to: "refining", actorKind: "system", actorId: opts.actorId ?? null,
+        reason: info.state === "ready" ? "spec_write_after_ready" : "spec_write",
+      });
+      if (t.kind === "applied" && t.from === "ready") {
+        await db.query(
+          "UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) - 'card_ready', updated_at = now() WHERE id = $1::uuid AND status = 'card_draft'",
+          [info.projectId],
+        );
+      }
+    }
   } catch (e) {
-    console.warn(`[cardSpecGuard] draft→refining após escrita não aplicado (best-effort): ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[cardSpecGuard] transição após escrita não aplicada (best-effort): ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -216,21 +315,34 @@ export async function buildCardBaseContextBlock(
     const spec = await loadBaseSpecForDraft(db as never, projectId);
     if (!spec) return "";
     const budget = opts.budgetChars
-      ?? (await readRuntimeNumber(db, CARD_BASE_CONTEXT_CHARS_KEY, info.tenantId, { min: 1000, max: 400_000 }))
+      ?? (await readRuntimeNumber(db, CARD_BASE_CONTEXT_CHARS_KEY, info.tenantId, { min: 1000, max: CARD_BASE_CONTEXT_MAX_CHARS }))
       ?? CARD_BASE_CONTEXT_FALLBACK_CHARS;
+    // Y-22: a LISTA de arquivos conta no orçamento do bloco e tem teto próprio (spec com centenas de arquivos não estoura o contexto).
+    const listBudget = Math.min(CARD_BASE_FILE_LIST_MAX_CHARS, Math.max(200, Math.floor(budget / 4)));
+    let listText = "";
+    let listed = 0;
+    for (const f of spec.files) {
+      const item = `${listed > 0 ? ", " : ""}${f.path} (${f.sizeBytes}B)`;
+      if (listText.length + item.length > listBudget) break;
+      listText += item;
+      listed++;
+    }
+    if (listed < spec.files.length) listText += `, … (+${spec.files.length - listed} arquivo(s) omitido(s) da lista)`;
     const lines: string[] = [
       `--- SPEC DA VERSÃO CORRENTE (v${spec.headVersion}) — SOMENTE LEITURA ---`,
       cardScopeInstruction(info.code),
       "",
-      `Arquivos da versão corrente (${spec.files.length}): ${spec.files.map((f) => `${f.path} (${f.sizeBytes}B)`).join(", ")}`,
+      `Arquivos da versão corrente (${spec.files.length}): ${listText}`,
     ];
     let used = lines.join("\n").length;
     for (const f of spec.files) {
       if (f.content === null || f.content === undefined) continue;
-      const remaining = budget - used;
+      // o cabeçalho de cada arquivo também entra na conta (antes o estouro era sempre o tamanho do cabeçalho)
+      const header = `\n### ARQUIVO DA VERSÃO CORRENTE (somente leitura): ${f.path}\n`;
+      const remaining = budget - used - header.length;
       if (remaining < 200) { lines.push("\n(demais arquivos da versão corrente omitidos por limite de contexto)"); break; }
       const body = f.content.length > remaining ? `${f.content.slice(0, remaining)}\n…(truncado)…` : f.content;
-      const chunk = `\n### ARQUIVO DA VERSÃO CORRENTE (somente leitura): ${f.path}\n${body}`;
+      const chunk = `${header}${body}`;
       lines.push(chunk);
       used += chunk.length;
     }

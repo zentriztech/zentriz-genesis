@@ -132,6 +132,11 @@ export async function buildCardJourney(pool: Pool, card: CardRow): Promise<CardJ
     } else {
       const gate = await evaluateCardKindGate(pool, draft.id, extra, kind);
       if (!gate.ok) blockers.push(blocker(gate.code, gate.message, gate.details));
+      // Y-13: o HEAD andou e a revalidação não conferiu os globs de files_allowed (sem clone do HEAD): um humano precisa conferir.
+      const reval = (extra.card_revalidation ?? null) as { globs_unverified?: boolean } | null;
+      if (reval?.globs_unverified) {
+        blockers.push(blocker("GLOBS_UNVERIFIED", "Globs não conferidos: a versão corrente avançou e o escopo (files_allowed) do RFC não foi comparado com o código (sem repositório/clone). Confira o escopo e revalide o card.", { revalidate: `POST /api/cards/${card.id}/revalidate` }));
+      }
       if (!head) blockers.push(blocker("NO_ACCEPTED_HEAD", "A linhagem do card não tem versão aceita."));
       else {
         if (base?.stale) blockers.push(blocker("CARD_BASE_STALE", `A versão corrente avançou para v${head.version_number}: revalide o card.`, { currentHead: head.id }));
@@ -149,6 +154,9 @@ export async function buildCardJourney(pool: Pool, card: CardRow): Promise<CardJ
     } else if (codes.has("CARD_BASE_STALE")) {
       action = { key: "revalidate", label: "Revalidar contra a versão corrente", method: "POST", path: `${cardPath}/revalidate`, enabled: true };
       headline = "A versão-base mudou"; detail = blockers.find((b) => b.code === "CARD_BASE_STALE")?.message ?? null; severity = "warning";
+    } else if (codes.has("GLOBS_UNVERIFIED")) {
+      action = { key: "revalidate", label: "Conferir o escopo e revalidar", method: "POST", path: `${cardPath}/revalidate`, enabled: true };
+      headline = "Globs não conferidos"; detail = blockers.find((b) => b.code === "GLOBS_UNVERIFIED")?.message ?? null; severity = "warning";
     } else if ([...codes].some((c) => c.startsWith("BUDGET_") || ["KILL_SWITCH", "GUARD_ERROR", "GLOBAL_HOURLY_CAP", "GLOBAL_DAILY_CAP"].includes(c))) {
       action = { key: "increase_budget", label: "Aumentar o orçamento", method: "PUT", path: draft?.budget_owner_project_id ? `/api/projects/${draft.budget_owner_project_id}/budget` : null, enabled: !!draft?.budget_owner_project_id };
       headline = "Orçamento de IA indisponível"; detail = blockers[0]?.message ?? null; severity = "error";

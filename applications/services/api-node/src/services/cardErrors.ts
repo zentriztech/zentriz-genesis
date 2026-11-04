@@ -23,6 +23,8 @@ export const CARD_ERRORS = {
   BAD_REQUEST: { http: 400, area: "geral", message: "Não entendemos o pedido. Confira os campos e tente de novo." },
   NOT_FOUND: { http: 404, area: "geral", message: "Não encontramos este item (ou ele não está disponível para você)." },
   FORBIDDEN: { http: 403, area: "geral", message: "Esta ação não é permitida para a sua conta." },
+  INVALID_ID: { http: 400, area: "geral", message: "O identificador informado não é válido. Recarregue a página e tente de novo." },
+  CARD_ACTION_NOT_ALLOWED: { http: 403, area: "geral", message: "Só o autor do card ou um administrador do tenant pode fazer isto." },
   MANAGEMENT_ACCOUNT_READONLY_CREATE: { http: 403, area: "geral", message: "Contas de gestão só consultam: peça a alguém do cliente para criar ou alterar cards." },
   INTERNAL: { http: 500, area: "geral", message: "Algo deu errado do nosso lado. Tente de novo em instantes." },
   GONE: { http: 410, area: "anexo", message: "O arquivo deste anexo não está mais disponível." },
@@ -42,10 +44,16 @@ export const CARD_ERRORS = {
   TICKET_INVALID_TRANSITION: { http: 409, area: "estado", message: "O pedido não pode ir para esse estado agora." },
   NOT_PROMOTED: { http: 409, area: "estado", message: "O pedido ainda não foi promovido." },
   USE_CARD_PROMOTE: { http: 409, area: "promocao", message: "Este pedido é um card: promova-o pelo próprio card." },
+  USE_CARD_DELETE: { http: 409, area: "estado", message: "Este projeto é o rascunho de um card: exclua ou recuse o card, não o projeto." },
+  USE_CARDS: { http: 409, area: "promocao", message: "Este tenant usa cards: abra um card para pedir a evolução, em vez de evoluir direto." },
 
   // ── spec do card (Fase 3) ─────────────────────────────────────────────────────────────────
   CARD_SPEC_LOCKED: { http: 409, area: "spec", message: "A spec do card está travada. Reabra o card para voltar a editar." },
   CARD_PATH_OUT_OF_SCOPE: { http: 400, area: "spec", message: "O card só escreve na própria pasta e no RFC/ADR dele. A spec da versão corrente é somente leitura." },
+  CARD_PATH_COLLIDES_WITH_BASE: { http: 409, area: "spec", message: "Este arquivo já existe na versão corrente e não pode ser reescrito pelo card. Use outro nome ou número." },
+  GLOBS_UNVERIFIED: { http: 409, area: "gate", message: "A versão corrente avançou e o escopo do RFC não foi conferido com o código. Confira e revalide o card." },
+  CARD_SPEC_CHANGED: { http: 409, area: "spec", message: "A spec mudou durante a validação. Valide o card de novo." },
+  CARD_ATTACHMENT_CONVERSION_PENDING: { http: 409, area: "anexo", message: "Ainda há anexo sendo convertido em texto. Aguarde o fim da conversão e valide de novo." },
   CARD_OPERATION_UNSUPPORTED: { http: 409, area: "spec", message: "Esta operação não se aplica a um card. Use o Chat IA ou o RFC do próprio card." },
   CARD_DRAFT_UNREADABLE: { http: 409, area: "spec", message: "Não conseguimos ler a spec do rascunho do card. Tente de novo ou peça apoio." },
 

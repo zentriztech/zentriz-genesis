@@ -187,8 +187,12 @@ export async function runConversionTick(db: QueueDb, opts: { ticketId?: string; 
       )).rows[0] as unknown as ConversionRow | undefined;
       if (!claimed) continue;
       res.claimed++;
-      try { res[await processClaimed(db, claimed)]++; }
-      catch (e) {
+      try {
+        const outcome = await processClaimed(db, claimed);
+        res[outcome]++;
+        // Y-07: conversão que termina FORA da drenagem inline (worker/kick) pode trazer texto novo para um card já validado.
+        if (outcome === "done" && !opts.ignoreBackoff) void notifyCardOfConversion(db, claimed.id);
+      } catch (e) {
         // falha ao gravar o estado final: o lock vence e a linha é retomada depois
         console.warn(`[attachmentConversion] falha ao concluir ${claimed.id}: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -197,6 +201,23 @@ export async function runConversionTick(db: QueueDb, opts: { ticketId?: string; 
     console.warn(`[attachmentConversion] passada falhou: ${e instanceof Error ? e.message : String(e)}`);
   }
   return res;
+}
+
+/**
+ * Y-07: avisa o card (se o pedido for um card) que uma conversão terminou — `syncCardAfterConversion` rematerializa o derivado no
+ * rascunho (se `refining`) ou devolve o card `ready` a `refining` (o carimbo não viu esse texto). Nunca lança.
+ */
+async function notifyCardOfConversion(db: QueueDb, conversionId: string): Promise<void> {
+  try {
+    const r = (await db.query(
+      `SELECT a.ticket_id FROM attachment_conversions c JOIN ticket_attachments a ON a.id = c.attachment_id WHERE c.id = $1`, [conversionId],
+    )).rows[0] as { ticket_id?: string } | undefined;
+    if (!r?.ticket_id) return;
+    const { syncCardAfterConversion } = await import("./cardService.js");
+    await syncCardAfterConversion(db as never, String(r.ticket_id));
+  } catch (e) {
+    console.warn(`[attachmentConversion] aviso ao card falhou (best-effort): ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /** Hook do upload (DEPOIS do commit): com a flag ligada enfileira e dispara a conversão em segundo plano. Nunca lança. */

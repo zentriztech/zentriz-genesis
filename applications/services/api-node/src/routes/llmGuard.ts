@@ -25,6 +25,25 @@ function getUser(request: FastifyRequest): AuthUser {
 
 type GuardBody = Partial<RecordInput> & { systemId?: string; serviceId?: string };
 
+/**
+ * Y-14: o Guard de custo para o filho (`status = 'stopped'`, `stopped_by = 'budget'`) dentro de `llmGuard.ts` (que não é tocado aqui),
+ * mas SEM avisar o card ligado a ele. Este é o ponto em que o pipeline já fala com o Guard (preflight negado / registro de chamada):
+ * depois da resposta, e sem atrasá-la, o card do filho é alinhado (`syncCardForChildProject`: `in_factory → blocked` com
+ * `budget:<CÓDIGO>`). Sem card ligado é uma leitura e nada mais. Throttle por projeto (15 s) para não consultar a cada chamada de LLM.
+ */
+const CARD_SYNC_THROTTLE_MS = 15_000;
+const lastCardSync = new Map<string, number>();
+function scheduleCardSync(projectId: string | null): void {
+  if (!projectId) return;
+  const now = Date.now();
+  if (now - (lastCardSync.get(projectId) ?? 0) < CARD_SYNC_THROTTLE_MS) return;
+  lastCardSync.set(projectId, now);
+  if (lastCardSync.size > 5_000) lastCardSync.clear();
+  setImmediate(() => {
+    void import("../services/cardPromote.js").then((m) => m.syncCardForChildProject(pool, projectId)).catch(() => undefined);
+  });
+}
+
 /** Token de MÁQUINA do run (`svc:"runner"`) é amarrado ao próprio projeto: debita só nele. */
 function runnerProjectOf(request: FastifyRequest): string | null {
   const auth = authenticateInternal(request);
@@ -67,6 +86,7 @@ export async function llmGuardInternalRoutes(app: FastifyInstance): Promise<void
     const decision = await preflight(pool, input);
     if (!decision.allow) {
       request.log.warn({ projectId, purpose: body.purpose, source: body.source, code: decision.code }, "[llm-guard] chamada NEGADA");
+      if (String(decision.code ?? "").startsWith("BUDGET")) scheduleCardSync(projectId);
     }
     return reply.send({ ...decision, projectId });
   });
@@ -79,6 +99,7 @@ export async function llmGuardInternalRoutes(app: FastifyInstance): Promise<void
       ...body, projectId,
       inputTokens: Number(body.inputTokens ?? 0), outputTokens: Number(body.outputTokens ?? 0),
     } as RecordInput);
+    scheduleCardSync(projectId);
     return reply.send({ ok: true, ...out });
   });
 }

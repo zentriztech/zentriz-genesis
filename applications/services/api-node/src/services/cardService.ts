@@ -25,6 +25,7 @@ import { join } from "path";
 import type { AuthUser } from "../middleware/auth.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { sha256Hex } from "../lib/specTreeHash.js";
+import { isCanonicalUuid, toCanonicalUuid } from "../lib/uuid.js";
 import { readRuntimeNumber, type RuntimeConfigDb } from "./runtimeTunables.js";
 import { resolveLineageHead, resolveLineageRoot, type LineageHead } from "./lineage.js";
 import {
@@ -33,6 +34,8 @@ import {
 } from "./tickets.js";
 import { attachmentsStrictEnabled, classifyAttachment } from "./ticketAttachments.js";
 import { computeCurrentSpecHash } from "./specValidation.js";
+import { cardAttachmentsSnapshot } from "./cardAttachments.js";
+import { findBaseCollisions, loadCardDraftInfo } from "./cardSpecGuard.js";
 import { evaluateCardKindGate, parseRfcMarkdown, RFC_DIR, RFC_FILENAME_RE, type CardKind, type CardKindGateResult } from "./evolutionGate.js";
 import {
   evaluateRevalidation, listRepoTree, listSpecSnapshot, type GlobCheck, type RevalidateOutcome, type RevalidateReason, type RevalidateVerdict,
@@ -60,7 +63,7 @@ export interface CardRow extends TicketRow {
 }
 
 export async function loadCard(db: Db, id: string): Promise<CardRow | undefined> {
-  if (!/^[0-9a-f-]{36}$/i.test(id)) return undefined;
+  if (!isCanonicalUuid(id)) return undefined;
   return (await db.query("SELECT * FROM tickets WHERE id = $1", [id])).rows[0] as CardRow | undefined;
 }
 
@@ -336,6 +339,12 @@ export type CardReadyResult =
   | { kind: "budget"; status: number; body: Json }
   | { kind: "no_head" }
   | { kind: "draft_unreadable" }
+  /** Y-07: há conversão de anexo (pdf/doc/docx → .md) ainda em andamento. */
+  | { kind: "conversion_pending"; open: Array<{ id: string; filename: string; state: string }> }
+  /** Y-02: o rascunho tem arquivo cujo caminho já existe na versão corrente. */
+  | { kind: "base_collision"; paths: string[] }
+  /** Y-01: a spec (ou os anexos) mudou entre a leitura e o carimbo; nada foi gravado. */
+  | { kind: "spec_changed" }
   | { kind: "transition_failed"; result: CardTransitionResult };
 
 async function draftOf(db: Db, card: CardRow): Promise<{ id: string; extra: Json } | null> {
@@ -344,7 +353,14 @@ async function draftOf(db: Db, card: CardRow): Promise<{ id: string; extra: Json
   return r ? { id: r.id, extra: r.extra ?? {} } : null;
 }
 
-export interface CardReadySnapshot { draft_spec_hash: string; base_head_project_id: string; base_head_version: number; base_spec_hash: string | null; at: string }
+/** Ganchos SÓ para teste: reproduzem de forma determinística a janela da sonda P4 (a escrita concorrente exatamente entre duas etapas do `ready`). */
+export const cardReadyTestHooks: { afterSnapshot?: () => Promise<void>; afterCommit?: () => Promise<void> } = {};
+
+export interface CardReadySnapshot {
+  draft_spec_hash: string; base_head_project_id: string; base_head_version: number; base_spec_hash: string | null; at: string;
+  /** Y-07: hash do conjunto de anexos com o estado da conversão (ausente em carimbos anteriores à correção). */
+  attachments_hash?: string;
+}
 
 /** Hash da spec corrente de um projeto (disco é a verdade) ou `null` (sem arquivos / arquivo sumiu). */
 export async function specHashOf(db: Db, projectId: string): Promise<string | null> {
@@ -353,16 +369,44 @@ export async function specHashOf(db: Db, projectId: string): Promise<string | nu
 }
 
 /**
- * "Validar": gate de RFC invariante + exigências do tipo (CARD_KIND_MISMATCH / CARD_KIND_REQUIREMENT) + orçamento (Guard + saldo
- * livre mínimo) + base registrada (HEAD e hash da spec do HEAD). OK ⇒ `draft|refining → ready` (ator `system`, o usuário vai em `actor_id`).
+ * "Validar": gate de RFC invariante + exigências do tipo + orçamento (Guard + saldo livre mínimo) + base registrada (HEAD e hash da spec do
+ * HEAD). OK ⇒ `draft|refining → ready` (ator `system`, o usuário vai em `actor_id`).
+ *
+ * Y-01 (BLOQUEANTE na revisão adversarial da Fase 3): antes, o gate lia o rascunho, depois o hash lia de novo, sem transação — um
+ * `DELETE` do RFC entre as duas leituras ficava COBERTO pelo carimbo (`ready` sem RFC, promoção criando filho sem RFC). Agora:
+ *   1. a spec do rascunho é lida UMA vez (`computeCurrentSpecHash` devolve o conteúdo); o hash do carimbo e o gate são calculados
+ *      sobre ESSE mesmo conteúdo;
+ *   2. carimbo + transição `→ ready` + parada dos laços autônomos do rascunho (Y-23) ocorrem na MESMA transação, sob `FOR UPDATE` do
+ *      ticket, que antes de gravar RELÊ a spec e os anexos e desiste (`spec_changed`) se o hash diferir;
+ *   3. depois do COMMIT a spec é relida uma vez mais: escrita que passou pela guarda antes do `ready` e terminou depois derruba o card
+ *      de volta a `refining` (`spec_changed`). Os escritores também chamam `noteCardSpecWrite`, que faz o mesmo caminho inverso.
+ * A promoção ainda confere hash e gate dentro do lock (evolveClaim).
  */
 export async function markCardReady(pool: Pool, card: CardRow, user: AuthUser): Promise<CardReadyResult> {
   if (card.card_state === "ready") return { kind: "ready", replayed: true, gate: null };
   const draft = await draftOf(pool, card);
   if (!draft) return { kind: "draft_unreadable" };
   const kind = (isCardKind(card.change_kind) ? card.change_kind : "evolution") as CardKind;
-  const gate = await evaluateCardKindGate(pool, draft.id, draft.extra, kind);
+
+  // Y-07: conversão de anexo em andamento ainda pode gerar texto que nenhum validador viu.
+  const att0 = await cardAttachmentsSnapshot(pool, card);
+  if (att0.open.length > 0) return { kind: "conversion_pending", open: att0.open };
+
+  // (1) leitura única: conteúdo + hash
+  const snap = await computeCurrentSpecHash(pool, draft.id).catch(() => null);
+  if (!snap) return { kind: "draft_unreadable" };
+  const gate = await evaluateCardKindGate(pool, draft.id, draft.extra, kind, {
+    files: snap.files.map((f) => ({ filename: f.filename, rel_dir: f.rel_dir ?? null, content: f.content, contentSha256: f.contentSha256 })),
+  });
   if (!gate.ok) return { kind: "gate_failed", gate };
+  await cardReadyTestHooks.afterSnapshot?.();
+
+  // Y-02: nenhum arquivo do rascunho pode reescrever o que a versão corrente já tem.
+  const info = await loadCardDraftInfo(pool as never, draft.id);
+  if (info) {
+    const clash = await findBaseCollisions(pool as never, info, snap.files.map((f) => ({ rel_dir: f.rel_dir ?? null, filename: f.filename })));
+    if (clash.length > 0) return { kind: "base_collision", paths: clash };
+  }
 
   const rootId = String(draft.extra.card_target_root_id ?? "");
   const head = rootId ? await resolveLineageHead(pool, rootId) : null;
@@ -370,19 +414,94 @@ export async function markCardReady(pool: Pool, card: CardRow, user: AuthUser): 
   const denied = await budgetPreflight(pool, head.id, card.tenant_id, head.version_number);
   if (denied) return { kind: "budget", status: denied.status, body: denied.body };
 
-  const draftHash = await specHashOf(pool, draft.id);
-  if (!draftHash) return { kind: "draft_unreadable" };
+  const baseSpecHash = await specHashOf(pool, head.id);
   const snapshot: CardReadySnapshot = {
-    draft_spec_hash: draftHash, base_head_project_id: head.id, base_head_version: head.version_number,
-    base_spec_hash: await specHashOf(pool, head.id), at: new Date().toISOString(),
+    draft_spec_hash: snap.specHash, base_head_project_id: head.id, base_head_version: head.version_number,
+    base_spec_hash: baseSpecHash, at: new Date().toISOString(), attachments_hash: att0.hash,
   };
-  await pool.query(
-    `UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1 AND status = 'card_draft'`,
-    [draft.id, JSON.stringify({ card_ready: snapshot, evolution_parent_id: head.id, card_base: { head_project_id: head.id, head_version: head.version_number } })],
-  );
-  const t = await transitionCard(pool, { ticketId: card.id, to: "ready", actorKind: "system", actorId: user.id, reason: "validated" });
-  if (t.kind !== "applied" && t.kind !== "noop") return { kind: "transition_failed", result: t };
-  return { kind: "ready", replayed: t.kind === "noop", gate };
+
+  // (2) carimbo + transição + parada dos laços autônomos: UMA transação, ticket travado.
+  const client = await pool.connect();
+  let out: CardReadyResult;
+  try {
+    await client.query("BEGIN");
+    const locked = (await client.query("SELECT card_state FROM tickets WHERE id = $1 FOR UPDATE", [card.id])).rows[0] as { card_state: string | null } | undefined;
+    if (!locked) { await client.query("ROLLBACK"); return { kind: "transition_failed", result: { kind: "not_found" } }; }
+    const again = await computeCurrentSpecHash(client, draft.id).catch(() => null);
+    const attAgain = await cardAttachmentsSnapshot(client as never, card);
+    if (!again || again.specHash !== snap.specHash || attAgain.hash !== att0.hash) {
+      await client.query("ROLLBACK");
+      return { kind: "spec_changed" };
+    }
+    await client.query(
+      `UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1 AND status = 'card_draft'`,
+      [draft.id, JSON.stringify({ card_ready: snapshot, evolution_parent_id: head.id, card_base: { head_project_id: head.id, head_version: head.version_number } })],
+    );
+    const t = await transitionCard(client, { ticketId: card.id, to: "ready", actorKind: "system", actorId: user.id, reason: "validated" });
+    if (t.kind !== "applied" && t.kind !== "noop") {
+      await client.query("ROLLBACK");
+      return { kind: "transition_failed", result: t };
+    }
+    // Y-23: o card está pronto — rodada do modo autônomo ainda ativa neste rascunho não pode mais escrever por cima do carimbo.
+    await client.query(
+      `UPDATE spec_autonomy_runs
+          SET status = 'stalled', last_error = $2, finished_at = now(), updated_at = now()
+        WHERE project_id = $1 AND status IN ('pending','cto_running','applying','validating')`,
+      [draft.id, "Card validado (ready): o modo autônomo foi encerrado para não alterar a spec depois do carimbo. Reabra o card para voltar a editar."],
+    );
+    await client.query("COMMIT");
+    out = { kind: "ready", replayed: t.kind === "noop", gate };
+  } catch (e) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw e;
+  } finally {
+    client.release();
+  }
+
+  await cardReadyTestHooks.afterCommit?.();
+  // (3) conferência pós-commit: escrita concorrente que terminou depois do carimbo ⇒ o carimbo não vale; volta a `refining`.
+  const post = await computeCurrentSpecHash(pool, draft.id).catch(() => null);
+  const attPost = await cardAttachmentsSnapshot(pool, card);
+  if (!post || post.specHash !== snap.specHash || attPost.hash !== att0.hash) {
+    const t = await transitionCard(pool, { ticketId: card.id, to: "refining", actorKind: "system", actorId: user.id, reason: "spec_changed_during_validate" });
+    if (t.kind === "applied") {
+      await pool.query(
+        `UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) - 'card_ready', updated_at = now() WHERE id = $1 AND status = 'card_draft'`,
+        [draft.id],
+      );
+    }
+    return { kind: "spec_changed" };
+  }
+  return out;
+}
+
+/**
+ * Y-07: uma conversão pdf/doc/docx → .md terminou DEPOIS da criação do card. O derivado vive em `ticket_attachments`; ele só entra na
+ * árvore do rascunho quando a pasta do ticket é rematerializada.
+ *   • `draft|refining` ⇒ rematerializa `tickets/TK-NNNN/` no rascunho (o texto novo passa a existir para Chat, GAPs e validador);
+ *   • `ready` ⇒ o carimbo não viu esse texto: `ready → refining` (ator `system`, motivo `attachment_converted`), carimbo descartado e
+ *     pasta rematerializada — "Validar" de novo;
+ *   • demais estados ⇒ nada (o rascunho é histórico; o filho já pegou o texto pelo passo `ticket` da promoção).
+ */
+export async function syncCardAfterConversion(pool: Pool, ticketId: string): Promise<"none" | "rematerialized" | "reopened"> {
+  const card = await loadCard(pool, ticketId);
+  if (!card?.card_state || !card.draft_project_id) return "none";
+  const st = card.card_state;
+  if (st !== "draft" && st !== "refining" && st !== "ready") return "none";
+  let reopened = false;
+  if (st === "ready") {
+    const t = await transitionCard(pool, { ticketId: card.id, to: "refining", actorKind: "system", reason: "attachment_converted" });
+    if (t.kind !== "applied") return "none";
+    reopened = true;
+    await pool.query(`UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) - 'card_ready', updated_at = now() WHERE id = $1 AND status = 'card_draft'`, [card.draft_project_id]);
+  }
+  const head = card.project_id ? (await pool.query("SELECT title FROM projects WHERE id = $1", [card.project_id])).rows[0] as { title?: string } | undefined : undefined;
+  const author = card.created_by ? (await pool.query("SELECT email FROM users WHERE id = $1", [card.created_by]).catch(() => ({ rows: [] as Array<{ email?: string }> }))).rows[0] as { email?: string } | undefined : undefined;
+  const mat = await materializeTicketIntoSpecTree(pool, {
+    ticket: card, childProjectId: card.draft_project_id, authorEmail: author?.email ?? null, projectTitle: String(head?.title ?? ""), versionLabel: null,
+  });
+  if (mat.ok) await pool.query("UPDATE project_spec_files SET spec_origin = $2 WHERE project_id = $1 AND spec_origin IS NULL", [card.draft_project_id, `card:${ticketCode(card.number)}`]);
+  return reopened ? "reopened" : mat.ok ? "rematerialized" : "none";
 }
 
 // ── Revalidar (rebase + conferência contra o HEAD novo) ──────────────────────────────────────
@@ -441,10 +560,16 @@ export async function revalidateCard(pool: Pool, card: CardRow, user: AuthUser):
 
   const headSpecHash = await specHashOf(pool, head.id);
   const headSpecHashChanged = !baseMoved && !!ready?.base_spec_hash && ready.base_head_project_id === head.id && headSpecHash !== ready.base_spec_hash;
+  // Y-13: a árvore lida é a do COMMIT aceito (`evolution_head_sha` da versão), não a cópia de trabalho do disco.
+  const acceptedSha = async (projectId: string): Promise<string | null> => {
+    const r = (await pool.query("SELECT extra->>'evolution_head_sha' AS sha FROM projects WHERE id = $1", [projectId])).rows[0] as { sha: string | null } | undefined;
+    return r?.sha ?? null;
+  };
+  const [headSha, prevSha] = await Promise.all([acceptedSha(head.id), baseMoved ? acceptedSha(previousBase!) : Promise.resolve(null)]);
   const [rfcs, treeNow, treeBefore, specNow, specBefore] = await Promise.all([
     draftRfcsForRevalidation(pool, draft.id),
-    listRepoTree(head.id, head.product_id),
-    baseMoved ? listRepoTree(previousBase!, head.product_id) : Promise.resolve(null),
+    listRepoTree(head.id, head.product_id, process.env, { ref: headSha }),
+    baseMoved ? listRepoTree(previousBase!, head.product_id, process.env, { ref: prevSha }) : Promise.resolve(null),
     listSpecSnapshot(pool, head.id),
     baseMoved ? listSpecSnapshot(pool, previousBase!) : Promise.resolve(null),
   ]);
@@ -458,6 +583,8 @@ export async function revalidateCard(pool: Pool, card: CardRow, user: AuthUser):
   const invalidate = out.verdict !== "ok";
   if (rebase || invalidate) {
     const patch: Json = {};
+    // Y-13: a jornada mostra o bloqueador "globs não conferidos" enquanto o veredito `stale` veio sem conferência dos globs.
+    if (out.globsUnverified) patch.card_revalidation = { globs_unverified: true, head_project_id: head.id, at: new Date().toISOString() };
     if (rebase) {
       patch.evolution_parent_id = head.id;
       patch.card_base = { head_project_id: head.id, head_version: head.version_number };
@@ -468,9 +595,12 @@ export async function revalidateCard(pool: Pool, card: CardRow, user: AuthUser):
       if (anchor) await pool.query("UPDATE projects SET budget_owner_project_id = $2 WHERE id = $1 AND status = 'card_draft'", [draft.id, anchor.ownerId]);
     }
     await pool.query(
-      `UPDATE projects SET extra = (COALESCE(extra, '{}'::jsonb) - 'card_ready') || $2::jsonb, updated_at = now() WHERE id = $1 AND status = 'card_draft'`,
+      `UPDATE projects SET extra = (COALESCE(extra, '{}'::jsonb) - 'card_ready' - 'card_revalidation') || $2::jsonb, updated_at = now() WHERE id = $1 AND status = 'card_draft'`,
       [draft.id, JSON.stringify(patch)],
     );
+  } else if ((draft.extra.card_revalidation ?? null) !== null) {
+    // veredito `ok` (a base já é o HEAD): a conferência humana pedida pelo `stale` anterior foi feita.
+    await pool.query("UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) - 'card_revalidation', updated_at = now() WHERE id = $1 AND status = 'card_draft'", [draft.id]);
   }
   let reopened = false;
   if (invalidate && state === "ready") {
@@ -551,8 +681,9 @@ export async function loadBaseSpec(db: Db & RuntimeConfigDb, card: CardRow): Pro
 
 /** Mesma leitura de `loadBaseSpec`, a partir do id do RASCUNHO (Chat IA / GAPs / planner / validador só conhecem o `projectId`). */
 export async function loadBaseSpecForDraft(db: Db & RuntimeConfigDb, draftProjectId: string): Promise<BaseSpec | null> {
-  if (!/^[0-9a-f-]{36}$/i.test(draftProjectId)) return null;
-  const card = (await db.query("SELECT * FROM tickets WHERE draft_project_id = $1 AND card_state IS NOT NULL", [draftProjectId])).rows[0] as CardRow | undefined;
+  const canonical = toCanonicalUuid(draftProjectId);
+  if (!canonical) return null;
+  const card = (await db.query("SELECT * FROM tickets WHERE draft_project_id = $1::uuid AND card_state IS NOT NULL", [canonical])).rows[0] as CardRow | undefined;
   return card ? loadBaseSpec(db, card) : null;
 }
 

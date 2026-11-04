@@ -38,6 +38,10 @@ import { recomputeProductLifecycle } from "./productLifecycle.js";
 import { recordTicketEvent, ticketTransitionsEnabled } from "./ticketTransitions.js";
 import { inheritTriages } from "./findingTriage.js";
 import { transitionCard } from "./cardState.js";
+import { computeCurrentSpecHash } from "./specValidation.js";
+import { evaluateCardKindGate, type CardKind } from "./evolutionGate.js";
+import { cardAttachmentsSnapshot } from "./cardAttachments.js";
+import { findBaseCollisions, loadCardDraftInfo } from "./cardSpecGuard.js";
 
 /** Espaço de chaves do advisory lock (forma de DOIS inteiros: não colide com as de 1 inteiro do credit-ledger). */
 export const NS_EVOLVE = 7341;
@@ -260,6 +264,11 @@ export async function runEvolveWithClaim(pool: Pool, input: EvolveClaimInput): P
   if (pre) return respondExisting(pool, pre, idemCtx);
 
   if (ticket && ticket.status !== "open") {
+    if (card) {
+      // Y-17: a promoção de CARD que perde a corrida responde com o estado REAL do card (antes: "já foi promovido" para um card rejeitado).
+      const cs = (ticket as unknown as { card_state?: string | null }).card_state ?? null;
+      return { status: 409, body: { code: "CARD_NOT_READY", state: cs, message: `${ticketCode(ticket.number)} não está pronto para promover (estado ${cs ?? ticket.status}).` } };
+    }
     return {
       status: 409,
       body: {
@@ -351,6 +360,48 @@ function inFlightResult(f: InFlightRow): EvolveResult {
   };
 }
 
+/**
+ * Promoção de card, DENTRO do lock da linhagem e do ticket: o carimbo `card_ready` precisa ainda valer.
+ *   • o hash da spec do rascunho = o do carimbo (e o conjunto de anexos, quando o carimbo o registrou);
+ *   • o gate de RFC (invariante + tipo) é reavaliado sobre o MESMO conteúdo lido para o hash;
+ *   • nenhum arquivo do rascunho reescreve um da versão corrente (Y-02).
+ * `null` = pode seguir. Falha ⇒ 409 `CARD_NOT_READY` (ou o código do gate / da colisão) com `revertToRefining`, que `promoteCard` consome
+ * (o card volta a `refining`; o campo não vai ao cliente).
+ */
+async function verifyCardStampUnderLock(client: PoolClient, ticketRow: TicketRow, draftId: string): Promise<EvolveResult | null> {
+  const t = ticketRow as unknown as TicketRow & { card_state?: string | null };
+  const d = (await client.query("SELECT extra FROM projects WHERE id = $1 AND status = 'card_draft'", [draftId])).rows[0] as { extra: Json | null } | undefined;
+  const extra = d?.extra ?? null;
+  const stamp = (extra?.card_ready ?? null) as { draft_spec_hash?: string; attachments_hash?: string } | null;
+  const notReady = (reason: string, message: string): EvolveResult => ({
+    status: 409, body: { code: "CARD_NOT_READY", state: "refining", message, next: `POST /api/cards/${t.id}/ready`, revertToRefining: reason },
+  });
+  if (!extra || !stamp?.draft_spec_hash) return notReady("ready_stamp_missing", "O card não tem o carimbo da validação. Valide de novo.");
+  const snap = await computeCurrentSpecHash(client, draftId).catch(() => null);
+  if (!snap || snap.specHash !== stamp.draft_spec_hash) {
+    return notReady("draft_changed_after_ready", "A spec do rascunho mudou depois da validação. Valide de novo antes de promover.");
+  }
+  if (stamp.attachments_hash) {
+    const att = await cardAttachmentsSnapshot(client as never, { id: t.id, tenant_id: t.tenant_id ?? null });
+    if (att.hash !== stamp.attachments_hash) return notReady("attachments_changed_after_ready", "Os anexos do card mudaram (ou uma conversão terminou) depois da validação. Valide de novo antes de promover.");
+  }
+  const kind = (["evolution", "fix", "feature"].includes(String(t.change_kind)) ? t.change_kind : "evolution") as CardKind;
+  const gate = await evaluateCardKindGate(client, draftId, extra, kind, {
+    files: snap.files.map((f) => ({ filename: f.filename, rel_dir: f.rel_dir ?? null, content: f.content, contentSha256: f.contentSha256 })),
+  });
+  if (!gate.ok) {
+    return { status: 409, body: { code: gate.code, message: gate.message, ...(gate.details !== undefined ? { details: gate.details } : {}), state: "refining", revertToRefining: "gate_failed_at_promotion" } };
+  }
+  const info = await loadCardDraftInfo(client as never, draftId);
+  if (info) {
+    const clash = await findBaseCollisions(client as never, info, snap.files.map((f) => ({ rel_dir: f.rel_dir ?? null, filename: f.filename })));
+    if (clash.length > 0) {
+      return { status: 409, body: { code: "CARD_PATH_COLLIDES_WITH_BASE", paths: clash, state: "refining", message: `O rascunho tem arquivo(s) que já existem na versão corrente: ${clash.join(", ")}.`, revertToRefining: "path_collides_with_base" } };
+    }
+  }
+  return null;
+}
+
 async function claim(pool: Pool, a: {
   parentId: string; rootId: string; parentRow: Record<string, unknown>; user: AuthUser; ticket: TicketRow | null;
   requestText: string; workMode: "copy" | "branch"; key: string | null; reqSha: string; childProductId: string; tenantId: string;
@@ -371,6 +422,11 @@ async function claim(pool: Pool, a: {
     let ticket = a.ticket;
     if (ticket) {
       const t = (await client.query("SELECT * FROM tickets WHERE id = $1 FOR UPDATE", [ticket.id])).rows[0] as TicketRow | undefined;
+      if (a.card && (!t || t.status !== "open")) {
+        await client.query("ROLLBACK");
+        const cs = (t as unknown as { card_state?: string | null } | undefined)?.card_state ?? null;
+        return { kind: "reject", result: { status: 409, body: { code: "CARD_NOT_READY", state: cs, message: `${ticketCode(ticket.number)} não está pronto para promover (estado ${cs ?? t?.status ?? "inexistente"}).` } } };
+      }
       if (!t || t.status !== "open") {
         await client.query("ROLLBACK");
         return {
@@ -391,6 +447,14 @@ async function claim(pool: Pool, a: {
       if (a.card && cs !== "ready") {
         await client.query("ROLLBACK");
         return { kind: "reject", result: { status: 409, body: { code: "CARD_NOT_READY", message: `${ticketCode(ticket.number)} não está pronto para promover (estado ${cs ?? "legado"}).`, state: cs } } };
+      }
+      if (a.card) {
+        // Y-01: sob o lock do ticket, a promoção reavalia o gate de RFC e o hash sobre a MESMA leitura do rascunho — nunca cria filho sem RFC.
+        const bad = await verifyCardStampUnderLock(client, t, a.card.draftProjectId);
+        if (bad) {
+          await client.query("ROLLBACK");
+          return { kind: "reject", result: bad };
+        }
       }
       if (!a.card && cs !== null) {
         await client.query("ROLLBACK");
@@ -672,7 +736,7 @@ async function materialize(pool: Pool, childId: string, me: string, user: AuthUs
     }
     // S3b (card) — move a spec do rascunho do card (RFCs, documentos) para a árvore do filho, com `spec_origin = card:TK-NNNN`
     if (ticket && cardDraftId) {
-      await runStep("card_spec", (ctx) => stepCardSpec(pool, { childId, draftId: cardDraftId, ticket, ctx }));
+      await runStep("card_spec", (ctx) => stepCardSpec(pool, { childId, draftId: cardDraftId, headId, ticket, ctx }));
     }
     // S4 — triagens de GAPs vivas da versão corrente
     await runStep("triages", async () => {
@@ -881,7 +945,7 @@ async function stepSpecTree(
  */
 async function stepCardSpec(
   pool: Pool,
-  a: { childId: string; draftId: string; ticket: TicketRow; ctx: StepCtx },
+  a: { childId: string; draftId: string; headId: string; ticket: TicketRow; ctx: StepCtx },
 ): Promise<Json> {
   const code = ticketCode(a.ticket.number);
   const tkDir = `tickets/${code}`;
@@ -894,11 +958,19 @@ async function stepCardSpec(
   const uploadDir = (process.env.UPLOAD_DIR ?? "/shared/uploads").trim();
   const childSpecDir = join(uploadDir, a.childId);
   const paths: string[] = [];
+  const headCollisions = new Set(
+    ((await pool.query("SELECT rel_dir, filename FROM project_spec_files WHERE project_id = $1", [a.headId])).rows as Array<{ rel_dir: string | null; filename: string }>)
+      .map((h) => `${(h.rel_dir ?? "").replace(/^\/+|\/+$/g, "").toLowerCase()}\u0000${h.filename.toLowerCase()}`),
+  );
   for (const r of rows) {
     a.ctx.assertAlive();
     const rel = (r.rel_dir ?? "").replace(/^\/+|\/+$/g, "");
     if (rel === tkDir || rel.startsWith(`${tkDir}/`)) continue;
     if (!r.file_path || !existsSync(r.file_path)) throw new TerminalFailure("CARD_DRAFT_UNREADABLE", `Arquivo do rascunho do card não encontrado no disco: ${rel ? rel + "/" : ""}${r.filename}.`);
+    // Y-02: o upsert abaixo reescreveria, no filho, o RFC/ADR herdado do HEAD. Defesa em profundidade: o `ready` e o claim já recusam.
+    if (headCollisions.has(`${rel.toLowerCase()}\u0000${r.filename.toLowerCase()}`)) {
+      throw new TerminalFailure("CARD_PATH_COLLIDES_WITH_BASE", `'${rel ? rel + "/" : ""}${r.filename}' já existe na versão corrente; o card não pode reescrevê-lo.`);
+    }
     const content = readFileSync(r.file_path);
     const dir = rel ? join(childSpecDir, rel) : childSpecDir;
     mkdirSync(dir, { recursive: true });

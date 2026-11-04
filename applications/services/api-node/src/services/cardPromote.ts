@@ -112,6 +112,12 @@ export async function promoteCard(pool: Pool, card: CardRow, user: AuthUser, log
     parentId: ready.base_head_project_id, user, ticketId: card.id, evolutionRequest: "", workMode: "copy", idempotencyKey: null, log,
     card: { draftProjectId: card.draft_project_id!, actorId: user.id },
   });
+  if (r.status === 409 && typeof r.body.revertToRefining === "string") {
+    // Y-01: o claim reavaliou carimbo/hash/gate dentro do lock e achou o card fora do que foi validado: volta a `refining`.
+    const { revertToRefining, ...body } = r.body;
+    await backToRefining(pool, card, String(revertToRefining));
+    return { ...r, body };
+  }
   if (r.status === 409 && r.body.code === "CARD_BASE_STALE") {
     // Detectado DENTRO do lock (HEAD mudou entre a checagem e o claim): mesma resposta, mesma volta a `refining`.
     await backToRefining(pool, card, "base_stale");
