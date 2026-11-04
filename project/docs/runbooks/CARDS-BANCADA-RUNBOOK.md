@@ -247,7 +247,7 @@ Todas as condições abaixo devem ser **verificadas** antes de ligar `CARDS_BANC
 11. **Conferência pós-uso (por card):** `delivered` ⇔ PR mergeado no GitHub; nenhuma task não herdada sem `card_id` (consulta §10.8); `executed_*` carimbado uma vez (consulta §10.9).
 12. **Pendências abertas que o Jean precisa aceitar antes do rollout em tenant real** (§13): execuções C8–C11 e C13 no runner (AI §5), 4.5 com LLM real em homologação, D-E9 (serviço-alvo), D-E3 (confirmação), decisão sobre `executed_*` em tasks, AB-07 (globs).
 
-Ordem do rollout (plano 6.3): **ZFactory primeiro**, demais tenants depois; critérios de entrada/saída e comunicação ficam sob aprovação do Jean.
+Ordem do rollout (plano 6.3): **ZFactory primeiro**, demais tenants depois; critérios de entrada/saída, checklist de ligar, observação, rollback e comunicação estão em [CARDS-BANCADA-ROLLOUT.md](CARDS-BANCADA-ROLLOUT.md) (rascunho sob aprovação do Jean). A lista acima é o mínimo; o documento de rollout acrescenta, com comandos de verificação, servidor de testes do host e baseline, slot de LLM, `byoc_exempt`, `EVOLUTION_PROMOTE_BANCADA` e `card_budget_pct`.
 
 ## 9. Matriz de papéis
 

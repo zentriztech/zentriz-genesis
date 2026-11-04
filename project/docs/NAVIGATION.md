@@ -88,6 +88,7 @@
 | [docs/guides/CTO_AGENT_FLOW_ANALYSIS.md](guides/CTO_AGENT_FLOW_ANALYSIS.md) | Fluxo completo CTO: comunicação com IA, formato de retorno, gravação em disco |
 | [docs/guides/GUIA-CARDS-BANCADA.md](guides/GUIA-CARDS-BANCADA.md) | Guia do usuário: cards da Bancada (criar, maturar a spec, validar, promover, acompanhar, o que fazer quando bloqueia) |
 | [docs/runbooks/CARDS-BANCADA-RUNBOOK.md](runbooks/CARDS-BANCADA-RUNBOOK.md) | Runbook dos cards: promoção que falha, card bloqueado, PR pendente, reconciliador, rollback da flag, ordem de deploy |
+| [docs/runbooks/CARDS-BANCADA-ROLLOUT.md](runbooks/CARDS-BANCADA-ROLLOUT.md) | Rollout por tenant dos cards (ZFactory → demais): critérios de entrada e saída, checklist de ligar, observação, rollback, comunicação e lições das execuções reais 4.5/4.5b |
 | [docs/DEVOPS_SELECTION.md](DEVOPS_SELECTION.md) | Regra de seleção DevOps |
 | [docs/TEAM_COMPOSITION.md](TEAM_COMPOSITION.md) | Squad por módulo |
 
