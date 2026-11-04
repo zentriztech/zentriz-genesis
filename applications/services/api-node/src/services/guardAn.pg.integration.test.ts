@@ -217,7 +217,7 @@ describePg("AO — correções AN do Guard (Postgres real)", () => {
   });
 
   // ═══ AV / M-5 ═════════════════════════════════════════════════════════════════════════════════
-  it("AV/M-5: token svc:runner de um tenant com `projectId` de OUTRO tenant não lê nem grava (404 igual); sem claim de projeto ⇒ 403", async () => {
+  it("AV/M-5: token svc:runner de um tenant com `projectId` de OUTRO tenant, ou sem claim escolhendo projeto de outro tenant, não lê nem grava (404 igual)", async () => {
     const A = await mk(50);
     const B = await mk(50);
     await put({ key: "advisor_pct", scopeType: "global", pct: 10 });
@@ -232,12 +232,12 @@ describePg("AO — correções AN do Guard (Postgres real)", () => {
     const rec = await call("record", crossTenant, { projectId: B.parentId, model: "claude-opus-4", inputTokens: 1_000_000, outputTokens: 100_000, llmRole: "advisor" });
     expect(rec.statusCode).toBe(404);
     expect(await advisorSpentUsd(pool, B.parentId)).toBe(0);
-    // sem claim de projeto: sem amarra ⇒ 403 (o corpo escolheria o projeto)
-    const unbound = signToken({ sub: "r", email: "r@r", role: "tenant_admin", tenantId: B.tenantId, svc: "runner" });
+    // sem claim de projeto (token de tenant): o corpo escolheria o projeto — só dentro do PRÓPRIO tenant
+    const unbound = signToken({ sub: "r", email: "r@r", role: "tenant_admin", tenantId: A.tenantId, svc: "runner" });
     const u = await call("record", unbound, { projectId: B.parentId, model: "claude-opus-4", inputTokens: 1_000_000, outputTokens: 100_000 });
-    expect(u.statusCode).toBe(403);
-    expect(u.json()).toMatchObject({ code: "RUNNER_TOKEN_UNBOUND" });
+    expect(u.statusCode).toBe(404);
     expect(await advisorSpentUsd(pool, B.parentId)).toBe(0);
+    expect((await call("record", unbound, { projectId: A.parentId, model: "claude-opus-4", inputTokens: 10, outputTokens: 10 })).statusCode).toBe(200);
   });
 
   // ═══ A4 ═══════════════════════════════════════════════════════════════════════════════════════

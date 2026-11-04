@@ -65,16 +65,15 @@ function runnerProjectOf(request: FastifyRequest): string | null {
 async function denyForeignTenant(request: FastifyRequest, reply: FastifyReply, projectId: string | null, shape: Record<string, unknown>): Promise<boolean> {
   const auth = authenticateInternal(request);
   const pl = auth.ok ? (auth.payload as { role?: string; svc?: string; tenantId?: string | null; projectId?: string } | null) : null;
-  // AV/M-5: o token de MÁQUINA do run (`svc:"runner"`) é amarrado ao projeto E ao tenant do claim — como `internalLlm.ts`. Sem `projectId`
-  // no claim não há amarra (⇒ 403); com `projectId` de projeto que não é do tenant do próprio token (token forjado/trocado) ⇒ o MESMO 404.
+  // AV/M-5: o token de MÁQUINA do run (`svc:"runner"`) é amarrado ao TENANT do próprio token (e, com claim, ao projeto do claim — o
+  // `runnerProjectOf` já força o projeto). Projeto que não é do tenant do token (token trocado/forjado, ou token de tenant sem claim de
+  // projeto escolhendo o projeto pelo corpo) ⇒ o MESMO 404 de projeto inexistente. Sem projeto na chamada não há o que vazar.
   if (pl?.svc === "runner") {
-    if (!pl.projectId) {
-      await reply.status(403).send({ ...shape, code: "RUNNER_TOKEN_UNBOUND", message: "Token de serviço sem escopo de projeto." });
-      return true;
-    }
+    const target = pl.projectId ?? projectId;
+    if (!target) return false;
     let bound = false;
-    if (UUID_ANY.test(pl.projectId)) {
-      const r = await pool.query("SELECT tenant_id FROM projects WHERE id = $1", [pl.projectId]);
+    if (UUID_ANY.test(target)) {
+      const r = await pool.query("SELECT tenant_id FROM projects WHERE id = $1", [target]);
       const owner = r.rows[0] ? ((r.rows[0].tenant_id as string | null) ?? null) : undefined;
       bound = owner !== undefined && owner === (pl.tenantId ?? null);
     }
