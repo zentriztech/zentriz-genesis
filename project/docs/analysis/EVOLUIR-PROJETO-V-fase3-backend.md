@@ -15,7 +15,8 @@
 | `6797bda` | Escritores de spec respeitando trava/escopo e lendo a base: `specFiles.ts`, `projects.ts` (spec-content), `evolutionPlan.ts`, `specSplit.ts`, `connectDeclaration.ts`, `specChat.ts`, `specAutonomy.ts`, `specValidation.ts`, `evolutionPlanner.ts`, `promotability.ts`, `pipeline.ts` |
 | `f0d65b0` | Ajuste dos testes da Fase 2 (PATCH em `ready` agora trava; guarda estática de arquivos de card) |
 | `1a125ae` | Correções achadas pelos testes (ver §4, itens 9 e 10) |
-| `ddebc9c` + commit seguinte | Testes novos e este relatório |
+| `ddebc9c` | Testes novos |
+| `98fecd5` | Este relatório, `userMessage` nos corpos dos escritores de spec e teste do Estágio A do rascunho |
 
 ## 2. Contrato
 
@@ -176,15 +177,15 @@ Postgres efêmero `pgvector/pgvector:pg16`: **55432** (suíte completa, `DATABAS
 
 ```
 BASELINE (dev 4530ffc, PG 55432):  Test Files 230 passed (230) · Tests 3938 passed | 1 skipped (3939)
-DEPOIS   (evo/k1, mesma instrução): Test Files 234 passed (234) · Tests 3983 passed | 1 skipped (3984)   (+4 arquivos, +45 testes, 0 falhas)
+DEPOIS   (evo/k1, mesma instrução): Test Files 234 passed (234) · Tests 3985 passed | 1 skipped (3986)   (+4 arquivos, +47 testes, 0 falhas)
 tsc --noEmit: EXIT 0
-Suítes novas (55440), 3 execuções seguidas: Test Files 4 passed · Tests 45 passed  (sem intermitência)
+Suítes novas (55440), execuções repetidas: Test Files 4 passed · Tests 47 passed  (sem intermitência)
 ```
 
 | Suíte | Cobre |
 |---|---|
 | `routes/cards.fase3.pg.integration.test.ts` (21, Postgres real, agents stub) | **trava** em 12 escritores (editor PUT/POST/DELETE, spec-content, Chat arquivo/inteiro/Resolver GAPs, autônomo, planner, rfc-from-template, PATCH do card e legado) sem nenhuma chamada a agents e sem byte escrito; promovido = histórico; **reopen** (evento, carimbo, repetição, promover exige validar de novo); 1ª escrita ⇒ refining; **escopo** (8 caminhos recusados, 4 aceitos, árvore do pai idêntica, nada de README/CHANGELOG/connect/apps); **Chat lê a base** (prompt com a spec do HEAD, marca SOMENTE LEITURA, regra de escopo; chat não escreve; projeto comum sem o bloco); **GAPs** (`dispatchGapFileJob`); **orçamento** (402 do dono, card intocado); **planner** (RFC+ADR gravados, sem CHANGELOG/connect, gate do tipo passa); **laço autônomo** (aplica em `request.md`, pula arquivo fora do escopo, `stalled` quando o card vai a ready no meio, `CARD_SPEC_LOCKED` ao iniciar); **revalidação** ok/stale/conflict/sem clone; **bloqueio por orçamento** (blocked `budget:BUDGET_PAUSED`, 402 sem saldo, in_factory com saldo, repetição, reconciliador shadow×on); **jornada** em todos os estados; **anexos** (disabled/queued/pending/failed); **flag off** byte a byte e flag off depois de existir rascunho |
-| `services/cardSpecGuard.test.ts` (15) | escopo, corpo da trava, porta única com banco simulado (zero consulta em projeto comum), veredito do `card_draft`, Estágio A |
+| `services/cardSpecGuard.test.ts` (12) | escopo, corpo da trava, porta única com banco simulado (zero consulta em projeto comum), veredito do `card_draft`, Estágio A |
 | `services/cardRevalidate.test.ts` (11) | núcleo puro ok/stale/conflict, glob do runner, árvore do repositório |
 | `services/cardErrors.test.ts` (3) | tabela única cobre todo `code` das fontes |
 
