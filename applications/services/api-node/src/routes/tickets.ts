@@ -22,6 +22,9 @@ import {
   ticketCode, ticketUploadDir, type TicketRow,
 } from "../services/tickets.js";
 import {
+  allowedTicketTargets, applyTicketTransition, isTicketStatus, isValidTicketTransition, ticketTransitionsEnabled, type TicketStatus,
+} from "../services/ticketTransitions.js";
+import {
   attachmentsStrict, classifyAttachment, loadAttachmentLimits, validateAttachments,
 } from "../services/ticketAttachments.js";
 
@@ -287,6 +290,9 @@ export async function ticketRoutes(app: FastifyInstance) {
         if (!isTicketChangeKind(b.changeKind)) return reply.status(400).send({ code: "BAD_REQUEST", message: "changeKind inválido." });
         vals.push(b.changeKind); patch.push(`change_kind = $${vals.length}`);
       }
+      // Tarefa 1.4 (TICKET_TRANSITIONS=on): tabela de transições + CAS + idempotência + auditoria. `off` = caminho histórico.
+      const strict = b.status !== undefined && await ticketTransitionsEnabled(pool, { tenantId: ticket.tenant_id, userTenantId: user.tenantId ?? null });
+      let strictTo: TicketStatus | null = null;
       if (b.status !== undefined) {
         // Só transições MANUAIS do pedido. 'promoted' é escrito pelo /evolve, nunca pelo cliente.
         if (!["open", "rejected", "delivered"].includes(b.status)) {
@@ -295,8 +301,71 @@ export async function ticketRoutes(app: FastifyInstance) {
         if (b.status === "delivered" && !ticket.child_project_id) {
           return reply.status(409).send({ code: "NOT_PROMOTED", message: "Pedido ainda não foi promovido — não há entrega a marcar." });
         }
-        vals.push(b.status); patch.push(`status = $${vals.length}`);
-        patch.push(b.status === "delivered" ? "delivered_at = now()" : "delivered_at = NULL");
+        if (strict) {
+          strictTo = b.status as TicketStatus;
+        } else {
+          vals.push(b.status); patch.push(`status = $${vals.length}`);
+          patch.push(b.status === "delivered" ? "delivered_at = now()" : "delivered_at = NULL");
+        }
+      }
+      if (strict && strictTo) {
+        const from = ticket.status;
+        const same = from === strictTo;
+        if (same && patch.length === 0) {
+          // Repetição idempotente: a transição já está aplicada ⇒ 200, sem efeito e sem evento.
+          const [out] = await hydrate([ticket]);
+          return reply.send(out);
+        }
+        // `rejected → open` só sem filho vinculado (um pedido 'open' com child_project_id seria promovível de novo).
+        const childBlocksReopen = from === "rejected" && strictTo === "open" && !!ticket.child_project_id;
+        if (!same && (!isTicketStatus(from) || !isValidTicketTransition(from, strictTo, "user") || childBlocksReopen)) {
+          return reply.status(409).send({
+            code: "TICKET_INVALID_TRANSITION", from, to: strictTo, allowed: allowedTicketTargets(from, "user"),
+            message: `${ticketCode(ticket.number)}: transição ${from} → ${strictTo} não é permitida.`,
+          });
+        }
+        const extraVals = vals.slice(1);
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          let row: TicketRow | undefined;
+          if (same) {
+            // Só edição de conteúdo (status já era o pedido): o CAS ancora no status lido.
+            const upd = await client.query(
+              `UPDATE tickets SET ${patch.join(", ")}, updated_at = now() WHERE id = $1 AND status = $${vals.length + 1} RETURNING *`,
+              [...vals, from],
+            );
+            row = upd.rows[0] as TicketRow | undefined;
+          } else {
+            const r = await applyTicketTransition(client, {
+              ticketId: ticket.id, from, to: strictTo, actorKind: "user", actorId: user.id,
+              reason: "manual_patch", childProjectId: ticket.child_project_id,
+              extraSet: [...patch, strictTo === "delivered" ? "delivered_at = now()" : "delivered_at = NULL"],
+              extraVals,
+            });
+            if (r.kind === "noop") row = (await client.query("SELECT * FROM tickets WHERE id = $1", [ticket.id])).rows[0] as TicketRow;
+            else if (r.kind === "applied") row = r.row as unknown as TicketRow;
+            else {
+              await client.query("ROLLBACK");
+              return reply.status(409).send({
+                code: "TICKET_INVALID_TRANSITION", from: r.from, to: r.to,
+                message: `${ticketCode(ticket.number)}: o pedido mudou de estado (${r.from}) — transição para ${r.to} não é permitida.`,
+              });
+            }
+          }
+          if (!row) {
+            await client.query("ROLLBACK");
+            return reply.status(409).send({ code: "TICKET_INVALID_TRANSITION", from, to: strictTo, message: `${ticketCode(ticket.number)} mudou de estado durante a edição.` });
+          }
+          await client.query("COMMIT");
+          const [out] = await hydrate([row]);
+          return reply.send(out);
+        } catch (err) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw err;
+        } finally {
+          client.release();
+        }
       }
       if (patch.length === 0) return reply.status(400).send({ code: "BAD_REQUEST", message: "Nada a alterar." });
 

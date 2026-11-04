@@ -28,6 +28,7 @@ import { notifyTelegramTenant } from "./telegram.js";
 import { dispatchProjectRun } from "../services/runnerDispatch.js";
 import { maybeNotifyBlock, maybeNotifyDone, scheduleFactoryDone } from "../services/opsNotify.js";
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
+import { ticketTransitionsEnabled } from "../services/ticketTransitions.js";
 import { resolveInboxProductId } from "../services/inbox.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { sha256Hex } from "../lib/specTreeHash.js";
@@ -2995,6 +2996,9 @@ export async function projectRoutes(app: FastifyInstance) {
       const body = (request.body ?? {}) as { confirmId?: string; acknowledge?: boolean };
       // O fluxo guardado só é exigido quando o cliente manda `confirmId` (lista /projects).
       const guarded = body.confirmId !== undefined;
+      // Tarefa 1.4: com TICKET_TRANSITIONS=on o descarte do filho reabre SOMENTE tickets `promoted` (e audita).
+      const reopenOpts = async (tenantId: string | null, reason: string) =>
+        (await ticketTransitionsEnabled(pool, { tenantId, userTenantId: user.tenantId ?? null })) ? { strict: true, reason } : {};
       const client = await pool.connect();
       try {
         const proj = await client.query(
@@ -3049,7 +3053,7 @@ export async function projectRoutes(app: FastifyInstance) {
               return reply.send({ ok: true, mode: "already_archived", projectId: id, message: "Projeto já estava arquivado." });
             }
             await client.query("UPDATE projects SET status = 'archived', updated_at = now() WHERE id = $1", [id]);
-            await reopenTicketsOfChild(client, id);
+            await reopenTicketsOfChild(client, id, await reopenOpts(row.tenant_id, "child_archived"));
             return reply.send({
               ok: true, mode: "archived", projectId: id,
               message: "Projeto ocultado do portal (arquivado). Nada foi apagado — reversível.",
@@ -3063,7 +3067,7 @@ export async function projectRoutes(app: FastifyInstance) {
         // ficaria eternamente 'promoted' apontando para um projeto inexistente (o ataque
         // adversarial "dois lugares dizendo a verdade"). Roda ANTES do DELETE: o FK do
         // child_project_id não tem cascade e a linha precisa ser lida enquanto existe.
-        await reopenTicketsOfChild(client, id);
+        await reopenTicketsOfChild(client, id, await reopenOpts(row.tenant_id, "child_deleted"));
         // Deletar do banco (ON DELETE CASCADE cuida das tabelas filhas)
         await client.query("DELETE FROM projects WHERE id = $1", [id]);
         // Deletar arquivos do disco se keepFiles=false

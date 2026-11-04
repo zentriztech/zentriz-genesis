@@ -287,10 +287,12 @@ describePg("Fase 0' / 0.3 — reprodução dos defeitos do /evolve (Postgres rea
   });
 
   // ── (f) transições de ticket ──────────────────────────────────────────────────────
-  describe("(f) PATCH /api/tickets/:id aceita qualquer transição (routes/tickets.ts:~270) e reopenTicketsOfChild reabre 'delivered' (services/tickets.ts:~241)", () => {
+  describe("(f) PATCH /api/tickets/:id — CORRIGIDO na 1.4 (TICKET_TRANSITIONS=on): tabela de transições + reopenTicketsOfChild só reabre 'promoted'", () => {
     const results: Record<string, { statusCode: number; code?: string; after: string }> = {};
     let reopen: { delivered: string; rejected: string; promoted: string };
+    afterAll(() => { vi.unstubAllEnvs(); });
     beforeAll(async () => {
+      vi.stubEnv("TICKET_TRANSITIONS", "on");
       const s = await seed();
       const mkChild = async () => (await pool.query(
         `INSERT INTO projects (tenant_id, created_by, title, status, product_id, parent_project_id, version_number)
@@ -314,7 +316,7 @@ describePg("Fase 0' / 0.3 — reprodução dos defeitos do /evolve (Postgres rea
       for (const st of ["delivered", "rejected", "promoted"]) {
         const child = await mkChild();
         const t = await seedTicket(pool, s, { status: st, childProjectId: child });
-        await reopenTicketsOfChild(pool, child);
+        await reopenTicketsOfChild(pool, child, { strict: true, reason: "test" });
         states[st] = (await ticketRow(pool, t.id)).status;
       }
       reopen = { delivered: states.delivered, rejected: states.rejected, promoted: states.promoted };
@@ -327,8 +329,7 @@ describePg("Fase 0' / 0.3 — reprodução dos defeitos do /evolve (Postgres rea
       ["rejected→delivered", "recusado não vira 'delivered' por PATCH"],
     ];
     for (const [key, why] of cases) {
-      // DEFEITO 0.3-f: o PATCH só valida o conjunto {open,rejected,delivered}; não há tabela de transições — remover it.fails quando corrigido (tarefa 1.4)
-      it.fails(`PATCH ${key} é recusado (409): ${why}`, () => {
+      it(`PATCH ${key} é recusado (409): ${why}`, () => {
         expect(results[key].statusCode).toBe(409);
         expect(results[key].after).toBe(key.split("→")[0]);
       });
@@ -341,8 +342,7 @@ describePg("Fase 0' / 0.3 — reprodução dos defeitos do /evolve (Postgres rea
       expect(results["open→rejected"].statusCode).toBe(200);
       expect(results["rejected→open"].statusCode).toBe(200);
     });
-    // DEFEITO 0.3-f: reopenTicketsOfChild só exclui 'rejected' (WHERE status <> 'rejected') — reabre 'delivered' — remover it.fails quando corrigido (tarefa 1.4)
-    it.fails("reopenTicketsOfChild NÃO reabre um ticket 'delivered' (D-A3)", () => {
+    it("reopenTicketsOfChild NÃO reabre um ticket 'delivered' (D-A3)", () => {
       expect(reopen.delivered).toBe("delivered");
     });
     it("REFUTAÇÃO: reopenTicketsOfChild preserva 'rejected' e reabre 'promoted' (comportamento desejado)", () => {

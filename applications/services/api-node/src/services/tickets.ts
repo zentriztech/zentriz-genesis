@@ -307,7 +307,24 @@ export function evolutionRequestHeader(version: number, ticket?: { number: numbe
  * perde o vínculo — senão o ticket ficaria `promoted` para sempre, apontando para um projeto
  * que não existe mais. Devolve quantos pedidos voltaram à fila.
  */
-export async function reopenTicketsOfChild(db: Db, childProjectId: string): Promise<number> {
+export async function reopenTicketsOfChild(db: Db, childProjectId: string, opts: { strict?: boolean; reason?: string } = {}): Promise<number> {
+  if (opts.strict) {
+    // Tarefa 1.4 (TICKET_TRANSITIONS=on): reabre SOMENTE `promoted` (um `delivered` é histórico, um `rejected` é decisão humana)
+    // e audita cada ticket reaberto em `ticket_events` (ator `system`, motivo = por que o filho saiu).
+    const r = await db.query(
+      `UPDATE tickets SET status = 'open', child_project_id = NULL, promoted_at = NULL, delivered_at = NULL, updated_at = now()
+        WHERE child_project_id = $1 AND status = 'promoted' RETURNING id`,
+      [childProjectId],
+    );
+    for (const row of (r as unknown as { rows?: Array<{ id: string }> }).rows ?? []) {
+      await db.query(
+        `INSERT INTO ticket_events (ticket_id, from_status, to_status, actor_kind, reason, child_project_id)
+         VALUES ($1, 'promoted', 'open', 'system', $2, $3)`,
+        [row.id, opts.reason ?? "child_discarded", childProjectId],
+      );
+    }
+    return r.rowCount ?? 0;
+  }
   const r = await db.query(
     `UPDATE tickets SET status = 'open', child_project_id = NULL, promoted_at = NULL, delivered_at = NULL, updated_at = now()
       WHERE child_project_id = $1 AND status <> 'rejected'`,

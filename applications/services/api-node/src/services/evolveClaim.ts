@@ -31,6 +31,7 @@ import { readEvolveMinFreeBudgetUsd } from "./evolveFlags.js";
 import { isEvolutionUniqueViolation } from "./evolutionUniqueness.js";
 import { gitLinkProjectFolder, checkoutNewBranch } from "./githubPush.js";
 import { recomputeProductLifecycle } from "./productLifecycle.js";
+import { recordTicketEvent, ticketTransitionsEnabled } from "./ticketTransitions.js";
 import { inheritTriages } from "./findingTriage.js";
 
 /** Espaço de chaves do advisory lock (forma de DOIS inteiros: não colide com as de 1 inteiro do credit-ledger). */
@@ -414,6 +415,10 @@ async function claim(pool: Pool, a: {
         await client.query("ROLLBACK");
         return { kind: "reject", result: { status: 409, body: { code: "TICKET_ALREADY_PROMOTED", message: `${ticketCode(ticket.number)} já foi promovido.` } } };
       }
+      // 1.4 (TICKET_TRANSITIONS=on): auditoria open → promoted na mesma transação do CAS.
+      if (await ticketTransitionsEnabled(client, { tenantId: ticket.tenant_id, userTenantId: a.user.tenantId ?? null })) {
+        await recordTicketEvent(client, { ticketId: ticket.id, from: "open", to: "promoted", actorKind: "system", actorId: a.user.id, reason: "evolve_claim", childProjectId: childId });
+      }
     }
 
     fault("before_commit");
@@ -605,11 +610,18 @@ async function failTerminal(pool: Pool, childId: string, rootId: string, f: Term
         WHERE id = $1 AND status = 'materializing'`,
       [childId, JSON.stringify({ code: f.code, message: f.message, at: iso() })],
     );
-    await client.query(
+    const reopened = await client.query(
       `UPDATE tickets SET status = 'open', child_project_id = NULL, promoted_at = NULL, updated_at = now()
-        WHERE child_project_id = $1 AND status = 'promoted'`,
+        WHERE child_project_id = $1 AND status = 'promoted'
+      RETURNING id, tenant_id`,
       [childId],
     );
+    // 1.4 (TICKET_TRANSITIONS=on): auditoria promoted → open (falha terminal do filho).
+    for (const t of reopened.rows) {
+      if (await ticketTransitionsEnabled(client, { tenantId: t.tenant_id ? String(t.tenant_id) : null })) {
+        await recordTicketEvent(client, { ticketId: String(t.id), from: "promoted", to: "open", actorKind: "system", reason: `materialization_failed:${f.code}`, childProjectId: childId });
+      }
+    }
     await client.query("COMMIT");
   } catch (e) {
     try { await client.query("ROLLBACK"); } catch { /* noop */ }
