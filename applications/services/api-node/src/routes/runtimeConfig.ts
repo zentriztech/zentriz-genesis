@@ -15,6 +15,7 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { resolveScopedTenantId } from "../lib/tenantScope.js";
 import { FLAG_DEFS, FLAG_NAMES, isRolloutFlagKey } from "../services/featureFlags.js";
+import { runCardsFlagBackfill, type CardsBackfillOutcome } from "../services/cardsBackfill.js";
 import { MULTIPART_MAX_FILES, MULTIPART_MAX_FILE_BYTES, MULTIPART_MAX_TOTAL_BYTES } from "../services/ticketAttachments.js";
 
 function getUser(r: FastifyRequest): AuthUser {
@@ -56,6 +57,20 @@ const CONFIG_KEYS: Record<string, { label: string; group: string; unit: string; 
     label: FLAG_DEFS[k].label, group: "flags", unit: "", min: 0, max: FLAG_DEFS[k].kind === "tri" ? 2 : 1, adminOnly: true,
   }])),
 };
+
+/**
+ * Fase 2 (2.5): ligar `CARDS_BANCADA` para um tenant (ou mudar o padrão global) dispara o backfill idempotente de
+ * `card_state` e `spec_origin`. Só a chave CARDS_BANCADA; as demais não chamam nada. Falha do backfill não desfaz a gravação
+ * da flag: volta no corpo da resposta (`cardsBackfill[].error`) e o backfill pode ser repetido (PUT idempotente).
+ */
+async function cardsFlagBackfillFor(key: string, tenantId: string | null): Promise<CardsBackfillOutcome[] | undefined> {
+  if (key !== "CARDS_BANCADA") return undefined;
+  try {
+    return await runCardsFlagBackfill(pool as unknown as Parameters<typeof runCardsFlagBackfill>[0], tenantId);
+  } catch (e) {
+    return [{ tenantId: tenantId ?? "*", error: e instanceof Error ? e.message : String(e) }];
+  }
+}
 
 export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
   // Todas as rotas exigem autenticação JWT (Bearer) — inclusive o runner usa Bearer
@@ -188,12 +203,14 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
         [key, String(numVal), targetTenantId, user.id]
       );
 
+      const cardsBackfill = await cardsFlagBackfillFor(key, targetTenantId);
       return reply.send({
         ok:       true,
         key,
         value:    String(numVal),
         tenantId: targetTenantId,
         global:   targetTenantId === null,
+        ...(cardsBackfill ? { cardsBackfill } : {}),
       });
     }
   );
@@ -234,7 +251,8 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(404).send({ code: "NOT_FOUND", message: "Configuração não encontrada" });
       }
 
-      return reply.send({ ok: true, key, restored: "global" });
+      const cardsBackfill = await cardsFlagBackfillFor(key, targetTenantId);
+      return reply.send({ ok: true, key, restored: "global", ...(cardsBackfill ? { cardsBackfill } : {}) });
     }
   );
 }
