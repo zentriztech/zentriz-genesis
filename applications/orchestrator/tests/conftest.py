@@ -23,3 +23,16 @@ def _advisor_budget_limpo(monkeypatch):
     llm_roles.BUDGET.reset()
     yield
     llm_roles.BUDGET.reset()
+
+
+@pytest.fixture(autouse=True)
+def _runner_effective_flags_limpas():
+    """M-03: as flags efetivas por projeto (cache de 30 s no runner) são estado de PROCESSO; cada teste começa sem cache."""
+    try:
+        import orchestrator.runner as _runner
+    except Exception:  # noqa: BLE001
+        yield
+        return
+    _runner._EFFECTIVE_FLAGS_CACHE.clear()
+    yield
+    _runner._EFFECTIVE_FLAGS_CACHE.clear()
