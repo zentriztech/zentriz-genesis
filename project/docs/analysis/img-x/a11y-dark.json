@@ -1,0 +1,86 @@
+{
+  "pagina": "/cards/:id (pronto, base vencida)",
+  "tema": "dark",
+  "alvos": {
+    "total": 14,
+    "menoresQue24px": [],
+    "linksEmLinhaNaoContados": 2
+  },
+  "foco": [
+    {
+      "name": "Revalidar contra a versão corrente",
+      "visible": true,
+      "inMain": true
+    },
+    {
+      "name": "Reabrir para edição",
+      "visible": true,
+      "inMain": true
+    },
+    {
+      "name": "Rejeitar",
+      "visible": true,
+      "inMain": true
+    },
+    {
+      "name": "Revalidar",
+      "visible": true,
+      "inMain": true
+    },
+    {
+      "name": "Pedido",
+      "visible": true,
+      "inMain": true
+    },
+    {
+      "name": "Recurso novo",
+      "visible": true,
+      "inMain": true
+    },
+    {
+      "name": "INPUT",
+      "visible": true,
+      "inMain": true
+    },
+    {
+      "name": "Quero baixar a lista de entregas em CSV.",
+      "visible": true,
+      "inMain": true
+    },
+    {
+      "name": "(corpo)",
+      "visible": true,
+      "inMain": false
+    },
+    {
+      "name": "Recolher menu",
+      "visible": false,
+      "inMain": false
+    },
+    {
+      "name": "Tema claro",
+      "visible": false,
+      "inMain": false
+    },
+    {
+      "name": "Notificações",
+      "visible": false,
+      "inMain": false
+    },
+    {
+      "name": "teste@example.com",
+      "visible": false,
+      "inMain": false
+    },
+    {
+      "name": "Dashboard",
+      "visible": false,
+      "inMain": false
+    }
+  ],
+  "contraste": {
+    "amostras": 62,
+    "minimo": 5.09,
+    "abaixoDoMinimo": []
+  }
+}
