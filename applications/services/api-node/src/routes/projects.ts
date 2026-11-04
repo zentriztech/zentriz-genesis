@@ -3,6 +3,9 @@ import { readFile, writeFile, readdir, stat } from "fs/promises";
 import path from "path";
 import { pushProjectToGitHub, deriveSystemService, gitLinkProjectFolder, checkoutNewBranch } from "../services/githubPush.js";
 import { identityInputsFor, resolveLineageRoot } from "../services/lineage.js";
+import { evolveClaimEnabled } from "../services/evolveFlags.js";
+import { runEvolveWithClaim } from "../services/evolveClaim.js";
+import { isVersionConflict } from "../services/evolutionUniqueness.js";
 import { getInstallationTokenForClone, repoShortName } from "../services/github.js";
 import { destroyDeployment } from "../services/ephemeralDeploy.js";
 import { deployS3Static, type S3StaticDeployOutcome } from "../services/s3StaticDeploy.js";
@@ -3007,6 +3010,20 @@ export async function projectRoutes(app: FastifyInstance) {
             message: "Confirmação inválida: reescreva o ID exato do projeto para excluir.",
           });
         }
+        // Fase 1' (1.1): filho 'materializing' com lease vigente está sendo copiado/clonado — apagá-lo agora
+        // deixaria disco órfão. Com o lease vencido, o DELETE é a limpeza manual.
+        if (row.status === "materializing") {
+          const lease = (await client.query(
+            "SELECT COALESCE((extra->'materialization'->>'lease_until')::timestamptz > now(), false) AS alive FROM projects WHERE id = $1",
+            [id],
+          )).rows[0] as { alive: boolean } | undefined;
+          if (lease?.alive) {
+            return reply.status(409).send({
+              code: "MATERIALIZING",
+              message: "A evolução está sendo materializada neste momento. Aguarde alguns minutos (ou o fim do lease) para excluir.",
+            });
+          }
+        }
         // Permitir excluir qualquer projeto que não está em execução ativa
         if (row.status === "running") {
           return reply.status(409).send({
@@ -3397,6 +3414,22 @@ export async function projectRoutes(app: FastifyInstance) {
     const evolutionRequest = request.body?.request?.trim() ?? "";
     const workMode: "copy" | "branch" = request.body?.workMode === "branch" ? "branch" : "copy";
 
+    // Fase 1' (tarefas 1.1–1.3): com EVOLVE_CLAIM=on o /evolve roda em duas etapas (claim transacional com
+    // advisory lock por linhagem + passos idempotentes) — services/evolveClaim.ts. Com `off` (padrão) NADA
+    // abaixo muda: o handler histórico segue byte a byte.
+    if (await evolveClaimEnabled(pool, { parentProjectId: parentId, userTenantId: user.tenantId ?? null })) {
+      const rawKey = request.headers["idempotency-key"];
+      const idemKey = (Array.isArray(rawKey) ? rawKey[0] : rawKey)?.trim() || null;
+      if (idemKey && idemKey.length > 200) {
+        return reply.status(400).send({ code: "INVALID_IDEMPOTENCY_KEY", message: "Idempotency-Key deve ter no máximo 200 caracteres." });
+      }
+      const r = await runEvolveWithClaim(pool, {
+        parentId, user, ticketId, evolutionRequest, workMode, idempotencyKey: idemKey, log: request.log,
+      });
+      for (const [h, v] of Object.entries(r.headers ?? {})) reply.header(h, v);
+      return reply.status(r.status).send(r.body);
+    }
+
     const client = await pool.connect();
     try {
       const allowed = await checkProjectAccess(client, parentId, user);
@@ -3499,7 +3532,9 @@ export async function projectRoutes(app: FastifyInstance) {
       }
 
       // Criar projeto filho
-      const childRes = await client.query(
+      let childRes;
+      try {
+      childRes = await client.query(
         `INSERT INTO projects
            (tenant_id, created_by, title, status, product_id, parent_project_id, version_number,
             extra, complexity_hint, updated_at)
@@ -3528,6 +3563,17 @@ export async function projectRoutes(app: FastifyInstance) {
           parentRow.complexity_hint ?? null,
         ]
       );
+      } catch (insErr) {
+        // Índices parciais de unicidade (Fase 1', 1.2): a corrida perdida vira 409 em vez de versão duplicada.
+        // Sem os índices (banco sujo / sem boot) este catch nunca dispara e o comportamento histórico se mantém.
+        if (isVersionConflict(insErr) || (insErr as { constraint?: string })?.constraint === "uq_projects_one_live_evolution_child") {
+          return reply.status(409).send({
+            code: "EVOLUTION_IN_FLIGHT",
+            message: "Outra evolução deste projeto foi criada ao mesmo tempo. Atualize a página e confira a versão em andamento.",
+          });
+        }
+        throw insErr;
+      }
       const childId = childRes.rows[0]?.id as string;
 
       // ── Evoluir E1: herdar TODOS os arquivos da Bancada do pai (antes: só o 1º — perdia connect.yaml,

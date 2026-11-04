@@ -11,6 +11,10 @@
  * As linhas `[0.3-x] EVIDÊNCIA ...` no stdout são a saída real citada no relatório
  * project/docs/analysis/EVOLUIR-PROJETO-F-fase0-reproducao.md.
  *
+ * FASE 1' (evo/f1): os defeitos (a), (b)/(b') e (g) foram CORRIGIDOS atrás da flag EVOLVE_CLAIM=on (services/evolveClaim.ts) —
+ * seus `it.fails` viraram `it` normais e os cenários rodam com a flag ligada (vi.stubEnv). Os demais defeitos seguem provados
+ * com `it.fails` (tarefas 1.4–1.7). O comportamento com a flag desligada está em projects.evolve.claim.pg.integration.test.ts.
+ *
  * Só roda com PG_TEST_URL (Postgres EFÊMERO migrado 1→N, ver src/testing/evolvePg.ts). Sem ele: skip.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
@@ -76,45 +80,51 @@ describePg("Fase 0' / 0.3 — reprodução dos defeitos do /evolve (Postgres rea
   });
 
   // ── (a) /evolve duplicado em corrida ──────────────────────────────────────────────
-  describe("(a) /evolve em corrida — routes/projects.ts:3446 (SELECT EVOLUTION_IN_FLIGHT) → :3485 (INSERT)", () => {
+  describe("(a) /evolve em corrida — CORRIGIDO na 1.1 (EVOLVE_CLAIM=on): advisory lock por linhagem + INSERT em 'materializing'", () => {
     const N = 4;
     let s: Seed; let codes: number[]; let kids: Awaited<ReturnType<typeof childrenOf>>;
     beforeAll(async () => {
-      s = await seed();
-      // Barreira: as N requisições executam o SELECT do guard e só prosseguem quando as N o leram
-      // (todas enxergam "nada em voo") — o intercalamento mais provável sob duplo clique/duas abas, tornado determinístico.
-      const gate = queryGate(pool, /parent_project_id = \$1 AND status NOT IN/, { mode: "barrier", arrivals: N });
-      const rs = await raceN(N, () => evolve(s.parentId, { request: "Adicionar exportação CSV" }));
+      vi.stubEnv("EVOLVE_CLAIM", "on");
+      s = await seed({ budgetUsd: 50 });
+      // As N requisições chegam ao advisory lock e só prosseguem juntas (máxima contenção, determinístico).
+      const gate = queryGate(pool, /pg_advisory_xact_lock/, { mode: "hold-before", arrivals: N });
+      const racing = raceN(N, () => evolve(s.parentId, { request: "Adicionar exportação CSV" }));
+      await gate.reached;
+      gate.release();
+      const rs = await racing;
       gate.uninstall();
       codes = rs.map((r) => r.statusCode).sort();
       kids = await childrenOf(pool, s.parentId);
       ev("0.3-a", { N, respostas: codes, filhos: kids.map((k) => ({ id: k.id.slice(0, 8), v: k.version_number, status: k.status })) });
     });
+    afterAll(() => { vi.unstubAllEnvs(); });
     it("harness: as N requisições responderam sem 5xx", () => {
       expect(codes).toHaveLength(N);
       expect(codes.every((c) => c < 500)).toBe(true);
     });
-    // DEFEITO 0.3-a: N /evolve simultâneos criam N filhos com o MESMO version_number — remover it.fails quando corrigido (tarefa 1.1)
-    it.fails("N requisições simultâneas ⇒ exatamente 1 filho (as demais 409)", () => {
+    it("N requisições simultâneas ⇒ exatamente 1 filho (as demais 409)", () => {
       expect(kids).toHaveLength(1);
       expect(codes.filter((c) => c === 201)).toHaveLength(1);
     });
-    // DEFEITO 0.3-a: idem — versões duplicadas (sem índice único parcial) — remover it.fails quando corrigido (tarefas 1.1/1.2)
-    it.fails("nunca dois filhos com o mesmo (parent_project_id, version_number)", () => {
+    it("nunca dois filhos com o mesmo (parent_project_id, version_number)", () => {
       const versions = kids.map((k) => k.version_number);
       expect(new Set(versions).size).toBe(versions.length);
     });
   });
 
   // ── (b) promoção do ticket em corrida (sem AND status='open') ─────────────────────
-  describe("(b) promoção do ticket — routes/projects.ts:3661 (UPDATE tickets sem AND status='open')", () => {
+  describe("(b) promoção do ticket — CORRIGIDO na 1.1: o UPDATE tickets vira CAS (WHERE status='open') dentro do claim", () => {
     const N = 3;
     let s: Seed; let codes: number[]; let kids: Awaited<ReturnType<typeof childrenOf>>; let tk: Awaited<ReturnType<typeof ticketRow>>;
     beforeAll(async () => {
-      s = await seed();
+      vi.stubEnv("EVOLVE_CLAIM", "on");
+      s = await seed({ budgetUsd: 50 });
       const t = await seedTicket(pool, s);
-      const gate = queryGate(pool, /parent_project_id = \$1 AND status NOT IN/, { mode: "barrier", arrivals: N });
-      const rs = await raceN(N, () => evolve(s.parentId, { ticketId: t.id }));
+      const gate = queryGate(pool, /pg_advisory_xact_lock/, { mode: "hold-before", arrivals: N });
+      const racing = raceN(N, () => evolve(s.parentId, { ticketId: t.id }));
+      await gate.reached;
+      gate.release();
+      const rs = await racing;
       gate.uninstall();
       codes = rs.map((r) => r.statusCode).sort();
       kids = await childrenOf(pool, s.parentId);
@@ -122,21 +132,22 @@ describePg("Fase 0' / 0.3 — reprodução dos defeitos do /evolve (Postgres rea
       ev("0.3-b/dupla", { N, respostas: codes, filhos: kids.length, ticket: { status: tk.status, child: tk.child_project_id?.slice(0, 8) },
         filhosOrfaos: kids.filter((k) => k.id !== tk.child_project_id).length });
     });
-    // DEFEITO 0.3-b: o mesmo ticket gera N filhos; o ticket aponta para um só, os outros ficam órfãos — remover it.fails quando corrigido (tarefa 1.1)
-    it.fails("mesmo ticket promovido em corrida ⇒ 1 filho, ticket 'promoted' apontando para ele, sem órfãos", () => {
+    afterAll(() => { vi.unstubAllEnvs(); });
+    it("mesmo ticket promovido em corrida ⇒ 1 filho, ticket 'promoted' apontando para ele, sem órfãos", () => {
       expect(kids).toHaveLength(1);
       expect(tk.status).toBe("promoted");
       expect(kids.every((k) => k.id === tk.child_project_id)).toBe(true);
     });
   });
 
-  describe("(b') transição perdida — UPDATE tickets sem AND status='open' sobrescreve 'rejected'", () => {
+  describe("(b') transição perdida — CORRIGIDO na 1.1: a recusa concorrente vence (FOR UPDATE + CAS)", () => {
     let s: Seed; let patchStatus: number; let evolveStatus: number; let tk: Awaited<ReturnType<typeof ticketRow>>; let kids: Awaited<ReturnType<typeof childrenOf>>;
     beforeAll(async () => {
-      s = await seed();
+      vi.stubEnv("EVOLVE_CLAIM", "on");
+      s = await seed({ budgetUsd: 50 });
       const t = await seedTicket(pool, s);
-      // Segura o /evolve imediatamente ANTES do UPDATE de promoção; nesse intervalo o humano recusa o pedido.
-      const gate = queryGate(pool, /UPDATE tickets SET status = 'promoted'/, { mode: "hold-before" });
+      // Segura o /evolve imediatamente ANTES de ler o ticket sob lock; nesse intervalo o humano recusa o pedido.
+      const gate = queryGate(pool, /FROM tickets WHERE id = \$1 FOR UPDATE/, { mode: "hold-before" });
       const evolving = evolve(s.parentId, { ticketId: t.id });
       await gate.reached;
       const patch = await app.inject({ method: "PATCH", url: `/api/tickets/${t.id}`, payload: { status: "rejected" } });
@@ -149,13 +160,14 @@ describePg("Fase 0' / 0.3 — reprodução dos defeitos do /evolve (Postgres rea
       kids = await childrenOf(pool, s.parentId);
       ev("0.3-b/perdida", { patchRejeitar: patchStatus, evolve: evolveStatus, ticketFinal: tk.status, filhos: kids.length });
     });
+    afterAll(() => { vi.unstubAllEnvs(); });
     it("harness: a recusa foi aceita (200) enquanto o ticket ainda estava 'open'", () => {
       expect(patchStatus).toBe(200);
     });
-    // DEFEITO 0.3-b: a promoção atropela a recusa ('rejected' → 'promoted') e cria filho de pedido recusado — remover it.fails quando corrigido (tarefa 1.1)
-    it.fails("recusa concorrente vence: ticket permanece 'rejected' e o /evolve responde 409 (rowCount 0)", () => {
+    it("recusa concorrente vence: ticket permanece 'rejected' e o /evolve responde 409 (rowCount 0)", () => {
       expect(tk.status).toBe("rejected");
       expect(evolveStatus).toBe(409);
+      expect(kids).toHaveLength(0);
     });
   });
 
@@ -246,12 +258,13 @@ describePg("Fase 0' / 0.3 — reprodução dos defeitos do /evolve (Postgres rea
   });
 
   // ── (g) orçamento do filho ────────────────────────────────────────────────────────
-  describe("(g) filho de evolução sem orçamento — INSERT sem budget_usd (projects.ts:3503) × Guard BUDGET_MISSING (llmGuard.ts:405)", () => {
+  describe("(g) filho de evolução e orçamento — CORRIGIDO na 1.3 (EVOLVE_CLAIM=on): o filho aponta para o dono terminal do orçamento", () => {
     let parentDecision: Awaited<ReturnType<typeof preflight>>; let childDecision: Awaited<ReturnType<typeof preflight>>;
     let child: { budget_usd: string | null; budget_owner_project_id: string | null };
     let killBackup = "on";
-    afterAll(async () => { await pool.query("UPDATE llm_guard_settings SET value=$1 WHERE key='kill_switch'", [killBackup]); });
+    afterAll(async () => { vi.unstubAllEnvs(); await pool.query("UPDATE llm_guard_settings SET value=$1 WHERE key='kill_switch'", [killBackup]); });
     beforeAll(async () => {
+      vi.stubEnv("EVOLVE_CLAIM", "on");
       // A migration semeia a chave geral LIGADA (fail-closed; o banco vence o env). Desliga só neste banco efêmero para isolar o orçamento.
       killBackup = String((await pool.query("SELECT value FROM llm_guard_settings WHERE key='kill_switch'")).rows[0]?.value ?? "on");
       await pool.query("UPDATE llm_guard_settings SET value='off' WHERE key='kill_switch'");
@@ -265,12 +278,10 @@ describePg("Fase 0' / 0.3 — reprodução dos defeitos do /evolve (Postgres rea
     it("controle: o pai com orçamento US$ 50 é liberado pelo Guard", () => {
       expect(parentDecision.allow).toBe(true);
     });
-    // DEFEITO 0.3-g: o filho nasce sem budget_usd nem budget_owner_project_id ⇒ o Guard nega TODO LLM com BUDGET_MISSING — remover it.fails quando corrigido (tarefa 1.3)
-    it.fails("o filho herda/compartilha o orçamento do pai (D-E10): budget_usd ou budget_owner_project_id preenchido", () => {
+    it("o filho herda/compartilha o orçamento do pai (D-E10): budget_usd ou budget_owner_project_id preenchido", () => {
       expect(child.budget_usd !== null || child.budget_owner_project_id !== null).toBe(true);
     });
-    // DEFEITO 0.3-g: idem, visto pelo Guard — remover it.fails quando corrigido (tarefa 1.3)
-    it.fails("o Guard libera a primeira chamada de LLM do filho (não BUDGET_MISSING)", () => {
+    it("o Guard libera a primeira chamada de LLM do filho (não BUDGET_MISSING)", () => {
       expect(childDecision.allow).toBe(true);
     });
   });
