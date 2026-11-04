@@ -1,105 +1,55 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { ApiError } from "@/lib/api";
-import { makeDetail, NO_ACTIONS } from "@/lib/cards/cardFixtures";
+import { detailOf, journeyOf } from "@/lib/cards/cardFixtures";
+import { PromotePanel, promoteChecks } from "./PromotePanel";
+import type { CardRunner } from "./useCardRunner";
 
-vi.mock("@/lib/cards/cardsApi", () => ({ cardsApi: { promote: vi.fn(), revalidate: vi.fn() } }));
-import { cardsApi } from "@/lib/cards/cardsApi";
-import { PromotePanel } from "./PromotePanel";
-const promote = cardsApi.promote as unknown as ReturnType<typeof vi.fn>;
-const revalidate = cardsApi.revalidate as unknown as ReturnType<typeof vi.fn>;
+const runner = (over: Partial<CardRunner> = {}): CardRunner => ({
+  busy: null, error: null, notice: null, revalidation: null, promoted: null, restart: null, run: vi.fn(async () => undefined), dismiss: vi.fn(), ...over,
+});
 
-const ready = () => makeDetail({ state: "ready", actions: { ...NO_ACTIONS, promote: true, reject: true, revalidate: true } });
-function setup(over: Partial<Parameters<typeof PromotePanel>[0]> = {}) {
-  const props = { card: ready(), caps: null, baseStale: null as boolean | null, onBaseStale: vi.fn(), onChanged: vi.fn(), ...over };
-  render(<PromotePanel {...props} />);
-  return props;
-}
-beforeEach(() => vi.clearAllMocks());
+describe("promoteChecks (pré-requisitos lidos dos bloqueios do servidor)", () => {
+  it("pronto e sem bloqueios: tudo atendido", () => {
+    expect(promoteChecks(detailOf("ready"), journeyOf("ready"))).toEqual({ spec: "ok", budget: "ok", base: "ok" });
+  });
+  it("base vencida: só a base fica pendente", () => {
+    expect(promoteChecks(detailOf("ready"), journeyOf("ready-base-stale"))).toEqual({ spec: "ok", budget: "ok", base: "pending" });
+  });
+  it("orçamento pausado: só o saldo fica pendente", () => {
+    expect(promoteChecks(detailOf("ready"), journeyOf("ready-budget-paused"))).toMatchObject({ spec: "ok", budget: "pending", base: "ok" });
+  });
+  it("sem jornada: saldo e base ficam 'conferidos ao promover' (o servidor decide)", () => {
+    expect(promoteChecks(detailOf("ready"), null)).toEqual({ spec: "ok", budget: "unknown", base: "unknown" });
+  });
+});
 
 describe("PromotePanel", () => {
-  it("lista os pré-requisitos (spec pronta, saldo, base atual) em texto", () => {
-    setup({ caps: { cardsBancada: true, budget: { freeUsd: 9, minFreeUsd: 5 } }, baseStale: false });
-    const list = screen.getByRole("list", { name: "Pré-requisitos da promoção" });
-    expect(list).toHaveTextContent("Atendido: especificação do card validada e pronta.");
-    expect(list).toHaveTextContent("Atendido: saldo livre do orçamento (US$ 9.00 livres, mínimo US$ 5.00)");
-    expect(list).toHaveTextContent("Atendido: base atual");
+  it("orçamento negado pelo Guard: promover desabilitado e a razão aparece em texto", () => {
+    render(<PromotePanel card={detailOf("ready")} journey={journeyOf("ready-budget-paused")} runner={runner()} />);
+    expect(screen.getByRole("button", { name: "Promover à fábrica" })).toBeDisabled();
+    expect(screen.getByRole("list", { name: "Pré-requisitos da promoção" })).toHaveTextContent("Pendente: saldo livre");
+    expect(screen.getByText(/indisponível enquanto houver bloqueio/)).toBeInTheDocument();
   });
 
-  it("antes de 'pronto' o botão não existe e orienta a validar", () => {
-    setup({ card: makeDetail({ state: "refining", actions: { ...NO_ACTIONS, ready: true } }) });
-    expect(screen.queryByRole("button", { name: /Promover/ })).not.toBeInTheDocument();
-    expect(screen.getByText(/valide a especificação do card/)).toBeInTheDocument();
-  });
-
-  it("promove uma vez (clique duplo) e mostra a ligação com o filho", async () => {
-    let resolve!: (v: unknown) => void;
-    promote.mockReturnValue(new Promise((r) => { resolve = r; }));
-    const props = setup();
-    const btn = screen.getByRole("button", { name: "Promover à fábrica" });
-    fireEvent.click(btn); fireEvent.click(btn);
-    expect(promote).toHaveBeenCalledTimes(1);
-    expect(await screen.findByRole("button", { name: "Promovendo…" })).toBeDisabled();
-    resolve({ childProjectId: "child-9", versionNumber: 2, cardId: "c1", cardState: "promoted" });
-    await waitFor(() => expect(props.onChanged).toHaveBeenCalled());
-  });
-
-  it("depois da promoção mostra filho e PR, sem botão", () => {
-    setup({ card: makeDetail({ state: "in_factory", childProjectId: "child-9", executionTitle: "Produto v2", prUrl: "https://github.com/x/y/pull/1" }) });
-    expect(screen.getByRole("link", { name: "Produto v2" })).toHaveAttribute("href", "/projects/child-9");
-    expect(screen.getByRole("link", { name: /abrir no GitHub/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Promover/ })).not.toBeInTheDocument();
-  });
-
-  it("base vencida: mostra aviso e 'Revalidar'; revalidar chama a API e limpa o aviso", async () => {
-    promote.mockRejectedValue(new ApiError("x", 409, "CARD_BASE_STALE"));
-    revalidate.mockResolvedValue({ ok: true });
-    const props = setup();
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "Promover à fábrica" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("base vencida");
-    expect(props.onBaseStale).toHaveBeenCalledWith(true);
-    await user.click(screen.getByRole("button", { name: "Revalidar" }));
-    await waitFor(() => expect(revalidate).toHaveBeenCalledWith("c1"));
-    await waitFor(() => expect(props.onBaseStale).toHaveBeenCalledWith(false));
-    expect(await screen.findByRole("status")).toHaveTextContent("valide o card de novo antes de promover");
-  });
-
-  it.each([
-    [402, "BUDGET_FREE_BELOW_MIN", { freeUsd: 1, minFreeUsd: 5 }, /Saldo livre insuficiente/],
-    [402, "BUDGET_MISSING", undefined, /não tem orçamento definido/],
-    [409, "USE_CARD_PROMOTE", undefined, /Promova-o pela tela do card/],
-    [409, "EVOLUTION_IN_FLIGHT", undefined, /evolução em andamento/],
-    [409, "MATERIALIZATION_IN_PROGRESS", undefined, /já está em andamento/],
-  ])("erro %s %s traduzido, sem sumir o botão", async (status, code, body, re) => {
-    promote.mockRejectedValue(new ApiError("x", status as number, code as string, body as Record<string, unknown> | undefined));
-    setup();
+  it("promover e revalidar acionam o runner uma vez cada", async () => {
+    const r = runner();
+    render(<PromotePanel card={detailOf("ready")} journey={journeyOf("ready")} runner={r} />);
     await userEvent.click(screen.getByRole("button", { name: "Promover à fábrica" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(re as RegExp);
-    expect(screen.getByRole("button", { name: "Promover à fábrica" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "Revalidar" }));
+    expect(r.run).toHaveBeenNthCalledWith(1, "promote");
+    expect(r.run).toHaveBeenNthCalledWith(2, "revalidate");
   });
 
-  it("depois de a base vencer o card volta a 'Refinando': o aviso e o 'Revalidar' continuam visíveis, sem botão de promover", () => {
-    setup({ card: makeDetail({ state: "refining", actions: { ...NO_ACTIONS, ready: true, revalidate: true } }), baseStale: true });
-    expect(screen.getByRole("button", { name: "Revalidar" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Promover à fábrica" })).not.toBeInTheDocument();
+  it("em andamento: botão 'Promovendo…' desabilitado (clique duplo não duplica)", () => {
+    render(<PromotePanel card={detailOf("ready")} journey={journeyOf("ready")} runner={runner({ busy: "promote" })} />);
+    expect(screen.getByRole("button", { name: "Promovendo…" })).toBeDisabled();
   });
 
-  it("CARD_NOT_READY recarrega o card (voltou a refinando)", async () => {
-    promote.mockRejectedValue(new ApiError("x", 409, "CARD_NOT_READY"));
-    const props = setup();
-    await userEvent.click(screen.getByRole("button", { name: "Promover à fábrica" }));
-    await screen.findByRole("alert");
-    expect(props.onChanged).toHaveBeenCalledTimes(1);
-  });
-
-  it("promoção repetida (replayed) avisa que nada foi duplicado", async () => {
-    promote.mockResolvedValue({ childProjectId: "child-9", versionNumber: 2, cardId: "c1", cardState: "promoted", replayed: true });
-    const { rerender } = render(<PromotePanel card={ready()} caps={null} baseStale={null} onBaseStale={vi.fn()} onChanged={vi.fn()} />);
-    await userEvent.click(screen.getAllByRole("button", { name: "Promover à fábrica" }).at(-1)!);
-    await waitFor(() => expect(promote).toHaveBeenCalled());
-    rerender(<PromotePanel card={makeDetail({ state: "promoted", childProjectId: "child-9" })} caps={null} baseStale={null} onBaseStale={vi.fn()} onChanged={vi.fn()} />);
-    expect(await screen.findByTestId("promote-done")).toHaveTextContent("Card promovido");
+  it("depois da promoção mostra filho e PR (journey.execution.prUrl), sem botão", () => {
+    render(<PromotePanel card={detailOf("delivered")} journey={journeyOf("delivered")} runner={runner()} />);
+    expect(screen.getByRole("link", { name: /Evolução v2/ })).toHaveAttribute("href", expect.stringMatching(/^\/projects\//));
+    expect(screen.getByRole("link", { name: /abrir no GitHub/ })).toHaveAttribute("href", "https://github.com/zentriz-demo/entregas/pull/42");
+    expect(screen.queryByRole("button", { name: /Promover/ })).not.toBeInTheDocument();
   });
 });

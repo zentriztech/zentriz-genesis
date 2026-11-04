@@ -102,7 +102,7 @@ export function CardBoardView({ productId }: { productId: string }) {
         </Box>
       )}
 
-      <CardCreateDialog open={createOpen} productId={productId} caps={caps} onClose={() => setCreateOpen(false)}
+      <CardCreateDialog open={createOpen} productId={productId} onClose={() => setCreateOpen(false)}
         onCreated={(card) => { setCreateOpen(false); router.push(`/cards/${card.id}`); }} />
     </Box>
   );

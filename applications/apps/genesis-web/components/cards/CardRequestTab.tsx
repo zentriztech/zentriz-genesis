@@ -10,21 +10,27 @@ import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import { cardsApi } from "@/lib/cards/cardsApi";
 import { cardErrorMessage } from "@/lib/cards/cardErrors";
-import { CARD_KINDS, KIND_LABEL, KIND_RITE, type CardAttachment, type CardDetail, type CardKind } from "@/lib/cards/types";
+import { CARD_KINDS, KIND_LABEL, KIND_RITE, type CardAttachment, type CardAttachmentItem, type CardDetail, type CardKind, type ConversionState } from "@/lib/cards/types";
 
-const PLAIN = new Set(["txt", "md"]);
-const ext = (n: string) => (n.includes(".") ? n.split(".").pop()!.toLowerCase() : "");
 const fmtSize = (b: number) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.ceil(b / 1024))} KB`);
 
-/** Estado de cada anexo: entra na spec (txt/md), convertido (derivado .md) ou guardado no card (pdf/doc/docx). */
-export function attachmentStatus(a: CardAttachment, all: CardAttachment[]): string {
+const CONVERSION_TEXT: Record<ConversionState, string> = {
+  not_applicable: "", disabled: "Guardado no card · conversão para .md desabilitada para este cliente", queued: "Guardado no card · conversão para .md na fila",
+  pending: "Guardado no card · conversão para .md pendente", running: "Guardado no card · convertendo para .md agora", done: "Guardado no card · conversão para .md concluída",
+  empty: "Guardado no card · sem texto extraível (PDF digitalizado?)", failed: "Guardado no card · a conversão para .md falhou",
+};
+
+/** Estado de cada anexo segundo o servidor (`GET /api/cards/:id/attachments`): entra na spec (txt/md), convertido (derivado .md) ou só guardado (pdf/doc/docx). */
+export function attachmentStatus(a: CardAttachment, item: CardAttachmentItem | undefined, all: CardAttachment[]): string {
   if (a.origin === "converted" || a.derivedFromAttachmentId) {
     const src = all.find((x) => x.id === a.derivedFromAttachmentId);
     return `Convertido automaticamente${src ? ` de ${src.filename}` : ""} · entra na especificação`;
   }
-  if (PLAIN.has(ext(a.filename))) return "Texto: entra na especificação do card";
-  const hasDerived = all.some((x) => x.derivedFromAttachmentId === a.id);
-  return hasDerived ? "Guardado no card · conversão para .md concluída" : "Guardado no card · conversão para .md pendente ou desabilitada";
+  if (!item) return a.kind === "card_only" ? "Guardado no card" : "Anexo do pedido";
+  if (item.conversion.state === "not_applicable") return item.kind === "spec_text" ? "Texto: entra na especificação do card" : "Anexo do pedido";
+  const base = CONVERSION_TEXT[item.conversion.state];
+  if (item.conversion.state === "failed") return `${base}${item.conversion.errorMessage ? `: ${item.conversion.errorMessage}` : ""} (${item.conversion.attempts} tentativa(s)); o original segue guardado`;
+  return base;
 }
 
 export function CardRequestTab({ card, onChanged }: { card: CardDetail; onChanged: () => void | Promise<void> }) {
@@ -34,6 +40,14 @@ export function CardRequestTab({ card, onChanged }: { card: CardDetail; onChange
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [items, setItems] = useState<Map<string, CardAttachmentItem>>(new Map());
+  const hasAttachments = card.attachments.length > 0;
+  useEffect(() => {
+    if (!hasAttachments) { setItems(new Map()); return; }
+    let alive = true;
+    cardsApi.attachments(card.id).then((r) => { if (alive) setItems(new Map(r.items.map((i) => [i.id, i]))); }).catch(() => { if (alive) setItems(new Map()); });
+    return () => { alive = false; };
+  }, [card.id, card.updatedAt, hasAttachments]);
   useEffect(() => { setTitle(card.title); setBody(card.body); setKind(card.kind); }, [card.id, card.title, card.body, card.kind]);
   const editable = card.actions.edit;
   const dirty = title !== card.title || body !== card.body || kind !== card.kind;
@@ -68,7 +82,7 @@ export function CardRequestTab({ card, onChanged }: { card: CardDetail; onChange
               {card.attachments.map((a) => (
                 <li key={a.id}>
                   <Link href={a.downloadUrl} download>{a.filename}</Link>{" "}
-                  <Typography variant="caption" color="text.secondary">({fmtSize(a.sizeBytes)}) — {attachmentStatus(a, card.attachments)}</Typography>
+                  <Typography variant="caption" color="text.secondary">({fmtSize(a.sizeBytes)}) — {attachmentStatus(a, items.get(a.id), card.attachments)}</Typography>
                 </li>
               ))}
             </Box>

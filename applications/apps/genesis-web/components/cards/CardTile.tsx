@@ -7,6 +7,7 @@ import Typography from "@mui/material/Typography";
 import BlockIcon from "@mui/icons-material/Block";
 import NextLink from "next/link";
 import { NEXT_ACTION, ORIGIN_LABEL, STATE_LABEL, type CardSummary } from "@/lib/cards/types";
+import { blockedReasonLabel } from "@/lib/cards/cardErrors";
 import { KindChip } from "./KindChip";
 import { VisuallyHidden } from "./VisuallyHidden";
 
@@ -29,7 +30,7 @@ export function CardTile({ card }: { card: CardSummary }) {
         <Stack direction="row" spacing={0.5} alignItems="flex-start" role="status" sx={{ mt: 0.75, color: "error.main" }}>
           <BlockIcon sx={{ fontSize: "1rem", mt: "2px" }} aria-hidden />
           <Typography variant="caption" fontWeight={700} color="error">
-            Bloqueado{card.blockedReason ? `: ${card.blockedReason}` : ""}
+            Bloqueado{card.blockedReason ? `: ${blockedReasonLabel(card.blockedReason)}` : ""}
           </Typography>
         </Stack>
       )}

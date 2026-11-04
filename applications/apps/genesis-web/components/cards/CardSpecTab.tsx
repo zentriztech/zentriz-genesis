@@ -18,7 +18,8 @@ import EditNoteIcon from "@mui/icons-material/EditNote";
 import { apiGet, apiPost, apiPut } from "@/lib/api";
 import { cardsApi } from "@/lib/cards/cardsApi";
 import { cardErrorCode, cardErrorMessage } from "@/lib/cards/cardErrors";
-import type { BaseSpec, CardDetail } from "@/lib/cards/types";
+import { STATE_LABEL, type BaseSpec, type CardDetail } from "@/lib/cards/types";
+import type { CardRunner } from "./useCardRunner";
 import SpecCodeEditor from "@/components/SpecCodeEditor";
 import SpecValidationPanel from "@/components/SpecValidationPanel";
 
@@ -34,7 +35,7 @@ function ScopeBadge({ kind }: { kind: "initial" | "card" }) {
     : <Chip size="small" color="primary" icon={<EditNoteIcon />} label="Spec deste card" />;
 }
 
-function BasePanel({ card, onStale }: { card: CardDetail; onStale: (v: boolean) => void }) {
+function BasePanel({ card, onStale, stale }: { card: CardDetail; onStale: (v: boolean) => void; stale?: boolean | null }) {
   const [base, setBase] = useState<BaseSpec | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sel, setSel] = useState(0);
@@ -54,7 +55,7 @@ function BasePanel({ card, onStale }: { card: CardDetail; onStale: (v: boolean) 
         <ScopeBadge kind="initial" />
         {base && <Typography variant="caption" color="text.secondary">v{base.headVersion} · {base.title}</Typography>}
       </Stack>
-      {base?.stale && <Alert severity="warning" sx={{ mb: 1 }}>O produto avançou de versão depois da base deste card. Revalide o card antes de promover.</Alert>}
+      {(stale ?? base?.stale) && <Alert severity="warning" sx={{ mb: 1 }}>O produto avançou de versão depois da base deste card. Revalide o card antes de promover.</Alert>}
       {error && <Alert severity="error">{error}</Alert>}
       {!base && !error && <CircularProgress size={20} aria-label="Carregando spec do produto" />}
       {base && base.files.length === 0 && <Typography variant="body2">A versão atual não tem arquivos de especificação legíveis.</Typography>}
@@ -66,7 +67,7 @@ function BasePanel({ card, onStale }: { card: CardDetail; onStale: (v: boolean) 
           {file?.truncated && <Alert severity="info" sx={{ mb: 1 }}>Arquivo exibido parcialmente (teto de leitura).</Alert>}
           <Box component="pre" tabIndex={0} aria-label={`Conteúdo somente leitura de ${file?.path ?? ""}`}
             sx={{ m: 0, p: 1, maxHeight: 360, overflow: "auto", bgcolor: "background.paper", border: "1px solid", borderColor: "divider", borderRadius: 1, whiteSpace: "pre-wrap", fontSize: "0.78rem" }}>
-            {file?.content}
+            {file?.truncated || file?.content == null ? "(conteúdo acima do teto de leitura: abra a spec da versão pelo projeto)" : file.content}
           </Box>
         </>
       )}
@@ -74,8 +75,8 @@ function BasePanel({ card, onStale }: { card: CardDetail; onStale: (v: boolean) 
   );
 }
 
-export function CardSpecTab({ card, locked, onChanged, onStale }: {
-  card: CardDetail; locked: boolean; onChanged: () => void | Promise<void>; onStale: (v: boolean) => void;
+export function CardSpecTab({ card, locked, canReopen, runner, onChanged, onStale, baseStale }: {
+  card: CardDetail; locked: boolean; canReopen: boolean; runner: CardRunner; onChanged: () => void | Promise<void>; onStale: (v: boolean) => void; baseStale?: boolean | null;
 }) {
   const draftId = card.draftProjectId;
   const editableState = card.state === "draft" || card.state === "refining";
@@ -90,7 +91,6 @@ export function CardSpecTab({ card, locked, onChanged, onStale }: {
   const [busy, setBusy] = useState(false);
   const [newPath, setNewPath] = useState("");
   const [versionsSignal, setVersionsSignal] = useState(0);
-  const [reopening, setReopening] = useState(false);
 
   const loadFiles = useCallback(async () => {
     if (!draftId) return;
@@ -131,10 +131,6 @@ export function CardSpecTab({ card, locked, onChanged, onStale }: {
     try { await apiPost(`/api/projects/${draftId}/spec-file`, { path: p, content: `# ${p}\n\n` }); setNewPath(""); await loadFiles(); setPath(p); }
     catch (e) { setError(cardErrorMessage(e)); } finally { setBusy(false); }
   };
-  const reopen = async () => {
-    setReopening(true); setError(null);
-    try { await cardsApi.refine(card.id); await onChanged(); } catch (e) { setError(cardErrorMessage(e)); } finally { setReopening(false); }
-  };
 
   // ── Chat IA sobre o rascunho (reaproveita /api/spec-chat da Bancada) ─────────────────────────────
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
@@ -168,15 +164,19 @@ export function CardSpecTab({ card, locked, onChanged, onStale }: {
 
   return (
     <Stack spacing={2}>
-      {locked && (
+      {locked && canReopen && (
         <Alert severity="warning" data-testid="spec-locked"
-          action={<Button color="inherit" size="small" disabled={reopening} onClick={() => void reopen()}>{reopening ? "Reabrindo…" : "Reabrir para edição"}</Button>}>
+          action={<Button color="inherit" size="small" disabled={!!runner.busy} onClick={() => void runner.run("reopen")} sx={{ minHeight: 32 }}>{runner.busy === "reopen" ? "Reabrindo…" : "Reabrir para edição"}</Button>}>
           A especificação está travada porque o card está pronto para promover. Para alterá-la, reabra o card: ele volta a “Refinando” e precisa ser validado de novo.
         </Alert>
       )}
-      {!locked && !editableState && <Alert severity="info">Card em “{card.state}”: a especificação é apenas histórica e não pode mais ser editada.</Alert>}
+      {locked && !canReopen && (
+        <Alert severity="info" data-testid="spec-locked">
+          A especificação está travada: com o card em “{STATE_LABEL[card.state]}” ela é apenas histórica e não pode mais ser editada nem reaberta.
+        </Alert>
+      )}
       <Box sx={{ display: "grid", gap: 2, gridTemplateColumns: { xs: "1fr", lg: "1fr 1fr" }, alignItems: "start" }}>
-        <BasePanel card={card} onStale={onStale} />
+        <BasePanel card={card} onStale={onStale} stale={baseStale} />
         <Box component="section" aria-labelledby="card-spec-title" sx={{ border: "2px solid", borderColor: "primary.main", borderRadius: 1, p: 1.5, minWidth: 0 }}>
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
             <Typography id="card-spec-title" variant="subtitle2" component="h3">Especificação do card</Typography>

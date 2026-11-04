@@ -3,6 +3,8 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ApiError } from "@/lib/api";
 import { makeCard } from "@/lib/cards/cardFixtures";
+import { body } from "@/lib/cards/contractFixtures";
+import type { CardListResponse } from "@/lib/cards/types";
 import { resetCardsCapabilitiesCache } from "@/lib/cards/useCardsEnabled";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -15,8 +17,8 @@ const api = cardsApi as unknown as { capabilities: ReturnType<typeof vi.fn>; lis
 const CARDS = [
   makeCard({ id: "a", code: "TK-0001", title: "Rascunho A", state: "draft" }),
   makeCard({ id: "b", code: "TK-0002", title: "Correção B", kind: "fix", state: "refining" }),
-  makeCard({ id: "c", code: "TK-0003", title: "Recurso C", kind: "feature", state: "blocked", blockedReason: "materialization_failed:CODE" }),
-  makeCard({ id: "d", code: "TK-0004", title: "Na fábrica D", state: "in_factory", childProjectId: "child-1", executionTitle: "Produto v2", executionStatus: "running", prUrl: "https://github.com/x/y/pull/3" }),
+  makeCard({ id: "c", code: "TK-0003", title: "Recurso C", kind: "feature", state: "blocked", blockedReason: "budget:BUDGET_PAUSED" }),
+  makeCard({ id: "d", code: "TK-0004", title: "Na fábrica D", kind: "evolution", state: "in_factory", childProjectId: "child-1", executionTitle: "Produto v2", executionStatus: "running", prUrl: "https://github.com/x/y/pull/3" }),
 ];
 
 beforeEach(() => { vi.clearAllMocks(); resetCardsCapabilitiesCache(); api.capabilities.mockResolvedValue({ cardsBancada: true }); });
@@ -41,7 +43,7 @@ describe("CardBoardView", () => {
     api.list.mockResolvedValue({ items: CARDS, total: 4, limit: 100, offset: 0 });
     render(<CardBoardView productId="p1" />);
     const tile = await screen.findByTestId("card-tile-TK-0003");
-    expect(within(tile).getByRole("status")).toHaveTextContent("Bloqueado: materialization_failed:CODE");
+    expect(within(tile).getByRole("status")).toHaveTextContent("Bloqueado: orçamento — O orçamento de IA está pausado");
   });
 
   it("filtra por tipo e oculta/mostra colunas por estado (aria-pressed)", async () => {
@@ -86,5 +88,15 @@ describe("CardBoardView", () => {
     api.list.mockResolvedValue({ items: CARDS, total: 250, limit: 100, offset: 0 });
     render(<CardBoardView productId="p1" />);
     expect(await screen.findByText(/Mostrando 4 de 250 cards/)).toBeInTheDocument();
+  });
+
+  it("renderiza a listagem REAL do backend (fixture list.all): colunas por estado e links", async () => {
+    const real = body<CardListResponse>("list.all");
+    api.list.mockResolvedValue(real);
+    render(<CardBoardView productId={real.items[0].productId} />);
+    for (const c of real.items) expect(await screen.findByTestId(`card-tile-${c.code}`)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: `Rascunho (${real.items.filter((c) => c.state === "draft").length})` })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Entregue \(1\)/ })).toBeInTheDocument();
+    expect(within(screen.getByTestId("card-tile-TK-0001")).getByRole("link", { name: /abrir no GitHub/ })).toHaveAttribute("href", "https://github.com/zentriz-demo/entregas/pull/42");
   });
 });

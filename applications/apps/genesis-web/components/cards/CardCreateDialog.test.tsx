@@ -3,25 +3,27 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ApiError } from "@/lib/api";
 import { makeCard } from "@/lib/cards/cardFixtures";
+import { fixture } from "@/lib/cards/contractFixtures";
 
 vi.mock("@/lib/cards/cardsApi", () => ({ cardsApi: { create: vi.fn() } }));
 import { cardsApi } from "@/lib/cards/cardsApi";
 import { CardCreateDialog } from "./CardCreateDialog";
 const create = cardsApi.create as unknown as ReturnType<typeof vi.fn>;
 
-const setup = (caps: Parameters<typeof CardCreateDialog>[0]["caps"] = { cardsBancada: true }) => {
+const setup = () => {
   const onCreated = vi.fn(); const onClose = vi.fn();
-  render(<CardCreateDialog open productId="p1" caps={caps} onClose={onClose} onCreated={onCreated} />);
+  render(<CardCreateDialog open productId="p1" onClose={onClose} onCreated={onCreated} />);
   return { onCreated, onClose };
 };
 beforeEach(() => vi.clearAllMocks());
 
 describe("CardCreateDialog", () => {
-  it("oferece os 3 tipos com descrição e o modo de trabalho FIXO em branch git (sem seletor)", () => {
+  it("oferece os 3 tipos com descrição e explica como o card chega à fábrica (sem seletor de modo)", () => {
     setup();
     expect(screen.getAllByRole("radio")).toHaveLength(3);
     for (const k of ["Evolução", "Correção", "Recurso novo"]) expect(screen.getByRole("radio", { name: new RegExp(k) })).toBeInTheDocument();
-    expect(screen.getByText(/Modo de trabalho: Branch git\./)).toBeInTheDocument();
+    expect(screen.getByText(/Como o card chega à fábrica:/)).toBeInTheDocument();
+    expect(screen.getByText(/evolution\/vN/)).toBeInTheDocument();
     expect(screen.queryByText(/cópia do projeto|copy/i)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/modo de trabalho/i)).not.toBeInTheDocument();
   });
@@ -56,9 +58,9 @@ describe("CardCreateDialog", () => {
     resolve(makeCard());
   });
 
-  it("anexos: lista tipos e teto; recusa extensão fora da lista; aceita pdf/md; permite remover", async () => {
-    setup({ cardsBancada: true, attachments: { allowedExtensions: ["pdf", "txt", "md", "doc", "docx"], maxFiles: 3, maxTotalBytes: 5 * 1024 * 1024 } });
-    expect(screen.getByText(/Tipos permitidos: pdf, txt, md, doc, docx · até 3 arquivo\(s\) · teto total 5 MB/)).toBeInTheDocument();
+  it("anexos: lista os tipos do backend (pdf, txt, md, doc, docx); recusa extensão fora da lista; aceita pdf/md; permite remover", async () => {
+    setup();
+    expect(screen.getByText(/Tipos permitidos: pdf, txt, md, doc, docx · quantidade e tamanho máximos são conferidos pelo servidor/)).toBeInTheDocument();
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     const user = userEvent.setup({ applyAccept: false });
     await user.upload(input, new File(["x"], "foto.png", { type: "image/png" }));
@@ -70,31 +72,28 @@ describe("CardCreateDialog", () => {
     expect(screen.queryByText(/spec\.md/)).not.toBeInTheDocument();
   });
 
-  it("anexos acima do teto são recusados com mensagem clara", async () => {
-    setup({ cardsBancada: true, attachments: { allowedExtensions: ["md"], maxTotalBytes: 2048 } });
-    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
-    await userEvent.upload(input, new File([new Uint8Array(4096)], "grande.md"));
-    expect(await screen.findByRole("alert")).toHaveTextContent("passa do teto de 2 KB");
+  it("orçamento: explica que o saldo é conferido pelo servidor (a capacidade real não traz saldo)", () => {
+    setup();
+    expect(screen.getByText(/O saldo é conferido pelo servidor ao criar, validar e promover/)).toBeInTheDocument();
+    expect(screen.queryByText(/Saldo livre: US\$/)).not.toBeInTheDocument();
   });
 
-  it("orçamento: mostra saldo livre e mínimo; avisa quando o saldo está abaixo", () => {
-    setup({ cardsBancada: true, budget: { freeUsd: 2, minFreeUsd: 5 } });
-    expect(screen.getByText(/Saldo livre: US\$ 2\.00 · mínimo exigido para promover: US\$ 5\.00/)).toBeInTheDocument();
-    expect(screen.getByText(/saldo está abaixo do mínimo/)).toBeInTheDocument();
-  });
-
-  it("mostra a mensagem do backend traduzida: produto não fabricado, anexo recusado e GitHub", async () => {
+  it("mostra a mensagem do backend (corpos REAIS): sem orçamento, anexo recusado, anexos indisponíveis e pedido inválido", async () => {
     setup();
     const user = userEvent.setup();
     fireEvent.change(screen.getByLabelText(/Descrição do pedido/), { target: { value: "algo" } });
-    create.mockRejectedValueOnce(new ApiError("x", 409, "NO_ACCEPTED_HEAD"));
+    const reject = (name: string) => { const f = fixture<Record<string, unknown>>(name); return new ApiError(String(f.body.message), f.status, String(f.body.code), f.body); };
+    create.mockRejectedValueOnce(reject("create.402-budget-missing"));
     await user.click(screen.getByRole("button", { name: "Criar card" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("ainda não foi fabricado e aceito");
-    create.mockRejectedValueOnce(new ApiError("x", 400, "ATTACHMENT_INVALID", { errors: ["a.exe: tipo não permitido"] }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("A versão corrente não tem orçamento de IA definido");
+    create.mockRejectedValueOnce(reject("create.400-attachment-invalid"));
     await user.click(screen.getByRole("button", { name: "Criar card" }));
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("a.exe: tipo não permitido"));
-    create.mockRejectedValueOnce(new ApiError("GitHub App não instalado no repositório", 422, "CODE_BASE_UNAVAILABLE"));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/Algum anexo não é aceito.*Tipo ".exe" não permitido/));
+    create.mockRejectedValueOnce(reject("create.409-attachments-unavailable"));
     await user.click(screen.getByRole("button", { name: "Criar card" }));
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Confira a instalação do GitHub App"));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Anexos de card ainda não estão habilitados para este cliente"));
+    create.mockRejectedValueOnce(reject("create.400-bad-request"));
+    await user.click(screen.getByRole("button", { name: "Criar card" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Descreva o que o card pede"));
   });
 });

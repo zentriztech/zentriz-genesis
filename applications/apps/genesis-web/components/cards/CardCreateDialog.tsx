@@ -19,15 +19,14 @@ import Typography from "@mui/material/Typography";
 import CloseIcon from "@mui/icons-material/Close";
 import { cardsApi } from "@/lib/cards/cardsApi";
 import { cardErrorMessage } from "@/lib/cards/cardErrors";
-import { CARD_KINDS, DEFAULT_ATTACHMENT_EXTENSIONS, KIND_DESCRIPTION, KIND_LABEL, type CardCapabilities, type CardKind, type CardSummary } from "@/lib/cards/types";
+import { CARD_KINDS, DEFAULT_ATTACHMENT_EXTENSIONS, KIND_DESCRIPTION, KIND_LABEL, type CardKind, type CardSummary } from "@/lib/cards/types";
 
 const BODY_MAX = 20_000;
 const fmtMb = (b: number) => (b >= 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(b % (1024 * 1024) === 0 ? 0 : 1)} MB` : `${Math.ceil(b / 1024)} KB`);
-const usd = (v: number) => `US$ ${v.toFixed(2)}`;
 const extOf = (name: string) => (name.includes(".") ? name.split(".").pop()!.toLowerCase() : "");
 
-export function CardCreateDialog({ open, productId, caps, onClose, onCreated }: {
-  open: boolean; productId: string; caps?: CardCapabilities | null; onClose: () => void; onCreated: (card: CardSummary) => void;
+export function CardCreateDialog({ open, productId, onClose, onCreated }: {
+  open: boolean; productId: string; onClose: () => void; onCreated: (card: CardSummary) => void;
 }) {
   const [kind, setKind] = useState<CardKind>("evolution");
   const [title, setTitle] = useState("");
@@ -39,11 +38,8 @@ export function CardCreateDialog({ open, productId, caps, onClose, onCreated }: 
   const inFlight = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const allowed = (caps?.attachments?.allowedExtensions?.length ? caps.attachments.allowedExtensions : DEFAULT_ATTACHMENT_EXTENSIONS).map((e) => e.replace(/^\./, "").toLowerCase());
-  const maxFiles = caps?.attachments?.maxFiles;
-  const maxTotal = caps?.attachments?.maxTotalBytes;
-  const budget = caps?.budget;
-  const lowBalance = budget && budget.freeUsd != null && budget.minFreeUsd != null && budget.freeUsd < budget.minFreeUsd;
+  // O servidor confere tipo (por extensão e bytes), quantidade e tamanho; aqui só se filtra a extensão para poupar a ida e volta.
+  const allowed = DEFAULT_ATTACHMENT_EXTENSIONS;
 
   const addFiles = (list: FileList | null) => {
     if (!list) return;
@@ -53,9 +49,6 @@ export function CardCreateDialog({ open, productId, caps, onClose, onCreated }: 
       if (!allowed.includes(extOf(f.name))) { problems.push(`“${f.name}”: tipo não permitido (use ${allowed.join(", ")})`); continue; }
       next.push(f);
     }
-    if (maxFiles && next.length > maxFiles) problems.push(`No máximo ${maxFiles} arquivo(s) por card`);
-    const sum = next.reduce((a, f) => a + f.size, 0);
-    if (maxTotal && sum > maxTotal) problems.push(`O total dos anexos passa do teto de ${fmtMb(maxTotal)}`);
     setFieldError((p) => ({ ...p, files: problems.length ? problems.join(". ") + "." : undefined }));
     if (!problems.length || problems.every((p) => p.includes("tipo não permitido"))) setFiles(next);
     if (fileInput.current) fileInput.current.value = "";
@@ -98,7 +91,7 @@ export function CardCreateDialog({ open, productId, caps, onClose, onCreated }: 
             <Typography variant="subtitle2" component="h3">Anexos (opcional)</Typography>
             <Typography variant="caption" color="text.secondary" component="p" id="card-attach-help">
               Tipos permitidos: {allowed.join(", ")}
-              {maxFiles ? ` · até ${maxFiles} arquivo(s)` : ""}{maxTotal ? ` · teto total ${fmtMb(maxTotal)}` : " · o teto de tamanho é conferido pelo servidor"}.
+              {" · quantidade e tamanho máximos são conferidos pelo servidor"}.
               Arquivos txt e md entram na especificação; pdf, doc e docx ficam guardados no card (convertidos para .md automaticamente quando a conversão está habilitada).
             </Typography>
             <Button component="label" variant="outlined" size="small" sx={{ mt: 1 }}>
@@ -119,14 +112,12 @@ export function CardCreateDialog({ open, productId, caps, onClose, onCreated }: 
             )}
           </Box>
           <Alert severity="info" icon={false} role="note">
-            <Typography variant="body2"><b>Modo de trabalho: Branch git.</b> Cada card vira um projeto filho que trabalha numa branch do repositório do produto; não há cópia do código.</Typography>
+            <Typography variant="body2"><b>Como o card chega à fábrica:</b> ao promover, ele vira um projeto filho (a próxima versão do serviço, numa branch <code>evolution/vN</code>) que parte da versão corrente do produto.</Typography>
           </Alert>
-          <Alert severity={lowBalance ? "warning" : "info"} icon={false} role="note">
+          <Alert severity="info" icon={false} role="note">
             <Typography variant="body2">
-              <b>Orçamento:</b> o card compartilha o orçamento da versão corrente do produto.
-              {budget && budget.freeUsd != null ? ` Saldo livre: ${usd(budget.freeUsd)}` : " O saldo livre é conferido pelo servidor"}
-              {budget && budget.minFreeUsd != null ? ` · mínimo exigido para promover: ${usd(budget.minFreeUsd)}.` : "."}
-              {lowBalance ? " O saldo está abaixo do mínimo: você pode criar o card, mas não conseguirá validá-lo nem promovê-lo até aumentar o orçamento." : ""}
+              <b>Orçamento:</b> o card compartilha o orçamento da versão corrente do produto. O saldo é conferido pelo servidor ao criar, validar e promover:
+              se faltar saldo, o card fica como está e a tela avisa quanto falta para continuar.
             </Typography>
           </Alert>
           {error && <Alert severity="error" role="alert">{error}</Alert>}
