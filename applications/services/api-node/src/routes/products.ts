@@ -960,11 +960,12 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
            SELECT p.id, 0 AS depth
            FROM projects p
            WHERE p.product_id = $1
+             AND ${notHiddenProjectSql("p")}
              AND NOT EXISTS (
                SELECT 1 FROM project_triggers pt
                WHERE pt.project_id = p.id
                  AND pt.trigger_project_id IN (
-                   SELECT id FROM projects WHERE product_id = $1
+                   SELECT id FROM projects WHERE product_id = $1 AND ${notHiddenProjectSql("")}
                  )
              )
            UNION ALL
@@ -974,6 +975,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
            JOIN project_triggers pt ON pt.project_id = p.id
            JOIN topo t ON t.id = pt.trigger_project_id
            WHERE p.product_id = $1
+             AND ${notHiddenProjectSql("p")}
          ),
          depths AS (
            -- Para projetos com múltiplos predecessores, usar a profundidade máxima
@@ -1010,6 +1012,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
            ORDER BY b.created_at DESC LIMIT 1
          ) bdep ON true
          WHERE p.product_id = $1
+           AND ${notHiddenProjectSql("p")}
          GROUP BY p.id, d.depth, gr.repo_url, gr.repo_full_name, dep.app_url, dep.status, bdep.status
          ORDER BY COALESCE(d.depth, 0) ASC, p.created_at ASC`,
         [id]

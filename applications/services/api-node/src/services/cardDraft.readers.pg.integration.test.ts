@@ -3,13 +3,10 @@
  * contagens, agregados nem leituras de spec do produto onde não deve. Postgres REAL, banco descartável, rotas reais.
  *
  * Cada leitor é exercitado com um `card_draft` semeado ao lado de um projeto `accepted`; um CONTROLE prova que o rascunho
- * existe (sem ele o teste seria vacuamente verde). O teste estático no fim varre o código-fonte: todo leitor novo que
- * filtre por EXCLUSÃO de status (`<> 'archived'`) precisa usar `notHiddenProjectSql` ou constar da lista de exceções.
+ * existe (sem ele o teste seria vacuamente verde). O teste estático no fim varre o código-fonte: a guarda estática por CONSULTA vive em
+ * `projectsReaders.inventory.test.ts` (S-16).
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { readdirSync, readFileSync, statSync } from "fs";
-import { dirname, join, relative } from "path";
-import { fileURLToPath } from "url";
 import type pg from "pg";
 import type { FastifyInstance } from "fastify";
 import {
@@ -24,6 +21,7 @@ import { productRoutes } from "../routes/products.js";
 import { specRoutes } from "../routes/specs.js";
 import { dashboardRoutes } from "../routes/dashboard.js";
 import { pipelineRoutes } from "../routes/pipeline.js";
+import { reportsRoutes } from "../routes/reports.js";
 import { loadProductProjects } from "./productNormalizer.js";
 import { buildProductMap } from "./productContext.js";
 import { buildTraceabilityReport } from "./productTraceability.js";
@@ -31,7 +29,6 @@ import { deriveProductLifecycle, recomputeProductLifecycle } from "./productLife
 import { HIDDEN_FROM_PRODUCT_STATUSES, SPEC_EDITABLE_STATUSES, PRE_FACTORY_STATUSES, FACTORY_OR_TERMINAL_STATUSES, notHiddenProjectSql } from "./projectStatus.js";
 
 const ev = (tag: string, data: unknown) => console.log(`[F2-${tag}] EVIDÊNCIA ${JSON.stringify(data)}`);
-const here = dirname(fileURLToPath(import.meta.url));
 
 describePg("Fase 2 / 2.1 — card_draft fora dos leitores de projeto/produto (Postgres real)", () => {
   let scratch: Awaited<ReturnType<typeof createScratchDb>>;
@@ -58,7 +55,7 @@ describePg("Fase 2 / 2.1 — card_draft fora dos leitores de projeto/produto (Po
       `INSERT INTO project_spec_files (project_id, filename, file_path, rel_dir, is_primary) VALUES ($1,'request.md','/tmp/x/request.md','tickets/TK-0001',false)`,
       [draftId],
     );
-    app = await buildApp([projectRoutes, productRoutes, specRoutes, dashboardRoutes, pipelineRoutes]);
+    app = await buildApp([projectRoutes, productRoutes, specRoutes, dashboardRoutes, pipelineRoutes, reportsRoutes]);
     asTenantAdmin();
   }, 120_000);
   afterAll(async () => {
@@ -119,6 +116,23 @@ describePg("Fase 2 / 2.1 — card_draft fora dos leitores de projeto/produto (Po
     expect(JSON.stringify(tree.json())).not.toContain(draftId);
   });
 
+  it("S-03: GET /api/products/:id (detalhe do produto, campo projects) não lista o rascunho", async () => {
+    const r = await app.inject({ method: "GET", url: `/api/products/${s.productId}` });
+    expect(r.statusCode).toBe(200);
+    const projects = (r.json() as { projects: Array<{ id: string; status: string }> }).projects;
+    ev("produto-detalhe", { status: projects.map((p) => p.status) });
+    expect(projects.map((p) => p.id)).toEqual([s.parentId]);
+    expect(projects.map((p) => p.status)).not.toContain("card_draft");
+    expect(JSON.stringify(r.json())).not.toContain(draftId);
+  });
+
+  it("S-16: GET /api/reports/type-compliance (lista de projetos do tenant) não traz o rascunho", async () => {
+    const r = await app.inject({ method: "GET", url: `/api/reports/type-compliance?product_id=${s.productId}` });
+    expect(r.statusCode).toBe(200);
+    expect(JSON.stringify(r.json())).toContain(s.parentId);
+    expect(JSON.stringify(r.json())).not.toContain(draftId);
+  });
+
   it("GET /api/dashboard/summary não traz o rascunho", async () => {
     const r = await app.inject({ method: "GET", url: "/api/dashboard/summary" });
     expect(r.statusCode).toBe(200);
@@ -173,50 +187,5 @@ describePg("Fase 2 / 2.1 — card_draft fora dos leitores de projeto/produto (Po
     expect((FACTORY_OR_TERMINAL_STATUSES as readonly string[]).includes("card_draft")).toBe(false);
     expect(notHiddenProjectSql("p")).toBe("p.status NOT IN ('card_draft')");
     expect(notHiddenProjectSql("")).toBe("status NOT IN ('card_draft')");
-  });
-});
-
-describe("Fase 2 / 2.1 — guarda estática do inventário de leitores por exclusão de status", () => {
-  /**
-   * Cada arquivo/ocorrência de `status <> 'archived'` / `!= 'archived'` / `NOT IN (... 'archived' ...)` sobre `projects` TEM de
-   * usar `notHiddenProjectSql` até 4 linhas depois, ou constar aqui com o motivo (nenhum mostra um rascunho de card).
-   */
-  const EXCEPTIONS: Record<string, string> = {
-    "services/evolutionUniqueness.ts": "predicados de índice/guard por pai (card_draft não tem pai)",
-    "services/evolveClaim.ts": "consultas por pai/ticket (card_draft não tem pai)",
-    "services/evolveReconciler.ts": "consultas por pai/ticket/materializing",
-    "services/lineage.ts": "versão máxima por linhagem (card_draft não tem pai nem linhagem)",
-    "services/stallEscalation.ts": "só status blocked/failed/pending_cyborg (lista de permissão)",
-    "services/watchdog.ts": "pipeline_runs órfãs (run só existe para projeto executável)",
-    "routes/pipeline.ts": "status de tarefas (OK/QA_PASS), não de projeto",
-    "services/llmGuard.ts": "status de tarefa",
-    "routes/projects.ts": "status de tarefa e deploys (DONE/CANCELLED, destroyed)",
-    "routes/telegram.ts": "status de tarefa (DONE/CANCELLED)",
-    "services/provision/backendState.ts": "status de deploy",
-  };
-  function walk(dir: string, out: string[] = []): string[] {
-    for (const f of readdirSync(dir)) {
-      const p = join(dir, f);
-      if (statSync(p).isDirectory()) { if (f === "migrations" || f === "node_modules") continue; walk(p, out); }
-      else if (p.endsWith(".ts") && !p.endsWith(".test.ts") && !p.endsWith(".d.ts")) out.push(p);
-    }
-    return out;
-  }
-
-  it("nenhum leitor novo exclui só 'archived' sem filtrar card_draft", () => {
-    const root = join(here, "..");
-    const re = /status\s*(<>|!=)\s*'archived'|status\s+NOT\s+IN\s*\([^)]*'archived'[^)]*\)/;
-    const offenders: string[] = [];
-    for (const file of walk(root)) {
-      const rel = relative(root, file);
-      if (EXCEPTIONS[rel]) continue;
-      const lines = readFileSync(file, "utf-8").split("\n");
-      lines.forEach((ln, i) => {
-        if (/^\s*(\*|\/\/|\/\*)/.test(ln) || !re.test(ln)) return; // comentários não são consulta
-        const win = lines.slice(Math.max(0, i - 4), i + 5).join("\n");
-        if (!/notHiddenProjectSql|HIDDEN_FROM_PRODUCT_STATUSES/.test(win)) offenders.push(`${rel}:${i + 1}: ${ln.trim().slice(0, 100)}`);
-      });
-    }
-    expect(offenders).toEqual([]);
   });
 });
