@@ -269,13 +269,29 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(403).send({ code: "FORBIDDEN", message: "tenant_admin não pode alterar configuração global" });
       }
 
-      const upsert = (db: { query: (sql: string, params?: unknown[]) => Promise<unknown> }) => db.query(
-        `INSERT INTO genesis_runtime_config (key, value, tenant_id, updated_by, updated_at)
-         VALUES ($1, $2, $3, $4, NOW())
-         ON CONFLICT (key, tenant_id) DO UPDATE
-           SET value = $2, updated_by = $4, updated_at = NOW()`,
-        [key, String(numVal), targetTenantId, user.id],
-      );
+      const upsert = async (db: { query: (sql: string, params?: unknown[]) => Promise<{ rowCount?: number | null }> }) => {
+        if (targetTenantId === null) {
+          // Linha GLOBAL: `UNIQUE (key, tenant_id)` não conflita com NULL, então ON CONFLICT duplicaria a linha a cada PUT (131_llm_guard…).
+          // Atualiza TODAS as linhas globais da chave (converge duplicatas antigas) e só insere se não houver nenhuma.
+          const up = await db.query(
+            `UPDATE genesis_runtime_config SET value = $2, updated_by = $3, updated_at = NOW() WHERE key = $1 AND tenant_id IS NULL`,
+            [key, String(numVal), user.id],
+          );
+          if ((up.rowCount ?? 0) > 0) return;
+          await db.query(
+            `INSERT INTO genesis_runtime_config (key, value, tenant_id, updated_by, updated_at) VALUES ($1, $2, NULL, $3, NOW())`,
+            [key, String(numVal), user.id],
+          );
+          return;
+        }
+        await db.query(
+          `INSERT INTO genesis_runtime_config (key, value, tenant_id, updated_by, updated_at)
+           VALUES ($1, $2, $3, $4, NOW())
+           ON CONFLICT (key, tenant_id) DO UPDATE
+             SET value = $2, updated_by = $4, updated_at = NOW()`,
+          [key, String(numVal), targetTenantId, user.id],
+        );
+      };
       let cardsBackfill: CardsBackfillOutcome[] | undefined;
       if (key === "CARDS_BANCADA") {
         // Trava S-01: backfill + conferência de divergência na mesma transação da gravação (reverte se houver divergência).
