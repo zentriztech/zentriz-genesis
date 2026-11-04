@@ -1,0 +1,18 @@
+{
+  "request": "POST /api/cards/:id/ready",
+  "status": 409,
+  "body": {
+    "code": "EVOLUTION_RFC_INVALID",
+    "message": "RFC(s) incompletos para a fábrica: docs/rfc/RFC-0001-exportar-csv.md: escopo irrestrito em files_allowed (apps/**) — declare módulos/pastas específicos; \"tudo\" anula o gate de escopo; seção `## Impacto` sem `files_allowed` (globs dos arquivos que a fábrica pode tocar)",
+    "details": [
+      {
+        "path": "docs/rfc/RFC-0001-exportar-csv.md",
+        "problems": [
+          "escopo irrestrito em files_allowed (apps/**) — declare módulos/pastas específicos; \"tudo\" anula o gate de escopo",
+          "seção `## Impacto` sem `files_allowed` (globs dos arquivos que a fábrica pode tocar)"
+        ]
+      }
+    ],
+    "userMessage": "O RFC do card está incompleto. Corrija os pontos indicados e valide de novo."
+  }
+}

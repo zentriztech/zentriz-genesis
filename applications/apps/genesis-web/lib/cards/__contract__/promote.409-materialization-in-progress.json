@@ -1,0 +1,13 @@
+{
+  "request": "POST /api/cards/:id/promote",
+  "status": 409,
+  "headers": {
+    "retry-after": "2"
+  },
+  "body": {
+    "code": "MATERIALIZATION_IN_PROGRESS",
+    "message": "A evolução v2 está sendo materializada por outra requisição. Aguarde e repita; a repetição é segura.",
+    "childProjectId": "00000000-0000-4000-8000-000000000001",
+    "userMessage": "A promoção deste card já está em andamento. Aguarde alguns instantes."
+  }
+}

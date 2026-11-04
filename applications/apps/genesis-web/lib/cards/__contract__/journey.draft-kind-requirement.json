@@ -1,0 +1,84 @@
+{
+  "request": "GET /api/cards/:id/journey",
+  "status": 200,
+  "body": {
+    "cardId": "00000000-0000-4000-8000-000000000001",
+    "code": "TK-0001",
+    "state": "draft",
+    "kind": "feature",
+    "phase": "editing",
+    "steps": [
+      {
+        "key": "draft",
+        "label": "Rascunho",
+        "state": "current"
+      },
+      {
+        "key": "refining",
+        "label": "Refinando",
+        "state": "todo"
+      },
+      {
+        "key": "ready",
+        "label": "Pronto",
+        "state": "todo"
+      },
+      {
+        "key": "promoted",
+        "label": "Promovido",
+        "state": "todo"
+      },
+      {
+        "key": "in_factory",
+        "label": "Na fábrica",
+        "state": "todo"
+      },
+      {
+        "key": "delivered",
+        "label": "Entregue",
+        "state": "todo"
+      }
+    ],
+    "current": "draft",
+    "next": "refining",
+    "blockers": [
+      {
+        "code": "CARD_KIND_REQUIREMENT",
+        "message": "Card do tipo Recurso novo exige a seção `Non-goals` (Não-objetivos) em pelo menos um RFC: declare o que este recurso NÃO faz.",
+        "userMessage": "Falta algo exigido pelo tipo do card (correção: cenário de reprodução; recurso novo: não-objetivos).",
+        "details": {
+          "kind": "feature",
+          "missing": [
+            "non_goals"
+          ],
+          "rfcs": [
+            "docs/rfc/RFC-0001-exportar-csv.md"
+          ]
+        }
+      }
+    ],
+    "action": {
+      "key": "edit_rfc",
+      "label": "Corrigir o RFC do card",
+      "method": "GET",
+      "path": "/api/projects/00000000-0000-4000-8000-000000000002/spec-tree",
+      "enabled": true
+    },
+    "headline": "O RFC precisa de ajustes",
+    "detail": "Card do tipo Recurso novo exige a seção `Non-goals` (Não-objetivos) em pelo menos um RFC: declare o que este recurso NÃO faz.",
+    "severity": "warning",
+    "blocked": null,
+    "spec": {
+      "locked": false,
+      "canReopen": false
+    },
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000003",
+      "headVersion": 1,
+      "currentHeadProjectId": "00000000-0000-4000-8000-000000000003",
+      "currentHeadVersion": 1,
+      "stale": false
+    },
+    "execution": null
+  }
+}

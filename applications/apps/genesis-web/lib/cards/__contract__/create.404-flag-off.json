@@ -1,0 +1,8 @@
+{
+  "request": "POST /api/products/:productId/cards",
+  "status": 404,
+  "body": {
+    "code": "NOT_FOUND",
+    "message": "Recurso indisponível"
+  }
+}

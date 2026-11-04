@@ -1,0 +1,9 @@
+{
+  "request": "POST /api/products/:productId/cards",
+  "status": 400,
+  "body": {
+    "code": "BAD_REQUEST",
+    "message": "Descreva o que o card pede (campo 'body').",
+    "userMessage": "Não entendemos o pedido. Confira os campos e tente de novo."
+  }
+}

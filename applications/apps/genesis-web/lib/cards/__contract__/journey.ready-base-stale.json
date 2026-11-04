@@ -1,0 +1,78 @@
+{
+  "request": "GET /api/cards/:id/journey",
+  "status": 200,
+  "body": {
+    "cardId": "00000000-0000-4000-8000-000000000001",
+    "code": "TK-0001",
+    "state": "ready",
+    "kind": "feature",
+    "phase": "ready",
+    "steps": [
+      {
+        "key": "draft",
+        "label": "Rascunho",
+        "state": "done"
+      },
+      {
+        "key": "refining",
+        "label": "Refinando",
+        "state": "done"
+      },
+      {
+        "key": "ready",
+        "label": "Pronto",
+        "state": "current"
+      },
+      {
+        "key": "promoted",
+        "label": "Promovido",
+        "state": "todo"
+      },
+      {
+        "key": "in_factory",
+        "label": "Na fábrica",
+        "state": "todo"
+      },
+      {
+        "key": "delivered",
+        "label": "Entregue",
+        "state": "todo"
+      }
+    ],
+    "current": "ready",
+    "next": "promoted",
+    "blockers": [
+      {
+        "code": "CARD_BASE_STALE",
+        "message": "A versão corrente avançou para v2.",
+        "userMessage": "A versão-base mudou desde a validação. Revalide o card e valide de novo antes de promover.",
+        "details": {
+          "currentHead": "00000000-0000-4000-8000-000000000002"
+        }
+      }
+    ],
+    "action": {
+      "key": "revalidate",
+      "label": "Revalidar contra a versão corrente",
+      "method": "POST",
+      "path": "/api/cards/00000000-0000-4000-8000-000000000001/revalidate",
+      "enabled": true
+    },
+    "headline": "A versão-base mudou",
+    "detail": "A versão corrente avançou para v2.",
+    "severity": "warning",
+    "blocked": null,
+    "spec": {
+      "locked": true,
+      "canReopen": true
+    },
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000003",
+      "headVersion": 1,
+      "currentHeadProjectId": "00000000-0000-4000-8000-000000000002",
+      "currentHeadVersion": 2,
+      "stale": true
+    },
+    "execution": null
+  }
+}

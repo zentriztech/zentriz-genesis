@@ -1,0 +1,16 @@
+{
+  "request": "POST /api/products/:productId/cards (multipart)",
+  "status": 400,
+  "body": {
+    "code": "ATTACHMENT_INVALID",
+    "message": "Tipo \".exe\" não permitido. Aceitos: .pdf, .txt, .md, .doc, .docx.",
+    "errors": [
+      {
+        "code": "ATTACHMENT_TYPE_NOT_ALLOWED",
+        "filename": "virus.exe",
+        "message": "Tipo \".exe\" não permitido. Aceitos: .pdf, .txt, .md, .doc, .docx."
+      }
+    ],
+    "userMessage": "Algum anexo não é aceito. Use PDF, TXT, MD, DOC ou DOCX dentro dos limites."
+  }
+}

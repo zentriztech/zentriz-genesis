@@ -16,6 +16,7 @@
     "dev": "tsx watch src/index.ts",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
+    "contract:gen": "CONTRACT_GEN=1 vitest run src/routes/cards.contract.pg.integration.test.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "seed:examples": "tsx src/db/seed-example-projects.ts"

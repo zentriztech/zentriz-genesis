@@ -1,0 +1,69 @@
+{
+  "request": "GET /api/cards/:id/journey",
+  "status": 200,
+  "body": {
+    "cardId": "00000000-0000-4000-8000-000000000001",
+    "code": "TK-0001",
+    "state": "draft",
+    "kind": "feature",
+    "phase": "editing",
+    "steps": [
+      {
+        "key": "draft",
+        "label": "Rascunho",
+        "state": "current"
+      },
+      {
+        "key": "refining",
+        "label": "Refinando",
+        "state": "todo"
+      },
+      {
+        "key": "ready",
+        "label": "Pronto",
+        "state": "todo"
+      },
+      {
+        "key": "promoted",
+        "label": "Promovido",
+        "state": "todo"
+      },
+      {
+        "key": "in_factory",
+        "label": "Na fábrica",
+        "state": "todo"
+      },
+      {
+        "key": "delivered",
+        "label": "Entregue",
+        "state": "todo"
+      }
+    ],
+    "current": "draft",
+    "next": "refining",
+    "blockers": [],
+    "action": {
+      "key": "ready",
+      "label": "Validar o card",
+      "method": "POST",
+      "path": "/api/cards/00000000-0000-4000-8000-000000000001/ready",
+      "enabled": true
+    },
+    "headline": "Pronto para validar",
+    "detail": "O RFC passou no gate; valide para travar a spec e liberar a promoção.",
+    "severity": "success",
+    "blocked": null,
+    "spec": {
+      "locked": false,
+      "canReopen": false
+    },
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000002",
+      "headVersion": 1,
+      "currentHeadProjectId": "00000000-0000-4000-8000-000000000002",
+      "currentHeadVersion": 1,
+      "stale": false
+    },
+    "execution": null
+  }
+}

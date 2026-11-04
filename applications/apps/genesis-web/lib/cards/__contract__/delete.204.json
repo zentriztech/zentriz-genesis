@@ -1,0 +1,5 @@
+{
+  "request": "DELETE /api/cards/:id",
+  "status": 204,
+  "body": null
+}

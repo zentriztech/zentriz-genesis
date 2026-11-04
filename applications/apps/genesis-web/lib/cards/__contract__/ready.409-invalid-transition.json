@@ -1,0 +1,12 @@
+{
+  "request": "POST /api/cards/:id/ready",
+  "status": 409,
+  "body": {
+    "code": "CARD_INVALID_TRANSITION",
+    "from": "rejected",
+    "to": "ready",
+    "allowed": [],
+    "message": "TK-0001: só se valida um card em draft, refining ou ready.",
+    "userMessage": "O card não pode ir para esse estado agora."
+  }
+}

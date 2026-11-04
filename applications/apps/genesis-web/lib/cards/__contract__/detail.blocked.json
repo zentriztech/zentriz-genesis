@@ -1,0 +1,88 @@
+{
+  "request": "GET /api/cards/:id",
+  "status": 200,
+  "body": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "code": "TK-0001",
+    "number": 1,
+    "productId": "00000000-0000-4000-8000-000000000002",
+    "projectId": "00000000-0000-4000-8000-000000000003",
+    "kind": "feature",
+    "title": "Exportar entregas em CSV",
+    "state": "blocked",
+    "status": "promoted",
+    "origin": "manual",
+    "externalRef": null,
+    "blockedReason": "budget:BUDGET_PAUSED",
+    "draftProjectId": "00000000-0000-4000-8000-000000000004",
+    "childProjectId": "00000000-0000-4000-8000-000000000005",
+    "executionStatus": "stopped",
+    "executionTitle": "App Demo — Evolução v2",
+    "prUrl": null,
+    "attachmentsCount": 0,
+    "createdAt": "2026-11-04T12:00:00.000Z",
+    "updatedAt": "2026-11-04T12:00:00.000Z",
+    "promotedAt": "2026-11-04T12:00:00.000Z",
+    "deliveredAt": null,
+    "body": "Quero baixar a lista de entregas em CSV.",
+    "attachments": [],
+    "events": [
+      {
+        "from": "in_factory",
+        "to": "blocked",
+        "actor": "guard",
+        "reason": "budget:BUDGET_PAUSED",
+        "childProjectId": "00000000-0000-4000-8000-000000000005",
+        "at": "2026-11-04T12:00:00.000Z"
+      },
+      {
+        "from": "promoted",
+        "to": "in_factory",
+        "actor": "system",
+        "reason": "child_in_factory",
+        "childProjectId": "00000000-0000-4000-8000-000000000005",
+        "at": "2026-11-04T12:00:00.000Z"
+      },
+      {
+        "from": "ready",
+        "to": "promoted",
+        "actor": "user",
+        "reason": null,
+        "childProjectId": "00000000-0000-4000-8000-000000000005",
+        "at": "2026-11-04T12:00:00.000Z"
+      },
+      {
+        "from": "draft",
+        "to": "ready",
+        "actor": "system",
+        "reason": "validated",
+        "childProjectId": null,
+        "at": "2026-11-04T12:00:00.000Z"
+      },
+      {
+        "from": null,
+        "to": "draft",
+        "actor": "user",
+        "reason": null,
+        "childProjectId": null,
+        "at": "2026-11-04T12:00:00.000Z"
+      }
+    ],
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000003",
+      "headVersion": 1,
+      "validatedAt": "2026-11-04T12:00:00.000Z"
+    },
+    "actions": {
+      "edit": false,
+      "refine": false,
+      "ready": false,
+      "promote": false,
+      "revalidate": false,
+      "reopen": false,
+      "reject": true,
+      "resume": true,
+      "delete": false
+    }
+  }
+}

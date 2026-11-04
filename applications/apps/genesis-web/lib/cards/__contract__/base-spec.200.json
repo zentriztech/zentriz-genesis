@@ -1,0 +1,35 @@
+{
+  "request": "GET /api/cards/:id/base-spec",
+  "status": 200,
+  "body": {
+    "readOnly": true,
+    "headProjectId": "00000000-0000-4000-8000-000000000001",
+    "headVersion": 1,
+    "title": "App Demo",
+    "specHash": "0000000000000000000000000000000000000000000000000000000000000001",
+    "baseHeadProjectId": "00000000-0000-4000-8000-000000000001",
+    "stale": false,
+    "files": [
+      {
+        "path": "spec.md",
+        "relDir": "",
+        "filename": "spec.md",
+        "isPrimary": true,
+        "sizeBytes": 51,
+        "contentSha256": "0000000000000000000000000000000000000000000000000000000000000002",
+        "content": "# Spec do pai\n\nO app lista entregas. Prazo de 48h.\n",
+        "truncated": false
+      },
+      {
+        "path": "docs/regras.md",
+        "relDir": "docs",
+        "filename": "regras.md",
+        "isPrimary": false,
+        "sizeBytes": 47,
+        "contentSha256": "0000000000000000000000000000000000000000000000000000000000000003",
+        "content": "# Regras\n\nPrazo de 48h para entregas urgentes.\n",
+        "truncated": false
+      }
+    ]
+  }
+}

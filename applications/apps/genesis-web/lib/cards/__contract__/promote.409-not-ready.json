@@ -1,0 +1,10 @@
+{
+  "request": "POST /api/cards/:id/promote",
+  "status": 409,
+  "body": {
+    "code": "CARD_NOT_READY",
+    "state": "refining",
+    "message": "Só um card em 'ready' pode ser promovido (estado atual: refining). Rode a validação (POST /api/cards/00000000-0000-4000-8000-000000000001/ready).",
+    "userMessage": "O card não está pronto. Valide o card antes de promover."
+  }
+}

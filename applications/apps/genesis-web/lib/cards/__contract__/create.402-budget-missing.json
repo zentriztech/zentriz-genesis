@@ -1,0 +1,10 @@
+{
+  "request": "POST /api/products/:productId/cards",
+  "status": 402,
+  "body": {
+    "code": "BUDGET_MISSING",
+    "projectId": "00000000-0000-4000-8000-000000000001",
+    "message": "A versão corrente (v1) não tem orçamento de LLM e nenhuma versão anterior tem. Defina o orçamento em US$ na versão corrente antes de abrir cards.",
+    "userMessage": "A versão corrente não tem orçamento de IA definido. Defina o orçamento antes de continuar."
+  }
+}

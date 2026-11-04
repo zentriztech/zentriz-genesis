@@ -1,0 +1,11 @@
+{
+  "request": "POST /api/cards/:id/ready",
+  "status": 402,
+  "body": {
+    "code": "BUDGET_FREE_BELOW_MIN",
+    "message": "Saldo livre de US$ 3.00 abaixo do mínimo de US$ 5.00 exigido para abrir uma nova versão (o orçamento é compartilhado com a versão em produção). Aumente o orçamento.",
+    "freeUsd": 3,
+    "minFreeUsd": 5,
+    "userMessage": "O saldo livre está abaixo do mínimo para abrir uma nova versão. Aumente o orçamento."
+  }
+}

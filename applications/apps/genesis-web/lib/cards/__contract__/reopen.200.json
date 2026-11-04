@@ -1,0 +1,33 @@
+{
+  "request": "POST /api/cards/:id/reopen",
+  "status": 200,
+  "body": {
+    "ok": true,
+    "replayed": false,
+    "card": {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "code": "TK-0001",
+      "number": 1,
+      "productId": "00000000-0000-4000-8000-000000000002",
+      "projectId": "00000000-0000-4000-8000-000000000003",
+      "kind": "feature",
+      "title": "Exportar entregas em CSV (v2)",
+      "state": "refining",
+      "status": "open",
+      "origin": "manual",
+      "externalRef": null,
+      "blockedReason": null,
+      "draftProjectId": "00000000-0000-4000-8000-000000000004",
+      "childProjectId": null,
+      "executionStatus": null,
+      "executionTitle": null,
+      "prUrl": null,
+      "attachmentsCount": 0,
+      "createdAt": "2026-11-04T12:00:00.000Z",
+      "updatedAt": "2026-11-04T12:00:00.000Z",
+      "promotedAt": null,
+      "deliveredAt": null
+    },
+    "message": "Card reaberto: a spec voltou a aceitar edição. Valide de novo antes de promover."
+  }
+}

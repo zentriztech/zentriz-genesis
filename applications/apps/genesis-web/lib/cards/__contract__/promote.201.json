@@ -1,0 +1,21 @@
+{
+  "request": "POST /api/cards/:id/promote",
+  "status": 201,
+  "body": {
+    "ok": true,
+    "childProjectId": "00000000-0000-4000-8000-000000000001",
+    "parentProjectId": "00000000-0000-4000-8000-000000000002",
+    "lineageRootId": "00000000-0000-4000-8000-000000000002",
+    "versionNumber": 2,
+    "workMode": "copy",
+    "evolutionSource": "none",
+    "evolutionSourceError": null,
+    "inheritedFiles": 2,
+    "title": "App Demo — Evolução v2",
+    "message": "Projeto de evolução criado. Envie ao pipeline via POST /run quando estiver pronto.",
+    "cardId": "00000000-0000-4000-8000-000000000003",
+    "cardState": "promoted",
+    "cardStatus": "promoted",
+    "draftProjectId": "00000000-0000-4000-8000-000000000004"
+  }
+}

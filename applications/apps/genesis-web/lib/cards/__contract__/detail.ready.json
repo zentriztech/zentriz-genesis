@@ -1,0 +1,72 @@
+{
+  "request": "GET /api/cards/:id",
+  "status": 200,
+  "body": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "code": "TK-0001",
+    "number": 1,
+    "productId": "00000000-0000-4000-8000-000000000002",
+    "projectId": "00000000-0000-4000-8000-000000000003",
+    "kind": "feature",
+    "title": "Exportar entregas em CSV (v2)",
+    "state": "ready",
+    "status": "open",
+    "origin": "manual",
+    "externalRef": null,
+    "blockedReason": null,
+    "draftProjectId": "00000000-0000-4000-8000-000000000004",
+    "childProjectId": null,
+    "executionStatus": null,
+    "executionTitle": null,
+    "prUrl": null,
+    "attachmentsCount": 0,
+    "createdAt": "2026-11-04T12:00:00.000Z",
+    "updatedAt": "2026-11-04T12:00:00.000Z",
+    "promotedAt": null,
+    "deliveredAt": null,
+    "body": "Quero baixar a lista de entregas em CSV.",
+    "attachments": [],
+    "events": [
+      {
+        "from": "refining",
+        "to": "ready",
+        "actor": "system",
+        "reason": "validated",
+        "childProjectId": null,
+        "at": "2026-11-04T12:00:00.000Z"
+      },
+      {
+        "from": "draft",
+        "to": "refining",
+        "actor": "user",
+        "reason": "user_refine",
+        "childProjectId": null,
+        "at": "2026-11-04T12:00:00.000Z"
+      },
+      {
+        "from": null,
+        "to": "draft",
+        "actor": "user",
+        "reason": null,
+        "childProjectId": null,
+        "at": "2026-11-04T12:00:00.000Z"
+      }
+    ],
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000003",
+      "headVersion": 1,
+      "validatedAt": "2026-11-04T12:00:00.000Z"
+    },
+    "actions": {
+      "edit": false,
+      "refine": true,
+      "ready": false,
+      "promote": true,
+      "revalidate": true,
+      "reopen": true,
+      "reject": true,
+      "resume": false,
+      "delete": false
+    }
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "request": "GET /api/cards/:id",
+  "status": 200,
+  "body": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "code": "TK-0001",
+    "number": 1,
+    "productId": "00000000-0000-4000-8000-000000000002",
+    "projectId": "00000000-0000-4000-8000-000000000003",
+    "kind": "feature",
+    "title": "Com anexos",
+    "state": "draft",
+    "status": "open",
+    "origin": "manual",
+    "externalRef": null,
+    "blockedReason": null,
+    "draftProjectId": "00000000-0000-4000-8000-000000000004",
+    "childProjectId": null,
+    "executionStatus": null,
+    "executionTitle": null,
+    "prUrl": null,
+    "attachmentsCount": 2,
+    "createdAt": "2026-11-04T12:00:00.000Z",
+    "updatedAt": "2026-11-04T12:00:00.000Z",
+    "promotedAt": null,
+    "deliveredAt": null,
+    "body": "Veja os anexos.",
+    "attachments": [
+      {
+        "id": "00000000-0000-4000-8000-000000000005",
+        "filename": "regra.txt",
+        "mimeType": "application/octet-stream",
+        "sizeBytes": 24,
+        "kind": "spec_text",
+        "contentSha256": "0000000000000000000000000000000000000000000000000000000000000001",
+        "origin": "upload",
+        "derivedFromAttachmentId": null,
+        "downloadUrl": "/api/cards/00000000-0000-4000-8000-000000000001/attachments/00000000-0000-4000-8000-000000000005"
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000006",
+        "filename": "contrato.pdf",
+        "mimeType": "application/octet-stream",
+        "sizeBytes": 39,
+        "kind": "card_only",
+        "contentSha256": "0000000000000000000000000000000000000000000000000000000000000002",
+        "origin": "upload",
+        "derivedFromAttachmentId": null,
+        "downloadUrl": "/api/cards/00000000-0000-4000-8000-000000000001/attachments/00000000-0000-4000-8000-000000000006"
+      }
+    ],
+    "events": [
+      {
+        "from": null,
+        "to": "draft",
+        "actor": "user",
+        "reason": null,
+        "childProjectId": null,
+        "at": "2026-11-04T12:00:00.000Z"
+      }
+    ],
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000003",
+      "headVersion": 1,
+      "validatedAt": null
+    },
+    "actions": {
+      "edit": true,
+      "refine": true,
+      "ready": true,
+      "promote": false,
+      "revalidate": true,
+      "reopen": false,
+      "reject": true,
+      "resume": false,
+      "delete": true
+    }
+  }
+}

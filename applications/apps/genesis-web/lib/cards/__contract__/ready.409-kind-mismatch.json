@@ -1,0 +1,17 @@
+{
+  "request": "POST /api/cards/:id/ready",
+  "status": 409,
+  "body": {
+    "code": "CARD_KIND_MISMATCH",
+    "message": "Card do tipo Correção declara compatibilidade MINOR no RFC: uma correção não pode passar de PATCH. Troque o tipo do card para Evolução/Recurso novo ou ajuste `## Compatibilidade` para PATCH.",
+    "details": {
+      "kind": "fix",
+      "compat": "minor",
+      "breaking": false,
+      "rfcs": [
+        "docs/rfc/RFC-0001-exportar-csv.md"
+      ]
+    },
+    "userMessage": "Uma correção não pode mudar a compatibilidade da versão além de patch. Ajuste o RFC ou o tipo do card."
+  }
+}

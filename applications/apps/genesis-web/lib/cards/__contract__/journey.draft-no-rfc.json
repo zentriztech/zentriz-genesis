@@ -1,0 +1,79 @@
+{
+  "request": "GET /api/cards/:id/journey",
+  "status": 200,
+  "body": {
+    "cardId": "00000000-0000-4000-8000-000000000001",
+    "code": "TK-0001",
+    "state": "draft",
+    "kind": "feature",
+    "phase": "editing",
+    "steps": [
+      {
+        "key": "draft",
+        "label": "Rascunho",
+        "state": "current"
+      },
+      {
+        "key": "refining",
+        "label": "Refinando",
+        "state": "todo"
+      },
+      {
+        "key": "ready",
+        "label": "Pronto",
+        "state": "todo"
+      },
+      {
+        "key": "promoted",
+        "label": "Promovido",
+        "state": "todo"
+      },
+      {
+        "key": "in_factory",
+        "label": "Na fábrica",
+        "state": "todo"
+      },
+      {
+        "key": "delivered",
+        "label": "Entregue",
+        "state": "todo"
+      }
+    ],
+    "current": "draft",
+    "next": "refining",
+    "blockers": [
+      {
+        "code": "EVOLUTION_RFC_REQUIRED",
+        "message": "Evolução sem RFC. Escreva pelo menos um `docs/rfc/RFC-0001-<slug>.md` na Bancada (critérios de aceite em Gherkin + `## Impacto` com `files_allowed`). Modelo: GET /api/spec-templates/rfc.",
+        "userMessage": "Falta o RFC do card, com critérios de aceite em Gherkin e os arquivos que podem mudar.",
+        "details": {
+          "template_endpoint": "/api/spec-templates/rfc",
+          "rfc_dir": "docs/rfc"
+        }
+      }
+    ],
+    "action": {
+      "key": "generate_rfc",
+      "label": "Gerar o RFC com a IA",
+      "method": "POST",
+      "path": "/api/projects/00000000-0000-4000-8000-000000000002/evolution-plan",
+      "enabled": true
+    },
+    "headline": "Falta o RFC do card",
+    "detail": "Evolução sem RFC. Escreva pelo menos um `docs/rfc/RFC-0001-<slug>.md` na Bancada (critérios de aceite em Gherkin + `## Impacto` com `files_allowed`). Modelo: GET /api/spec-templates/rfc.",
+    "severity": "warning",
+    "blocked": null,
+    "spec": {
+      "locked": false,
+      "canReopen": false
+    },
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000003",
+      "headVersion": 1,
+      "currentHeadProjectId": "00000000-0000-4000-8000-000000000003",
+      "currentHeadVersion": 1,
+      "stale": false
+    },
+    "execution": null
+  }
+}

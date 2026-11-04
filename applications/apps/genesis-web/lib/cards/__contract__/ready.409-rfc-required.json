@@ -1,0 +1,13 @@
+{
+  "request": "POST /api/cards/:id/ready",
+  "status": 409,
+  "body": {
+    "code": "EVOLUTION_RFC_REQUIRED",
+    "message": "Evolução sem RFC. Escreva pelo menos um `docs/rfc/RFC-0001-<slug>.md` na Bancada (critérios de aceite em Gherkin + `## Impacto` com `files_allowed`). Modelo: GET /api/spec-templates/rfc.",
+    "details": {
+      "template_endpoint": "/api/spec-templates/rfc",
+      "rfc_dir": "docs/rfc"
+    },
+    "userMessage": "Falta o RFC do card, com critérios de aceite em Gherkin e os arquivos que podem mudar."
+  }
+}

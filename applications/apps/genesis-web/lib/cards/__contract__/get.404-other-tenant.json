@@ -1,0 +1,9 @@
+{
+  "request": "GET /api/cards/:id",
+  "status": 404,
+  "body": {
+    "code": "NOT_FOUND",
+    "message": "Card não encontrado",
+    "userMessage": "Não encontramos este item (ou ele não está disponível para você)."
+  }
+}

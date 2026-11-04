@@ -1,0 +1,9 @@
+{
+  "request": "POST /api/products/:productId/cards (multipart)",
+  "status": 409,
+  "body": {
+    "code": "ATTACHMENTS_UNAVAILABLE",
+    "message": "Anexos de card exigem ATTACHMENTS_STRICT ligada para o tenant.",
+    "userMessage": "Anexos de card ainda não estão habilitados para este cliente."
+  }
+}

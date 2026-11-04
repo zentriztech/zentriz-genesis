@@ -1,0 +1,9 @@
+{
+  "request": "POST /api/cards/:id/ready",
+  "status": 402,
+  "body": {
+    "code": "BUDGET_PAUSED",
+    "message": "Projeto pausado por orçamento: orçamento esgotado. Aumente o orçamento.",
+    "userMessage": "O orçamento de IA está pausado. Aumente o orçamento para continuar."
+  }
+}

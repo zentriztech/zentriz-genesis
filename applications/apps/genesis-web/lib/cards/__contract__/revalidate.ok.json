@@ -1,0 +1,62 @@
+{
+  "request": "POST /api/cards/:id/revalidate",
+  "status": 200,
+  "body": {
+    "ok": true,
+    "result": "ok",
+    "reasons": [
+      {
+        "code": "REPO_UNAVAILABLE",
+        "severity": "info",
+        "message": "Sem repositório/clone do HEAD em disco: os globs de files_allowed NÃO foram conferidos contra a árvore de código."
+      }
+    ],
+    "rebased": false,
+    "reopened": false,
+    "card": {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "code": "TK-0001",
+      "number": 1,
+      "productId": "00000000-0000-4000-8000-000000000002",
+      "projectId": "00000000-0000-4000-8000-000000000003",
+      "kind": "feature",
+      "title": "Exportar entregas em CSV (v2)",
+      "state": "ready",
+      "status": "open",
+      "origin": "manual",
+      "externalRef": null,
+      "blockedReason": null,
+      "draftProjectId": "00000000-0000-4000-8000-000000000004",
+      "childProjectId": null,
+      "executionStatus": null,
+      "executionTitle": null,
+      "prUrl": null,
+      "attachmentsCount": 0,
+      "createdAt": "2026-11-04T12:00:00.000Z",
+      "updatedAt": "2026-11-04T12:00:00.000Z",
+      "promotedAt": null,
+      "deliveredAt": null
+    },
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000003",
+      "headVersion": 1,
+      "previousHeadProjectId": "00000000-0000-4000-8000-000000000003"
+    },
+    "checks": {
+      "globs": [],
+      "repo": {
+        "available": false,
+        "filesNow": 0,
+        "filesBefore": null,
+        "capped": false
+      },
+      "specDiff": {
+        "added": [],
+        "removed": [],
+        "changed": []
+      }
+    },
+    "next": null,
+    "message": "O card está alinhado com a versão corrente."
+  }
+}

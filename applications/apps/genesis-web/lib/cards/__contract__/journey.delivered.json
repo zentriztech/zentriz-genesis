@@ -1,0 +1,68 @@
+{
+  "request": "GET /api/cards/:id/journey",
+  "status": 200,
+  "body": {
+    "cardId": "00000000-0000-4000-8000-000000000001",
+    "code": "TK-0001",
+    "state": "delivered",
+    "kind": "feature",
+    "phase": "delivered",
+    "steps": [
+      {
+        "key": "draft",
+        "label": "Rascunho",
+        "state": "done"
+      },
+      {
+        "key": "refining",
+        "label": "Refinando",
+        "state": "done"
+      },
+      {
+        "key": "ready",
+        "label": "Pronto",
+        "state": "done"
+      },
+      {
+        "key": "promoted",
+        "label": "Promovido",
+        "state": "done"
+      },
+      {
+        "key": "in_factory",
+        "label": "Na fábrica",
+        "state": "done"
+      },
+      {
+        "key": "delivered",
+        "label": "Entregue",
+        "state": "done"
+      }
+    ],
+    "current": null,
+    "next": null,
+    "blockers": [],
+    "action": null,
+    "headline": "Entregue",
+    "detail": null,
+    "severity": "success",
+    "blocked": null,
+    "spec": {
+      "locked": true,
+      "canReopen": false
+    },
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000002",
+      "headVersion": 1,
+      "currentHeadProjectId": null,
+      "currentHeadVersion": null,
+      "stale": false
+    },
+    "execution": {
+      "childProjectId": "00000000-0000-4000-8000-000000000003",
+      "status": "accepted",
+      "title": "App Demo — Evolução v2",
+      "prUrl": "https://github.com/zentriz-demo/entregas/pull/42"
+    }
+  }
+}

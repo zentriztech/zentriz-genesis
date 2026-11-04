@@ -1,0 +1,69 @@
+{
+  "request": "GET /api/cards/:id/journey",
+  "status": 200,
+  "body": {
+    "cardId": "00000000-0000-4000-8000-000000000001",
+    "code": "TK-0001",
+    "state": "ready",
+    "kind": "feature",
+    "phase": "ready",
+    "steps": [
+      {
+        "key": "draft",
+        "label": "Rascunho",
+        "state": "done"
+      },
+      {
+        "key": "refining",
+        "label": "Refinando",
+        "state": "done"
+      },
+      {
+        "key": "ready",
+        "label": "Pronto",
+        "state": "current"
+      },
+      {
+        "key": "promoted",
+        "label": "Promovido",
+        "state": "todo"
+      },
+      {
+        "key": "in_factory",
+        "label": "Na fábrica",
+        "state": "todo"
+      },
+      {
+        "key": "delivered",
+        "label": "Entregue",
+        "state": "todo"
+      }
+    ],
+    "current": "ready",
+    "next": "promoted",
+    "blockers": [],
+    "action": {
+      "key": "promote",
+      "label": "Promover à fábrica",
+      "method": "POST",
+      "path": "/api/cards/00000000-0000-4000-8000-000000000001/promote",
+      "enabled": true
+    },
+    "headline": "Pronto para promover",
+    "detail": "A promoção cria a versão nova contra a versão corrente.",
+    "severity": "success",
+    "blocked": null,
+    "spec": {
+      "locked": true,
+      "canReopen": true
+    },
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000002",
+      "headVersion": 1,
+      "currentHeadProjectId": "00000000-0000-4000-8000-000000000002",
+      "currentHeadVersion": 1,
+      "stale": false
+    },
+    "execution": null
+  }
+}

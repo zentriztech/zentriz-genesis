@@ -1,0 +1,11 @@
+{
+  "request": "POST /api/cards/:id/reopen",
+  "status": 409,
+  "body": {
+    "code": "CARD_INVALID_TRANSITION",
+    "from": "promoted",
+    "to": "refining",
+    "message": "TK-0001 está em 'promoted': só se reabre um card pronto (ready).",
+    "userMessage": "O card não pode ir para esse estado agora."
+  }
+}

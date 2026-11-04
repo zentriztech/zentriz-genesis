@@ -1,0 +1,13 @@
+{
+  "request": "POST /api/cards/:id/promote",
+  "status": 409,
+  "body": {
+    "code": "CARD_BASE_STALE",
+    "expectedHead": "00000000-0000-4000-8000-000000000001",
+    "currentHead": "00000000-0000-4000-8000-000000000002",
+    "state": "refining",
+    "message": "A versão-base do card foi superada por uma versão mais nova da linhagem. Revalide o card e valide de novo antes de promover.",
+    "revalidate": "POST /api/cards/00000000-0000-4000-8000-000000000003/revalidate",
+    "userMessage": "A versão-base mudou desde a validação. Revalide o card e valide de novo antes de promover."
+  }
+}

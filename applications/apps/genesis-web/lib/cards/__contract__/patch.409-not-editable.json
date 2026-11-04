@@ -1,0 +1,10 @@
+{
+  "request": "PATCH /api/cards/:id",
+  "status": 409,
+  "body": {
+    "code": "CARD_NOT_EDITABLE",
+    "state": "rejected",
+    "message": "TK-0001 está em 'rejected': só se edita o texto em draft ou refining.",
+    "userMessage": "O texto do card só pode ser editado enquanto ele é rascunho ou está em refino."
+  }
+}

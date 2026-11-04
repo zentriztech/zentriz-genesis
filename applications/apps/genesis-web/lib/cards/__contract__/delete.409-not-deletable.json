@@ -1,0 +1,10 @@
+{
+  "request": "DELETE /api/cards/:id",
+  "status": 409,
+  "body": {
+    "code": "CARD_NOT_DELETABLE",
+    "state": "ready",
+    "message": "TK-0001 está em 'ready': só se exclui um card em draft (recuse-o em vez de apagar o histórico).",
+    "userMessage": "Só dá para excluir um card em rascunho. Nos demais casos, recuse o card."
+  }
+}

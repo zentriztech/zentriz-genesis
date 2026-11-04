@@ -1,0 +1,90 @@
+{
+  "request": "POST /api/cards/:id/revalidate",
+  "status": 200,
+  "body": {
+    "ok": true,
+    "result": "stale",
+    "reasons": [
+      {
+        "code": "BASE_MOVED",
+        "severity": "info",
+        "message": "A versão corrente avançou (agora v2); o card foi escrito sobre uma base anterior.",
+        "details": {
+          "previousBase": "00000000-0000-4000-8000-000000000001",
+          "headProjectId": "00000000-0000-4000-8000-000000000002",
+          "headVersion": 2
+        }
+      },
+      {
+        "code": "NEEDS_HUMAN_REVIEW",
+        "severity": "warning",
+        "message": "A spec da versão corrente mudou: confira se o RFC do card continua coerente com ela (contradição semântica não é verificada automaticamente).",
+        "details": {
+          "added": [],
+          "removed": [
+            "docs/regras.md"
+          ],
+          "changed": [
+            "spec.md"
+          ]
+        }
+      },
+      {
+        "code": "REPO_UNAVAILABLE",
+        "severity": "info",
+        "message": "Sem repositório/clone do HEAD em disco: os globs de files_allowed NÃO foram conferidos contra a árvore de código."
+      }
+    ],
+    "rebased": true,
+    "reopened": false,
+    "card": {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "code": "TK-0001",
+      "number": 1,
+      "productId": "00000000-0000-4000-8000-000000000004",
+      "projectId": "00000000-0000-4000-8000-000000000001",
+      "kind": "feature",
+      "title": "Exportar entregas em CSV",
+      "state": "refining",
+      "status": "open",
+      "origin": "manual",
+      "externalRef": null,
+      "blockedReason": null,
+      "draftProjectId": "00000000-0000-4000-8000-000000000005",
+      "childProjectId": null,
+      "executionStatus": null,
+      "executionTitle": null,
+      "prUrl": null,
+      "attachmentsCount": 0,
+      "createdAt": "2026-11-04T12:00:00.000Z",
+      "updatedAt": "2026-11-04T12:00:00.000Z",
+      "promotedAt": null,
+      "deliveredAt": null
+    },
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000002",
+      "headVersion": 2,
+      "previousHeadProjectId": "00000000-0000-4000-8000-000000000001"
+    },
+    "checks": {
+      "globs": [],
+      "repo": {
+        "available": false,
+        "filesNow": 0,
+        "filesBefore": null,
+        "capped": false
+      },
+      "specDiff": {
+        "added": [],
+        "removed": [
+          "docs/regras.md"
+        ],
+        "changed": [
+          "spec.md"
+        ]
+      }
+    },
+    "next": "POST /api/cards/00000000-0000-4000-8000-000000000003/ready",
+    "message": "A versão corrente mudou: o card foi rebaseado e precisa ser validado de novo."
+  }
+}

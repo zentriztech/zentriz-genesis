@@ -1,0 +1,18 @@
+{
+  "request": "POST /api/cards/:id/ready",
+  "status": 409,
+  "body": {
+    "code": "CARD_KIND_REQUIREMENT",
+    "message": "Card do tipo Correção exige um cenário de reprodução do defeito (vira o FAIL_TO_PASS do QA): acrescente nos critérios de aceite um `Cenário: reprodução do defeito` com Dado/Quando/Então que hoje FALHA.",
+    "details": {
+      "kind": "fix",
+      "missing": [
+        "repro_scenario"
+      ],
+      "rfcs": [
+        "docs/rfc/RFC-0001-exportar-csv.md"
+      ]
+    },
+    "userMessage": "Falta algo exigido pelo tipo do card (correção: cenário de reprodução; recurso novo: não-objetivos)."
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "request": "GET /api/cards/:id/journey",
+  "status": 200,
+  "body": {
+    "cardId": "00000000-0000-4000-8000-000000000001",
+    "code": "TK-0001",
+    "state": "draft",
+    "kind": "feature",
+    "phase": "editing",
+    "steps": [
+      {
+        "key": "draft",
+        "label": "Rascunho",
+        "state": "current"
+      },
+      {
+        "key": "refining",
+        "label": "Refinando",
+        "state": "todo"
+      },
+      {
+        "key": "ready",
+        "label": "Pronto",
+        "state": "todo"
+      },
+      {
+        "key": "promoted",
+        "label": "Promovido",
+        "state": "todo"
+      },
+      {
+        "key": "in_factory",
+        "label": "Na fábrica",
+        "state": "todo"
+      },
+      {
+        "key": "delivered",
+        "label": "Entregue",
+        "state": "todo"
+      }
+    ],
+    "current": "draft",
+    "next": "refining",
+    "blockers": [
+      {
+        "code": "EVOLUTION_RFC_INVALID",
+        "message": "RFC(s) incompletos para a fábrica: docs/rfc/RFC-0001-exportar-csv.md: escopo irrestrito em files_allowed (apps/**) — declare módulos/pastas específicos; \"tudo\" anula o gate de escopo; seção `## Impacto` sem `files_allowed` (globs dos arquivos que a fábrica pode tocar)",
+        "userMessage": "O RFC do card está incompleto. Corrija os pontos indicados e valide de novo.",
+        "details": [
+          {
+            "path": "docs/rfc/RFC-0001-exportar-csv.md",
+            "problems": [
+              "escopo irrestrito em files_allowed (apps/**) — declare módulos/pastas específicos; \"tudo\" anula o gate de escopo",
+              "seção `## Impacto` sem `files_allowed` (globs dos arquivos que a fábrica pode tocar)"
+            ]
+          }
+        ]
+      }
+    ],
+    "action": {
+      "key": "edit_rfc",
+      "label": "Corrigir o RFC do card",
+      "method": "GET",
+      "path": "/api/projects/00000000-0000-4000-8000-000000000002/spec-tree",
+      "enabled": true
+    },
+    "headline": "O RFC precisa de ajustes",
+    "detail": "RFC(s) incompletos para a fábrica: docs/rfc/RFC-0001-exportar-csv.md: escopo irrestrito em files_allowed (apps/**) — declare módulos/pastas específicos; \"tudo\" anula o gate de escopo; seção `## Impacto` sem `files_allowed` (globs dos arquivos que a fábrica pode tocar)",
+    "severity": "warning",
+    "blocked": null,
+    "spec": {
+      "locked": false,
+      "canReopen": false
+    },
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000003",
+      "headVersion": 1,
+      "currentHeadProjectId": "00000000-0000-4000-8000-000000000003",
+      "currentHeadVersion": 1,
+      "stale": false
+    },
+    "execution": null
+  }
+}

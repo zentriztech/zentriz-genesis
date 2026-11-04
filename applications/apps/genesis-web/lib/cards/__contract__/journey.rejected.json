@@ -1,0 +1,63 @@
+{
+  "request": "GET /api/cards/:id/journey",
+  "status": 200,
+  "body": {
+    "cardId": "00000000-0000-4000-8000-000000000001",
+    "code": "TK-0001",
+    "state": "rejected",
+    "kind": "feature",
+    "phase": "rejected",
+    "steps": [
+      {
+        "key": "draft",
+        "label": "Rascunho",
+        "state": "done"
+      },
+      {
+        "key": "refining",
+        "label": "Refinando",
+        "state": "todo"
+      },
+      {
+        "key": "ready",
+        "label": "Pronto",
+        "state": "todo"
+      },
+      {
+        "key": "promoted",
+        "label": "Promovido",
+        "state": "todo"
+      },
+      {
+        "key": "in_factory",
+        "label": "Na fábrica",
+        "state": "todo"
+      },
+      {
+        "key": "delivered",
+        "label": "Entregue",
+        "state": "todo"
+      }
+    ],
+    "current": null,
+    "next": null,
+    "blockers": [],
+    "action": null,
+    "headline": "Card recusado",
+    "detail": null,
+    "severity": "warning",
+    "blocked": null,
+    "spec": {
+      "locked": true,
+      "canReopen": false
+    },
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000002",
+      "headVersion": 1,
+      "currentHeadProjectId": null,
+      "currentHeadVersion": null,
+      "stale": false
+    },
+    "execution": null
+  }
+}

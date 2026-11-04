@@ -1,0 +1,7 @@
+{
+  "request": "GET /api/products/:productId/cards/capabilities",
+  "status": 200,
+  "body": {
+    "cardsBancada": true
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "request": "POST /api/cards/:id/resume",
+  "status": 402,
+  "body": {
+    "code": "CARD_BUDGET_BLOCKED",
+    "guardCode": "BUDGET_PAUSED",
+    "message": "Sem saldo para retomar: Projeto pausado por orçamento: orçamento esgotado. Aumente o orçamento.",
+    "cardState": "blocked",
+    "userMessage": "O card está bloqueado por orçamento. Aumente o orçamento da versão e retome o card."
+  }
+}

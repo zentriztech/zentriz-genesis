@@ -1,0 +1,9 @@
+{
+  "request": "POST /api/projects/:id/evolve",
+  "status": 409,
+  "body": {
+    "code": "USE_CARD_PROMOTE",
+    "message": "Este pedido é um card: promova por POST /api/cards/00000000-0000-4000-8000-000000000001/promote (o /evolve não conhece base nem prontidão do card).",
+    "cardId": "00000000-0000-4000-8000-000000000001"
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "request": "GET /api/cards/:id/attachments",
+  "status": 200,
+  "body": {
+    "items": [
+      {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "filename": "contrato.pdf",
+        "mimeType": "application/octet-stream",
+        "sizeBytes": 39,
+        "kind": "card_only",
+        "origin": "upload",
+        "derivedFromAttachmentId": null,
+        "contentSha256": "0000000000000000000000000000000000000000000000000000000000000001",
+        "downloadUrl": "/api/cards/00000000-0000-4000-8000-000000000002/attachments/00000000-0000-4000-8000-000000000001",
+        "createdAt": "2026-11-04T12:00:00.000Z",
+        "conversion": {
+          "state": "disabled",
+          "attempts": 0,
+          "errorCode": null,
+          "errorMessage": null,
+          "warnings": [],
+          "derivedAttachmentId": null,
+          "updatedAt": null
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000003",
+        "filename": "regra.txt",
+        "mimeType": "application/octet-stream",
+        "sizeBytes": 24,
+        "kind": "spec_text",
+        "origin": "upload",
+        "derivedFromAttachmentId": null,
+        "contentSha256": "0000000000000000000000000000000000000000000000000000000000000002",
+        "downloadUrl": "/api/cards/00000000-0000-4000-8000-000000000002/attachments/00000000-0000-4000-8000-000000000003",
+        "createdAt": "2026-11-04T12:00:00.000Z",
+        "conversion": {
+          "state": "not_applicable",
+          "attempts": 0,
+          "errorCode": null,
+          "errorMessage": null,
+          "warnings": [],
+          "derivedAttachmentId": null,
+          "updatedAt": null
+        }
+      }
+    ],
+    "strict": true,
+    "conversionEnabled": false,
+    "summary": {
+      "disabled": 1,
+      "not_applicable": 1
+    }
+  }
+}

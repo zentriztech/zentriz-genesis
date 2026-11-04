@@ -1,0 +1,18 @@
+{
+  "request": "POST /api/cards/:id/ready",
+  "status": 409,
+  "body": {
+    "code": "CARD_KIND_REQUIREMENT",
+    "message": "Card do tipo Recurso novo exige a seção `Non-goals` (Não-objetivos) em pelo menos um RFC: declare o que este recurso NÃO faz.",
+    "details": {
+      "kind": "feature",
+      "missing": [
+        "non_goals"
+      ],
+      "rfcs": [
+        "docs/rfc/RFC-0001-exportar-csv.md"
+      ]
+    },
+    "userMessage": "Falta algo exigido pelo tipo do card (correção: cenário de reprodução; recurso novo: não-objetivos)."
+  }
+}

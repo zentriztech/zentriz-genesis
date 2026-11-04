@@ -1,0 +1,18 @@
+{
+  "request": "POST /api/cards/:id/promote",
+  "status": 200,
+  "body": {
+    "cardId": "00000000-0000-4000-8000-000000000001",
+    "cardState": "promoted",
+    "cardStatus": "promoted",
+    "draftProjectId": "00000000-0000-4000-8000-000000000002",
+    "childProjectId": "00000000-0000-4000-8000-000000000003",
+    "ok": true,
+    "replayed": true,
+    "parentProjectId": "00000000-0000-4000-8000-000000000004",
+    "versionNumber": 2,
+    "status": "spec_submitted",
+    "title": "App Demo — Evolução v2",
+    "message": "Este card já foi promovido: a repetição devolve o filho existente."
+  }
+}

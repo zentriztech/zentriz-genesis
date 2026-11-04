@@ -1,0 +1,75 @@
+{
+  "request": "GET /api/cards/:id/journey",
+  "status": 200,
+  "body": {
+    "cardId": "00000000-0000-4000-8000-000000000001",
+    "code": "TK-0001",
+    "state": "ready",
+    "kind": "feature",
+    "phase": "ready",
+    "steps": [
+      {
+        "key": "draft",
+        "label": "Rascunho",
+        "state": "done"
+      },
+      {
+        "key": "refining",
+        "label": "Refinando",
+        "state": "done"
+      },
+      {
+        "key": "ready",
+        "label": "Pronto",
+        "state": "current"
+      },
+      {
+        "key": "promoted",
+        "label": "Promovido",
+        "state": "todo"
+      },
+      {
+        "key": "in_factory",
+        "label": "Na fábrica",
+        "state": "todo"
+      },
+      {
+        "key": "delivered",
+        "label": "Entregue",
+        "state": "todo"
+      }
+    ],
+    "current": "ready",
+    "next": "promoted",
+    "blockers": [
+      {
+        "code": "BUDGET_PAUSED",
+        "message": "Projeto pausado por orçamento: orçamento esgotado. Aumente o orçamento.",
+        "userMessage": "O orçamento de IA está pausado. Aumente o orçamento para continuar."
+      }
+    ],
+    "action": {
+      "key": "increase_budget",
+      "label": "Aumentar o orçamento",
+      "method": "PUT",
+      "path": "/api/projects/00000000-0000-4000-8000-000000000002/budget",
+      "enabled": true
+    },
+    "headline": "Orçamento de IA indisponível",
+    "detail": "Projeto pausado por orçamento: orçamento esgotado. Aumente o orçamento.",
+    "severity": "error",
+    "blocked": null,
+    "spec": {
+      "locked": true,
+      "canReopen": true
+    },
+    "base": {
+      "headProjectId": "00000000-0000-4000-8000-000000000002",
+      "headVersion": 1,
+      "currentHeadProjectId": "00000000-0000-4000-8000-000000000002",
+      "currentHeadVersion": 1,
+      "stale": false
+    },
+    "execution": null
+  }
+}
