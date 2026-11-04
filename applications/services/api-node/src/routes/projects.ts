@@ -844,13 +844,15 @@ export async function projectRoutes(app: FastifyInstance) {
         metadata: { accepted_by: acceptedBy, product_id: (u.product_id as string | null) ?? null },
       });
 
-      // Fechar TSK-FULL-TEST quando projeto é aceito — inclui QA_FAIL (Cyborg corrigiu e validou)
+      // Fechar TSK-FULL-TEST quando projeto é aceito — só se ainda estiver ABERTA (NEW/ASSIGNED/IN_PROGRESS/WAITING_REVIEW).
+      // AV/M-1: `QA_FAIL`, `BLOCKED` e `CANCELLED` (= NOT_RUN) mantêm o estado REAL: `project_tasks.status` nunca vira `DONE`
+      // sem a execução ter sido aprovada ("nunca DONE sem executar/aprovar"). O aceite continua possível; o PR já declara o que não rodou.
       await client.query(
         `UPDATE project_tasks
          SET status = 'DONE', updated_at = now()
          WHERE project_id = $1
            AND task_id = 'TSK-FULL-TEST'
-           AND status NOT IN ('DONE', 'QA_PASS', 'CANCELLED')`,
+           AND status IN ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'WAITING_REVIEW')`,
         [id]
       );
 
