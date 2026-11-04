@@ -171,7 +171,7 @@ describePg("Contrato dos cards — respostas reais gravadas como fixtures do por
     as(s);
     return s;
   };
-  const req = (s: Seed, method: string, url: string, payload?: unknown) => { as(s); return app.inject({ method: method as "GET", url, ...(payload !== undefined ? { payload } : {}) }); };
+  const req = (s: Seed, method: string, url: string, payload?: unknown) => { as(s); return app.inject({ method: method as "GET", url, ...(payload !== undefined ? { payload: payload as object } : {}) }); };
   const get = (s: Seed, url: string) => req(s, "GET", url);
   const post = (s: Seed, url: string, payload?: unknown) => req(s, "POST", url, payload);
   const createRaw = (s: Seed, o: { kind?: string; title?: string; body?: string } = {}) =>
