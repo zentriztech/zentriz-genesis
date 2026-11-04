@@ -15,6 +15,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { useCanonicalProjectIds } from "../lib/uuid.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import {
@@ -60,6 +61,7 @@ async function loadProjectForUser(projectId: string, user: AuthUser): Promise<{ 
 
 export async function specAutonomyRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
+  useCanonicalProjectIds(app); // Y-04: id de projeto não canônico ⇒ 400 INVALID_ID
 
   app.post<{ Body: { projectId?: string; maxRounds?: number } }>(
     "/api/spec-autonomy",

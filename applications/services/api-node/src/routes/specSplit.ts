@@ -15,6 +15,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { useCanonicalProjectIds } from "../lib/uuid.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { SPEC_EDITABLE_STATUSES } from "../services/projectStatus.js";
@@ -70,6 +71,7 @@ async function loadProjectForUser(
 
 export async function specSplitRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
+  useCanonicalProjectIds(app); // Y-04: id de projeto não canônico ⇒ 400 INVALID_ID
 
   app.post<{ Body: { projectId?: string; modelId?: string } }>(
     "/api/spec-split",

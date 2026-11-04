@@ -8,6 +8,8 @@ import { identityInputsFor, resolveLineageRoot } from "../services/lineage.js";
 import { evolveClaimEnabled } from "../services/evolveFlags.js";
 import { runEvolveWithClaim } from "../services/evolveClaim.js";
 import { legacyEvolveBlockedByCard } from "../services/cardPromote.js";
+import { cardsBancadaEnabled } from "../services/cardState.js";
+import { useCanonicalProjectIds } from "../lib/uuid.js";
 import { isVersionConflict } from "../services/evolutionUniqueness.js";
 import { getInstallationTokenForClone, repoShortName } from "../services/github.js";
 import { destroyDeployment } from "../services/ephemeralDeploy.js";
@@ -91,6 +93,8 @@ async function checkProjectAccess(
 
 export async function projectRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
+  // Y-04: id de projeto em forma não canônica (sem hífens, entre chaves) é recusado (400 INVALID_ID) em todas as rotas /api/projects/:id.
+  useCanonicalProjectIds(app);
 
   app.get("/api/projects", async (request, reply) => {
     const user = getUser(request);
@@ -353,11 +357,15 @@ export async function projectRoutes(app: FastifyInstance) {
       const { status, started_at, completed_at, finished_at, charter_summary, backlog_summary, complexity_hint } = request.body ?? {};
       const client = await pool.connect();
       try {
-        const check = await client.query("SELECT tenant_id, created_by FROM projects WHERE id = $1", [id]);
+        const check = await client.query("SELECT tenant_id, created_by, status FROM projects WHERE id = $1", [id]);
         const project = check.rows[0];
         if (!project) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
         if (user.role !== "zentriz_admin" && project.tenant_id !== user.tenantId) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+        // Y-05: o status de um `card_draft` só muda pela máquina do card (nunca por PATCH direto).
+        if (status !== undefined && project.status === "card_draft") {
+          return reply.status(409).send({ code: "CARD_OPERATION_UNSUPPORTED", message: "O status do rascunho de um card só muda pelo próprio card (rejeitar, excluir, promover)." });
         }
 
         const updates: string[] = [];
@@ -3017,6 +3025,18 @@ export async function projectRoutes(app: FastifyInstance) {
         if (!canAccessProjectRow(user, row)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
+        // Y-05: o rascunho de um CARD (`card_draft`) vive e morre pela máquina do card. Excluir/arquivar o projeto por aqui deixava o
+        // card `ready` com `draft_project_id = NULL` (FK SET NULL) ou tirava o status `card_draft` e desligava todas as guardas.
+        if (row.status === "card_draft") {
+          const cardRow = (await client.query("SELECT id FROM tickets WHERE draft_project_id = $1 AND card_state IS NOT NULL", [row.id])).rows[0] as { id: string } | undefined;
+          return reply.status(409).send({
+            code: "USE_CARD_DELETE",
+            message: cardRow
+              ? `Este projeto é o rascunho de um card: exclua o card (DELETE /api/cards/${cardRow.id}, só em draft) ou recuse-o (POST /api/cards/${cardRow.id}/reject).`
+              : "Este projeto é o rascunho de um card órfão: peça apoio ao suporte.",
+            ...(cardRow ? { cardId: cardRow.id, hint: `DELETE /api/cards/${cardRow.id}` } : {}),
+          });
+        }
         if (guarded && body.confirmId !== id) {
           return reply.status(400).send({
             code: "CONFIRM_MISMATCH",
@@ -3457,6 +3477,15 @@ export async function projectRoutes(app: FastifyInstance) {
           cardId: blocked.cardId,
         });
       }
+    }
+
+    // Y-10: tenant com `CARDS_BANCADA` ligada pede evolução por CARD. O /evolve sem ticket cria filho fora do modelo de cards
+    // (sem rascunho, sem RFC maturado, sem carimbo); quem tem ticket segue o caminho do ticket (que já recusa card, acima).
+    if (!ticketId && (await cardsBancadaEnabled(pool, user.tenantId ?? null).catch(() => false))) {
+      return reply.status(409).send({
+        code: "USE_CARDS",
+        message: "Este tenant usa cards: abra um card (POST /api/products/:productId/cards) em vez de evoluir direto com /evolve sem pedido.",
+      });
     }
 
     // Fase 1' (tarefas 1.1–1.3): com EVOLVE_CLAIM=on o /evolve roda em duas etapas (claim transacional com

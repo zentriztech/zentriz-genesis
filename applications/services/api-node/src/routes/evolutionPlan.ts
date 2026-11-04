@@ -10,6 +10,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { useCanonicalProjectIds } from "../lib/uuid.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { canAccessProjectRow, isProjectOwner } from "../lib/projectAccess.js";
 import { SPEC_EDITABLE_STATUSES } from "../services/projectStatus.js";
@@ -28,6 +29,7 @@ async function loadProject(id: string): Promise<ProjRow | undefined> {
 
 export async function evolutionPlanRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
+  useCanonicalProjectIds(app); // Y-04: id de projeto não canônico ⇒ 400 INVALID_ID
 
   app.post<{ Params: { id: string }; Body: { request?: string } }>(
     "/api/projects/:id/evolution-plan",

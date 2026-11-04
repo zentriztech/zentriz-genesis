@@ -30,6 +30,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "../services/tenantLlmConfig.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { useCanonicalProjectIds } from "../lib/uuid.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import {
@@ -2397,6 +2398,7 @@ function wireStatus(status: SpecChatJobStatus): "pending" | "running" | "done" |
 
 export async function specChatRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
+  useCanonicalProjectIds(app); // Y-04: id de projeto não canônico ⇒ 400 INVALID_ID
 
   // POST /api/spec-chat — enfileira job de refinamento e devolve jobId
   app.post<{ Body: { specMarkdown?: string; messages?: ChatMessage[]; projectId?: string; filePath?: string; baseSha?: string; resolveGaps?: boolean } }>(

@@ -3,6 +3,7 @@ import { spawn } from "child_process";
 import path from "path";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { useCanonicalProjectIds } from "../lib/uuid.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { signToken } from "../auth.js";
 import { claimSlotOrQueue, revertSlotClaim, getTenantLlmConfig } from "../services/tenantLlmConfig.js";
@@ -100,6 +101,7 @@ async function getProjectSpecFilePath(
 
 export async function pipelineRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
+  useCanonicalProjectIds(app); // Y-04: id de projeto não canônico ⇒ 400 INVALID_ID
 
   // Evoluir E3 (adversarial F): o tenant precisa do MODELO de RFC para escrever `docs/rfc/RFC-NNNN-<slug>.md`
   // na Bancada — o caminho do repositório não serve ao cliente. Vendorizado em src/assets (vai na imagem).
@@ -882,6 +884,10 @@ export async function pipelineRoutes(app: FastifyInstance) {
       // nunca começou volta pela Bancada, não pelo freio.
       const cur = (await client.query("SELECT status FROM projects WHERE id = $1", [projectId])).rows[0];
       const curStatus = cur ? String(cur.status) : null;
+      if (curStatus === "card_draft") {
+        // Y-05: o rascunho de um card não tem execução; marcá-lo `stopped` o tiraria da máquina do card e desligaria as guardas.
+        return reply.status(409).send({ code: "CARD_OPERATION_UNSUPPORTED", message: "O rascunho de um card não tem execução para parar." });
+      }
       if (curStatus === "draft" || curStatus === "promoted") {
         return reply.status(409).send({
           code: "NOTHING_TO_STOP",
