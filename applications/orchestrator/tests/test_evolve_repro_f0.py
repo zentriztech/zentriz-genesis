@@ -138,14 +138,9 @@ def test_controle_arvore_so_de_texto_concatena_todos_os_arquivos(tmp_path, monke
 
 
 @pytest.mark.parametrize("binario", sorted(BINARIOS))
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEFEITO 0.3-c: anexo binário faz read_text(utf-8) levantar UnicodeDecodeError dentro do try/except de load_spec_all "
-           "(runner.py:~951-965), que devolve '' em silêncio — o caller cai em load_spec(spec_path) e perde a árvore. "
-           "Remover o xfail quando corrigido (tarefa 1.5).",
-)
 def test_anexo_binario_nao_apaga_a_spec_em_silencio(tmp_path, monkeypatch, binario):
-    """Desejado: ou ERRO explícito, ou a spec de texto intacta. NUNCA '' silencioso."""
+    """Desejado: ou ERRO explícito, ou a spec de texto intacta. NUNCA '' silencioso. (corrigido pela tarefa 1.5, ATTACHMENTS_STRICT=on)"""
+    monkeypatch.setenv("ATTACHMENTS_STRICT", "on")
     _build_tree(tmp_path, monkeypatch, binary=binario)
     try:
         out = runner.load_spec_all("p")
@@ -167,12 +162,8 @@ def test_evidencia_anexo_binario_devolve_vazio_e_o_caller_so_ve_o_primario(tmp_p
     assert "TEXTO-EXTRA" not in runner.load_spec(Path(tmp_path / "spec-evolution-v2.md"))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEFEITO 0.3-c: mesmo caminho com UM único arquivo na lista (só o anexo binário) — UnicodeDecodeError engolido, retorno ''. "
-           "Remover o xfail quando corrigido (tarefa 1.5).",
-)
 def test_unico_arquivo_binario_tambem_nao_e_silencioso(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATTACHMENTS_STRICT", "on")
     api = FakeSpecApi(tmp_path)
     api.add("print.png", make_png_bytes(), mime="image/png")
     api.install(monkeypatch)
@@ -192,12 +183,8 @@ def test_controle_heranca_de_um_nivel_funciona_como_documentado(monkeypatch):
     assert store.ids("v2") == ["TSK-INH-BE-001"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEFEITO 0.3-e: _inherit_parent_tasks pula TSK-INH-* do pai (runner.py:~3911) ⇒ herança de UM nível: a v3 não conhece "
-           "o trabalho da v1. Remover o xfail quando corrigido (tarefa 1.6).",
-)
 def test_heranca_transitiva_v3_conhece_o_trabalho_da_v1(monkeypatch):
+    monkeypatch.setenv("TASK_INHERIT_TRANSITIVE", "on")  # corrigido pela tarefa 1.6
     store = FakeTaskStore(); store.install(monkeypatch)
     store.seed("v1", "TSK-BE-001", requirements="CRUD de entregas")
     runner._inherit_parent_tasks("v2", "v1")                              # v2 herda a TSK-BE-001 da v1
@@ -207,12 +194,8 @@ def test_heranca_transitiva_v3_conhece_o_trabalho_da_v1(monkeypatch):
     assert "Exportar CSV" in store.text("v3")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEFEITO 0.3-e: o ID herdado é 'TSK-INH-<resto>' sem a versão de origem; TSK-EVO-001 reinicia a cada versão ⇒ colisão "
-           "(e, sem o skip de INH, o upsert (project_id, task_id) sobrescreveria). Remover o xfail quando corrigido (tarefa 1.6).",
-)
 def test_v4_guarda_as_duas_TSK_EVO_001_de_origens_diferentes_sem_colisao(monkeypatch):
+    monkeypatch.setenv("TASK_INHERIT_TRANSITIVE", "on")  # corrigido pela tarefa 1.6
     store = FakeTaskStore(); store.install(monkeypatch)
     # v3 (pai da v4) tem a EVO-001 da v2 (herdada) e a EVO-001 da própria v3 (aceita)
     store.seed("v3", "TSK-INH-EVO-001", requirements="[HERDADA da versão anterior — TSK-EVO-001] origem v2: exportar CSV")

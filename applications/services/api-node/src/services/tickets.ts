@@ -16,6 +16,10 @@
  */
 import type { PoolClient, Pool } from "pg";
 import { sha256Hex } from "../lib/specTreeHash.js";
+import {
+  attachmentsStrict, classifyAttachment, attachmentExt, utf8Problem, AttachmentUnreadableError,
+} from "./ticketAttachments.js";
+import { getAttachmentConverter, conversionOrigin } from "./attachmentConversion.js";
 
 export type TicketChangeKind = "evolution" | "fix" | "feature";
 export type TicketStatus = "open" | "promoted" | "delivered" | "rejected";
@@ -65,6 +69,10 @@ export interface TicketAttachmentRow {
   mime_type: string | null;
   size_bytes: string | number;
   content_sha256: string | null;
+  /** Só preenchidos por `loadTicketAttachments(.., {extended:true})` (ATTACHMENTS_STRICT=on, migration 141). */
+  kind?: string;
+  origin?: string;
+  derived_from_attachment_id?: string | null;
 }
 
 type Db = Pool | PoolClient;
@@ -97,9 +105,12 @@ export async function loadTicket(db: Db, id: string): Promise<TicketRow | undefi
   return (await db.query("SELECT * FROM tickets WHERE id = $1", [id])).rows[0] as TicketRow | undefined;
 }
 
-export async function loadTicketAttachments(db: Db, ticketId: string): Promise<TicketAttachmentRow[]> {
+export async function loadTicketAttachments(db: Db, ticketId: string, opts: { extended?: boolean } = {}): Promise<TicketAttachmentRow[]> {
+  const cols = opts.extended
+    ? "id, ticket_id, filename, file_path, mime_type, size_bytes, content_sha256, kind, origin, derived_from_attachment_id"
+    : "id, ticket_id, filename, file_path, mime_type, size_bytes, content_sha256";
   return (await db.query(
-    "SELECT id, ticket_id, filename, file_path, mime_type, size_bytes, content_sha256 FROM ticket_attachments WHERE ticket_id = $1 ORDER BY created_at ASC",
+    `SELECT ${cols} FROM ticket_attachments WHERE ticket_id = $1 ORDER BY created_at ASC`,
     [ticketId],
   )).rows as TicketAttachmentRow[];
 }
@@ -115,6 +126,8 @@ export async function loadTicketAttachments(db: Db, ticketId: string): Promise<T
 export function renderTicketRequestMd(args: {
   ticket: Pick<TicketRow, "number" | "title" | "body" | "change_kind" | "created_at">;
   attachments: Array<{ filename: string }>;
+  /** ATTACHMENTS_STRICT=on: anexos guardados no card, FORA da pasta de texto da spec (pdf/doc/docx). */
+  cardOnlyAttachments?: Array<{ filename: string }>;
   authorEmail?: string | null;
   projectTitle?: string | null;
   versionLabel?: string | null;
@@ -152,7 +165,50 @@ export function renderTicketRequestMd(args: {
     for (const a of args.attachments) lines.push(`- [\`${a.filename}\`](anexos/${encodeURIComponent(a.filename)})`);
     lines.push("");
   }
+  if (args.cardOnlyAttachments && args.cardOnlyAttachments.length > 0) {
+    lines.push("## Anexos guardados no card (fora da spec)", "");
+    lines.push("> Documentos não-texto: ficam no pedido (`/api/tickets/.../attachments`) e não entram na árvore de texto da spec.", "");
+    for (const a of args.cardOnlyAttachments) lines.push(`- \`${a.filename}\``);
+    lines.push("");
+  }
   return lines.filter((l) => l !== "").join("\n").replace(/\n{3,}/g, "\n\n") + "\n";
+}
+
+/**
+ * Ponto de extensão da conversão pdf/doc/docx → .md (tarefa posterior). Para cada anexo `card_only` consulta o
+ * conversor registrado para a extensão; o conversor NULO (único hoje) devolve `null` e nada é criado. Se um conversor
+ * real produzir markdown, grava a linha DERIVADA (`origin = converted:<id>`, `derived_from_attachment_id`,
+ * `kind = spec_text`) — idempotente por (origem, nome) — e ela segue o caminho normal dos txt/md.
+ */
+export async function runAttachmentConversions(db: Db, ticketId: string): Promise<number> {
+  const rows = await loadTicketAttachments(db, ticketId, { extended: true });
+  let created = 0;
+  for (const a of rows) {
+    if (a.derived_from_attachment_id || a.origin?.startsWith("converted:")) continue;
+    if (classifyAttachment(a.filename) !== "card_only") continue;
+    const ext = attachmentExt(a.filename);
+    const conv = getAttachmentConverter(ext);
+    const { readFileSync, writeFileSync, mkdirSync } = await import("fs");
+    if (!a.file_path) continue;
+    let buf: Buffer;
+    try { buf = readFileSync(a.file_path); } catch { continue; }
+    const out = await conv.convert({ attachmentId: a.id, filename: a.filename, ext, buffer: buf });
+    if (!out) continue;
+    const { join } = await import("path");
+    const dir = ticketUploadDir(ticketId);
+    mkdirSync(dir, { recursive: true });
+    const dest = join(dir, out.filename);
+    const bytes = Buffer.from(out.markdown, "utf-8");
+    writeFileSync(dest, bytes);
+    const r = await db.query(
+      `INSERT INTO ticket_attachments (ticket_id, filename, file_path, mime_type, size_bytes, content_sha256, kind, origin, derived_from_attachment_id)
+       SELECT $1, $2, $3, 'text/markdown', $4, $5, 'spec_text', $6, $7
+        WHERE NOT EXISTS (SELECT 1 FROM ticket_attachments WHERE derived_from_attachment_id = $7 AND filename = $2)`,
+      [ticketId, out.filename, dest, bytes.length, sha256Hex(bytes), conversionOrigin(conv.id), a.id],
+    );
+    created += r.rowCount ?? 0;
+  }
+  return created;
 }
 
 /**
@@ -177,10 +233,17 @@ export async function materializeTicketIntoSpecTree(
     const childDir = join(uploadDir, args.childProjectId, relDir);
     mkdirSync(childDir, { recursive: true });
 
-    const attachments = await loadTicketAttachments(db, args.ticket.id);
+    const strict = attachmentsStrict();
+    if (strict) await runAttachmentConversions(db, args.ticket.id);
+    const allAttachments = await loadTicketAttachments(db, args.ticket.id);
+    // ATTACHMENTS_STRICT=on: só txt/md (ou derivados .md) seguem para a árvore da spec. pdf/doc/docx e qualquer
+    // outra coisa (legado: png, xlsx…) ficam guardados no card — nunca em `project_spec_files`.
+    const attachments = strict ? allAttachments.filter((a) => classifyAttachment(a.filename) === "spec_text") : allAttachments;
+    const cardOnly = strict ? allAttachments.filter((a) => classifyAttachment(a.filename) !== "spec_text") : [];
     const md = renderTicketRequestMd({
       ticket: args.ticket,
       attachments,
+      cardOnlyAttachments: strict ? cardOnly : undefined,
       authorEmail: args.authorEmail,
       projectTitle: args.projectTitle,
       versionLabel: args.versionLabel,
@@ -200,8 +263,16 @@ export async function materializeTicketIntoSpecTree(
       const anexosDir = join(uploadDir, args.childProjectId, anexosRel);
       mkdirSync(anexosDir, { recursive: true });
       for (const a of attachments) {
-        if (!a.file_path || !existsSync(a.file_path)) continue;
+        if (!a.file_path || !existsSync(a.file_path)) {
+          if (strict) throw new AttachmentUnreadableError(a.filename, "arquivo não encontrado no disco");
+          continue;
+        }
         const buf = readFileSync(a.file_path);
+        if (strict) {
+          // Erro explícito: arquivo de texto da spec ilegível NÃO é copiado nem engolido.
+          const bad = utf8Problem(buf);
+          if (bad) throw new AttachmentUnreadableError(a.filename, bad);
+        }
         const dest = join(anexosDir, a.filename);
         writeFileSync(dest, buf);
         await db.query(

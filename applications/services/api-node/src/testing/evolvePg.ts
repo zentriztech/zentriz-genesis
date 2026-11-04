@@ -19,6 +19,7 @@
 import { describe } from "vitest";
 import pg from "pg";
 import Fastify, { type FastifyInstance } from "fastify";
+import fastifyMultipart from "@fastify/multipart";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -48,8 +49,8 @@ export function authMock() {
 }
 
 export async function openPg(max = 24): Promise<pg.Pool> {
-  if (!PG_URL || !/@(localhost|127\.0\.0\.1):(55432|55440)\//.test(PG_URL)) {
-    throw new Error("PG_TEST_URL deve apontar para o Postgres efêmero em localhost:55432 ou 55440");
+  if (!PG_URL || !/@(localhost|127\.0\.0\.1):(55432|55440|55441)\//.test(PG_URL)) {
+    throw new Error("PG_TEST_URL deve apontar para o Postgres efêmero em localhost:55432, 55440 ou 55441");
   }
   const pool = new pg.Pool({ connectionString: PG_URL, max });
   pgHolder.pool = pool;
@@ -62,7 +63,7 @@ export async function openPg(max = 24): Promise<pg.Pool> {
  * `drop()`. As migrations ficam por conta do chamador (`initDb()` após `pgHolder.pool` apontar para cá).
  */
 export async function createScratchDb(prefix = "evo_scratch"): Promise<{ pool: pg.Pool; name: string; drop(): Promise<void> }> {
-  if (!PG_URL || !/@(localhost|127\.0\.0\.1):(55432|55440)\//.test(PG_URL)) {
+  if (!PG_URL || !/@(localhost|127\.0\.0\.1):(55432|55440|55441)\//.test(PG_URL)) {
     throw new Error("PG_TEST_URL deve apontar para o Postgres efêmero em localhost:55432 ou 55440");
   }
   const name = `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
@@ -192,6 +193,8 @@ export async function seedTicket(pool: pg.Pool, s: Seed, o: {
 /** Fastify com as rotas REAIS (`projectRoutes`, `ticketRoutes`, `pipelineRoutes`, `productRoutes`…). */
 export async function buildApp(register: Array<(app: FastifyInstance) => Promise<void>>): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+  // multipart como em app.ts (mesmos tetos) — o POST de pedido com anexo (tickets.ts) precisa dele.
+  await app.register(fastifyMultipart, { limits: { files: 10, fileSize: 10 * 1024 * 1024 } });
   for (const r of register) await app.register(r);
   await app.ready();
   return app;
