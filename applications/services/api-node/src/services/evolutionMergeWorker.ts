@@ -15,7 +15,7 @@
  * projeto nunca derruba o tick nem os demais.
  */
 import { pool } from "../db/client.js";
-import { tryAutoMergeEvolution } from "./evolutionMerge.js";
+import { tryAutoMergeEvolution, observeEvolutionMerge } from "./evolutionMerge.js";
 
 type Db = { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> };
 
@@ -32,8 +32,10 @@ function watchEnabled(): boolean {
  */
 export async function reconcileEvolutionMerges(db: Db = pool as unknown as Db): Promise<{ scanned: number; merged: number }> {
   const res = await db.query(
-    `SELECT id FROM projects
-      WHERE (status = 'accepted' OR (status = 'archived' AND coalesce(extra->>'superseded_by','') <> ''))
+    `SELECT id, status, extra->>'evolution_origin' AS origin FROM projects
+      WHERE ( status = 'accepted'
+              -- N3: superada só entra se for filho de CARD (marcador gravado só pelo claim de card) e é apenas OBSERVADA; legada superada nunca é varrida.
+              OR (status = 'archived' AND coalesce(extra->>'superseded_by','') <> '' AND extra->>'evolution_origin' = 'card') )
         AND extra->>'evolution' = 'true'
         AND extra->>'evolution_pr_number' IS NOT NULL
         AND extra->>'evolution_merged_at' IS NULL
@@ -41,11 +43,16 @@ export async function reconcileEvolutionMerges(db: Db = pool as unknown as Db): 
       ORDER BY updated_at
       LIMIT ${BATCH}`,
   );
-  const ids = (res.rows as Array<{ id: string }>).map((r) => r.id);
+  const rows = res.rows as Array<{ id: string; status: string; origin: string | null }>;
+  const ids = rows.map((r) => r.id);
   let merged = 0;
-  for (const id of ids) {
+  for (const { id, status, origin } of rows) {
     try {
-      const r = await tryAutoMergeEvolution(db as never, id, { actorUserId: "external" });
+      // Superada: só observa (sem auto-merge, sem hooks). Aceita: auto-merge conforme a política; sem `EVOLUTION_AUTO_MERGE` (`skipped_flag`),
+      // ainda detecta o merge feito por fora (N7, só filho de card) — o observador não depende mais da flag de auto-merge para ver o merge externo.
+      let r = status !== "archived" ? await tryAutoMergeEvolution(db as never, id, { actorUserId: "external" }) : { state: "skipped_flag" as const };
+      // Evolução LEGADA aceita mantém o comportamento anterior (sem observação sem flag); a observação vale para filho de card.
+      if (r.state === "skipped_flag" && (status === "archived" || origin === "card")) r = await observeEvolutionMerge(db as never, id);
       if (r.state === "merged") merged++;
     } catch (e) {
       console.error(`[evolution-merge-watch] falha ao reconciliar ${id}:`, e instanceof Error ? e.message : String(e));

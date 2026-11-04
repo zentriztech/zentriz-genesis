@@ -255,11 +255,16 @@ export async function runEvolutionAcceptFlow(db: Db, childId: string, opts: { re
   // publica de forma alguma — sem GitHub App): pai arquivado sem código publicado = "sumiu meu
   // projeto" com a versão corrente invisível no repo. Falha real → supersessão ADIADA (flag).
   let pushOk = false;
+  // Como o código chegou ao GitHub: `pr` (branch evolution/vN + PR), `direct_dev` (repo novo, push direto em `dev`, sem PR por desenho —
+  // N6a) ou `skipped` (sem App / push desligado: nada publicado, o repositório da linhagem — se houver — não recebeu o código; N6b).
+  let publishMode: "pr" | "direct_dev" | "skipped" = "skipped";
   try {
     const { pushEvolutionToGitHub } = await import("./githubPush.js");
     const body = await buildPullRequestBody(db, childId, version, { ...extra, evolution_compat: compat });
     const push = await pushEvolutionToGitHub(childId, { versionLabel: version, prBody: body, title });
-    pushOk = push.ok || push.mode === "skipped" || push.mode === "fallback_new_repo";
+    // N1: `fallback_new_repo` NÃO é sucesso por si — só conta se o repositório foi realmente criado e registrado (`push.ok`).
+    pushOk = push.ok || push.mode === "skipped";
+    publishMode = push.mode === "evolution" ? "pr" : push.mode === "fallback_new_repo" ? "direct_dev" : "skipped";
     // Bloco 3 F4: o portal mostra branch/PR — persistir o resultado do push no extra (só o que existe).
     if (push.ok && push.mode === "evolution") {
       await db.query(
@@ -285,17 +290,14 @@ export async function runEvolutionAcceptFlow(db: Db, childId: string, opts: { re
     ).catch(() => {});
     return true;
   }
-  // Push ok → a pendência (se havia) se resolve; a ação inversa "Republicar" some da UI.
-  if (extra.evolution_push_pending === true) {
-    await db.query(
-      "UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1",
-      [childId, JSON.stringify({ evolution_push_pending: false, evolution_republished_at: new Date().toISOString() })],
-    ).catch(() => {});
-  }
+  // Push ok → a pendência se resolve INCONDICIONALMENTE (N5): o `extra` lido no início pode estar velho — o reconciliador marca
+  // `push_pending` quando o push passa da carência e ele ainda está em voo. O fim de um push bem-sucedido é a verdade mais nova.
   // B1: publicação concluída (PR registrado acima, quando houve) — o marcador `pending` do aceite cai AQUI, não antes.
+  const wasPending = extra.evolution_push_pending === true;
   await db.query(
-    "UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || '{\"evolution_publish_state\":\"done\"}'::jsonb, updated_at = now() WHERE id = $1",
-    [childId],
+    "UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1",
+    [childId, JSON.stringify({ evolution_push_pending: false, evolution_publish_state: "done", evolution_publish_mode: publishMode,
+      ...(wasPending ? { evolution_republished_at: new Date().toISOString() } : {}) })],
   ).catch(() => {});
 
   try {

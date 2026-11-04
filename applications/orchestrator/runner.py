@@ -7654,7 +7654,7 @@ def main() -> int:
                         "depends_on_files": [],
                         "target_route": "infra",
                     }]
-                    _d7, _d7s = _api_post(_d7_seed_path, {"tasks": _d7_task})
+                    _d7, _d7s = _api_post(_d7_seed_path, {"tasks": _link_tasks_to_card(_d7_task, *_card_link_args(pipeline_ctx))})
                     if 200 <= _d7s < 300:
                         logger.info("[GAP-P5/Passo7] TSK-DEVOPS-001 criada no portal.")
                 except Exception as _d7e:

@@ -27,7 +27,7 @@ import { recomputeProductLifecycle } from "./productLifecycle.js";
 import { UNIQUENESS_INDEXES, getUniquenessCounters } from "./evolutionUniqueness.js";
 import { isSesConfigured, sendEmail } from "./emailSender.js";
 import { readRuntimeNumber } from "./runtimeTunables.js";
-import { resolveReconcilerMode } from "./featureFlags.js";
+import { resolveReconcilerMode, flagEnabled } from "./featureFlags.js";
 import { findCardStatusDivergences, transitionCard } from "./cardState.js";
 
 export type ReconcilerMode = "off" | "shadow" | "on";
@@ -61,7 +61,7 @@ export const RECONCILER_LOCK_KEY = 0;
 export type FindingKind =
   | "claim_expired_no_effects" | "claim_expired_with_effects" | "ticket_promoted_without_child"
   | "child_ticket_mismatch" | "evolution_in_flight_stuck" | "uniqueness_index_missing" | "reconciler_disk_unverifiable"
-  | "card_status_divergence" | "evolution_publish_incomplete";
+  | "card_status_divergence" | "evolution_publish_incomplete" | "card_published_without_pr";
 
 export interface Finding {
   kind: FindingKind;
@@ -92,7 +92,7 @@ const empty = (mode: ReconcilerMode, skipped?: ReconcilerResult["skipped"]): Rec
 const ALL_KINDS: FindingKind[] = [
   "claim_expired_no_effects", "claim_expired_with_effects", "ticket_promoted_without_child",
   "child_ticket_mismatch", "evolution_in_flight_stuck", "uniqueness_index_missing", "reconciler_disk_unverifiable",
-  "card_status_divergence", "evolution_publish_incomplete",
+  "card_status_divergence", "evolution_publish_incomplete", "card_published_without_pr",
 ];
 
 type Json = Record<string, unknown>;
@@ -289,13 +289,18 @@ async function detectCardDivergences(db: Pool | PoolClient): Promise<Finding[]> 
  * Filho de `fallback_new_repo` (repositório próprio ≠ linhagem, sem PR por desenho) NÃO é achado. Ação (`on`): `evolution_push_pending=true`
  * ⇒ a ação "Republicar" aparece e a entrega do card segue bloqueada; republicar reusa o PR aberto (`openPullRequest` lista antes de criar).
  */
+/** N2: filho de CARD (nasceu do claim de card e há ticket com `card_state` ligado a ele). Evolução legada fica de fora, sempre. */
+const CARD_CHILD_SQL = `(p.extra->>'evolution_origin' = 'card'
+        AND EXISTS (SELECT 1 FROM tickets t WHERE t.child_project_id = p.id AND t.card_state IS NOT NULL))`;
 export interface IncompletePublish { id: string; reason: "publish_pending_stale" | "pr_not_registered"; ageS: number }
 export async function findIncompletePublications(db: Pool | PoolClient, p: Pick<ReconcilerParams, "publishGraceS">): Promise<IncompletePublish[]> {
   const r = await db.query(
-    `SELECT p.id::text AS id, p.parent_project_id, p.extra, g.repo_full_name AS own_repo,
+    `SELECT p.id::text AS id, p.tenant_id::text AS tenant_id, p.parent_project_id, p.extra, g.repo_full_name AS own_repo,
             extract(epoch FROM (now() - COALESCE((p.extra->>'evolution_publish_at')::timestamptz, g.pushed_at, p.updated_at)))::int AS age_s
        FROM projects p LEFT JOIN project_github_repos g ON g.project_id = p.id
       WHERE p.status = 'accepted' AND p.extra->>'evolution' = 'true'
+        AND ${CARD_CHILD_SQL}
+        AND COALESCE(p.extra->>'evolution_publish_mode', '') <> 'direct_dev'
         AND COALESCE(p.extra->>'evolution_push_pending', '') <> 'true'
         AND COALESCE(p.extra->>'evolution_merged_at', '') = ''
         AND ( ( p.extra->>'evolution_publish_state' = 'pending'
@@ -308,7 +313,12 @@ export async function findIncompletePublications(db: Pool | PoolClient, p: Pick<
   );
   const { findLineageRepo } = await import("./evolutionAccept.js");
   const out: IncompletePublish[] = [];
+  const tenantOn = new Map<string, boolean>();
   for (const x of r.rows) {
+    // N2: só tenant com a flag de cards LIGADA — fluxo legado (flag desligada) nunca vira achado, e-mail nem `push_pending`.
+    const tid = String(x.tenant_id ?? "");
+    if (!tenantOn.has(tid)) tenantOn.set(tid, await flagEnabled(db as never, "CARDS_BANCADA", tid || null).catch(() => false));
+    if (!tenantOn.get(tid)) continue;
     const ex = (x.extra ?? {}) as Json;
     const parent = (typeof ex.evolution_parent_id === "string" ? ex.evolution_parent_id : null) ?? (x.parent_project_id as string | null) ?? null;
     const lineage = await findLineageRepo(db as never, String(x.id), parent);
@@ -337,6 +347,40 @@ async function detectIncompletePublish(db: Pool, p: ReconcilerParams, mode: "sha
     ).catch(() => undefined);
     f.action = "cleaned_marked_push_pending";
     repaired.push(f);
+  }
+  return out;
+}
+
+/**
+ * N6b: filho de CARD aceito, publicado (`done`) SEM PR e SEM linha própria em `project_github_repos`, com repositório na LINHAGEM — ou seja, o push
+ * foi `skipped` (tenant sem GitHub App / `GENESIS_GITHUB_PUSH=off`) e o código da evolução nunca chegou ao repositório. A entrega do card fica em
+ * `no_pr` (lado seguro), mas ninguém seria avisado. Só ALERTA (não marca `push_pending`: republicar com o push ainda desligado só repetiria o
+ * `skipped` e o achado oscilaria); some sozinho quando o PR é registrado, o merge é gravado ou o card sai de cena.
+ */
+async function detectCardPublishedWithoutPr(db: Pool, p: ReconcilerParams): Promise<Finding[]> {
+  const r = await db.query(
+    `SELECT p.id::text AS id, p.tenant_id::text AS tenant_id, p.parent_project_id, p.extra,
+            extract(epoch FROM (now() - COALESCE((p.extra->>'evolution_accepted_at')::timestamptz, p.updated_at)))::int AS age_s
+       FROM projects p
+      WHERE (p.status = 'accepted' OR (p.status = 'archived' AND COALESCE(p.extra->>'superseded_by','') <> ''))
+        AND p.extra->>'evolution' = 'true' AND ${CARD_CHILD_SQL}
+        AND p.extra->>'evolution_publish_state' = 'done'
+        AND COALESCE(p.extra->>'evolution_push_pending', '') <> 'true'
+        AND COALESCE(p.extra->>'evolution_pr_number', '') = '' AND COALESCE(p.extra->>'evolution_merged_at', '') = ''
+        AND NOT EXISTS (SELECT 1 FROM project_github_repos g WHERE g.project_id = p.id)
+        AND EXISTS (SELECT 1 FROM tickets t WHERE t.child_project_id = p.id AND t.card_state IN ('promoted','in_factory','blocked'))
+        AND COALESCE((p.extra->>'evolution_accepted_at')::timestamptz, p.updated_at) < now() - ($1::int * interval '1 second')
+      ORDER BY p.updated_at LIMIT 200`,
+    [Math.floor(p.publishGraceS)],
+  );
+  const { findLineageRepo } = await import("./evolutionAccept.js");
+  const out: Finding[] = [];
+  for (const x of r.rows) {
+    const ex = (x.extra ?? {}) as Json;
+    const parent = (typeof ex.evolution_parent_id === "string" ? ex.evolution_parent_id : null) ?? (x.parent_project_id as string | null) ?? null;
+    if (!(await findLineageRepo(db as never, String(x.id), parent))) continue; // linhagem sem repositório = `no_repo`, o card é entregue sem PR
+    out.push({ kind: "card_published_without_pr", entityHash: hashId(String(x.id)), projectHash: hashId(String(x.id)), ticketHash: null, severity: "critical",
+      detail: { age_s: Number(x.age_s), publish_mode: String(ex.evolution_publish_mode ?? "unknown"), rule: "card_stays_pending_until_pr_registered_alert_only" } });
   }
   return out;
 }
@@ -481,6 +525,8 @@ export async function runReconcilerPass(pool: Pool, env: NodeJS.ProcessEnv = pro
       findings.push(...await detectIncompletePublish(pool, p, mode === "on" ? "on" : "shadow", cleanedNow));
       res.cleaned += cleanedNow.length - before;
     });
+    // N6b: card pendente em `no_pr` sem nenhum sinal (push `skipped` com repositório na linhagem) — só alerta.
+    await run(["card_published_without_pr"], async () => { if (mode === "on" || mode === "shadow") findings.push(...await detectCardPublishedWithoutPr(pool, p)); });
     // Fase 3 (3.5): card × filho. O Guard de custo pausa o filho (`stopped_by='budget'`) sem saber que há um card ligado a ele; aqui o card
     // vai a `blocked` (reason `budget:<código>`) e, com a pausa liberada, volta a `in_factory` — nunca `failed`. Só em `on` (age sobre dados).
     if (mode === "on") {

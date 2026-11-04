@@ -389,6 +389,7 @@ export async function tryAutoMergeEvolution(
  */
 async function recordMergedAndHooks(
   db: Db, childId: string, sha: string, method: string, actor: string, version: string, title: string,
+  opts: { recordOnly?: boolean } = {},
 ): Promise<TryAutoMergeResult> {
   const now = new Date().toISOString();
   await persistExtra(db, childId, {
@@ -400,8 +401,9 @@ async function recordMergedAndHooks(
     evolution_merge_detail: null,
     evolution_merge_accepted_permissions: null,
   });
-  // sha_dev da RAIZ (o merge é no repo da linhagem) e do próprio filho.
-  if (sha) {
+  // N3: `recordOnly` (observador sobre versão SUPERADA) só registra o fato e entrega o card — não regrava `sha_dev` da raiz com um SHA
+  // mais velho nem dispara redeploy/realinhamento com a identidade de uma versão anterior.
+  if (sha && !opts.recordOnly) {
     try {
       const root = await resolveLineageRoot(db as never, childId);
       const ids = [...new Set([childId, root?.id].filter((x): x is string => Boolean(x)))];
@@ -411,7 +413,7 @@ async function recordMergedAndHooks(
   await logDialogue(db, childId, `✅ Evolução v${version || "?"} mergeada em 'dev' (${method}, ${actor})${sha ? ` — ${sha.slice(0, 8)}` : ""}. "${title}".`);
 
   // Hooks pós-merge (item 2 redeploy, item 3 Auto Care) — best-effort, cada um atrás da sua flag.
-  try {
+  if (!opts.recordOnly) try {
     const { runPostMergeHooks } = await import("./postMerge/runPostMergeHooks.js");
     await runPostMergeHooks(db, childId, { mergeSha: sha });
   } catch (e) {
@@ -423,4 +425,32 @@ async function recordMergedAndHooks(
     await deliverCardsOfChild(db as never, childId);
   } catch { /* o merge já foi gravado; o reconciliador entrega depois */ }
   return { state: "merged", sha: sha || undefined };
+}
+
+/**
+ * N7/N3: OBSERVA o PR da evolução sem tentar mergear (independe de `EVOLUTION_AUTO_MERGE`). Só detecta merge feito por fora (no GitHub) e o
+ * registra. Nunca chama `mergePullRequest`/`updatePullRequestBranch`. Versão SUPERADA (`archived` + `superseded_by`) registra o fato e entrega
+ * o card, mas NÃO regrava `sha_dev` nem roda os hooks pós-merge (`recordOnly`): o PR antigo mergeado tarde não pode reimplantar uma versão anterior.
+ * Devolve `merged` quando registrou; `skipped_no_pr` quando não há o que observar; senão `skipped_flag` (PR ainda não mergeado / consulta falhou).
+ */
+export async function observeEvolutionMerge(db: Db, childId: string): Promise<TryAutoMergeResult> {
+  const row = (await db.query(
+    `SELECT p.title, p.status, p.version_number, p.extra, gi.installation_id, gi.revoked_at, r.repo_full_name
+       FROM projects p
+       LEFT JOIN tenant_github_installations gi ON gi.tenant_id = p.tenant_id
+       LEFT JOIN project_github_repos r ON r.project_id = p.id
+      WHERE p.id = $1`, [childId])).rows[0] as
+    { title: string | null; status: string; version_number: number | null; extra: Record<string, unknown> | null; installation_id: number | string | null; revoked_at: string | null; repo_full_name: string | null } | undefined;
+  const extra = row?.extra ?? {};
+  if (!row || extra.evolution !== true) return { state: "skipped_no_pr", detail: "projeto não é uma evolução" };
+  if (typeof extra.evolution_merged_at === "string" && extra.evolution_merged_at) return { state: "merged" };
+  const prNumber = typeof extra.evolution_pr_number === "number" ? extra.evolution_pr_number : null;
+  if (!prNumber || extra.evolution_push_pending === true || !row.repo_full_name) return { state: "skipped_no_pr", detail: "sem número de PR / publicação pendente" };
+  if (!row.installation_id || row.revoked_at) return { state: "skipped_flag", detail: "instalação ausente/revogada" };
+  const [owner, repo] = row.repo_full_name.split("/");
+  const pr = await getPullRequest(Number(row.installation_id), { owner, repo, number: prNumber });
+  if (!pr.ok || !pr.merged) return { state: "skipped_flag", detail: pr.ok ? "PR ainda não mergeado" : pr.error };
+  const superseded = String(row.status) === "archived";
+  return recordMergedAndHooks(db, childId, pr.mergeCommitSha ?? "", "external", "external", (extra.evolution_version as string | undefined) ?? String(row.version_number ?? ""),
+    row.title ?? childId, { recordOnly: superseded });
 }

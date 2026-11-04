@@ -27,7 +27,7 @@ import { ticketCode } from "./tickets.js";
 type Json = Record<string, unknown>;
 
 /** Resultado mínimo que a verificação de merge precisa do GitHub (compatível com `getPullRequest`). */
-export type PrLookup = { ok: true; merged: boolean } | { ok: false; error?: string };
+export type PrLookup = { ok: true; merged: boolean; state?: string } | { ok: false; error?: string };
 export interface DeliveryDeps {
   /** Consulta o PR no GitHub. Default: `getPullRequest` real (usa o seam `__setOctokitFactoryForTests`). */
   getPullRequest?: (installationId: number, o: { owner: string; repo: string; number: number }) => Promise<PrLookup>;
@@ -35,6 +35,10 @@ export interface DeliveryDeps {
 
 export type MergeProof =
   | { required: false; merged: true; source: "no_repo" }
+  /** N6a: repositório novo criado pelo push do filho (`fallback_new_repo`) — o código foi direto para `dev`, sem PR por desenho. */
+  | { required: false; merged: true; source: "direct_push" }
+  /** N8: PR do filho superado foi FECHADO sem merge, mas a versão sucessora (snapshot completo de `apps/`) está mergeada. */
+  | { required: true; merged: true; source: "successor_merged" }
   | { required: true; merged: true; source: "genesis_merge" | "github" }
   | { required: true; merged: false; source: "unverified"; detail: string };
 
@@ -48,15 +52,16 @@ export type MergeProof =
  */
 export async function verifyChildPrMerged(pool: Pick<Pool, "query">, childId: string, deps: DeliveryDeps = {}): Promise<MergeProof> {
   const row = (await pool.query(
-    `SELECT p.extra, p.tenant_id, p.parent_project_id, r.repo_full_name, gi.installation_id, gi.revoked_at
+    `SELECT p.extra, p.status, p.tenant_id, p.parent_project_id, r.repo_full_name, gi.installation_id, gi.revoked_at
        FROM projects p
        LEFT JOIN project_github_repos r ON r.project_id = p.id
        LEFT JOIN tenant_github_installations gi ON gi.tenant_id = p.tenant_id
       WHERE p.id = $1`, [childId])).rows[0] as
-    { extra: Json | null; parent_project_id: string | null; repo_full_name: string | null; installation_id: number | string | null; revoked_at: string | null } | undefined;
+    { extra: Json | null; status: string; parent_project_id: string | null; repo_full_name: string | null; installation_id: number | string | null; revoked_at: string | null } | undefined;
   if (!row) return { required: true, merged: false, source: "unverified", detail: "child_not_found" };
   const extra = row.extra ?? {};
-  if (extra.evolution_push_pending === true || extra.evolution_publish_state === "pending") return { required: true, merged: false, source: "unverified", detail: "push_pending" };
+  // N1: `failed` (push que falhou) também bloqueia — sem prova de publicação não há entrega.
+  if (extra.evolution_push_pending === true || extra.evolution_publish_state === "pending" || extra.evolution_publish_state === "failed") return { required: true, merged: false, source: "unverified", detail: "push_pending" };
   if (typeof extra.evolution_merged_at === "string" && extra.evolution_merged_at) return { required: true, merged: true, source: "genesis_merge" };
   let repoFull = row.repo_full_name;
   if (!repoFull) {
@@ -66,6 +71,10 @@ export async function verifyChildPrMerged(pool: Pick<Pool, "query">, childId: st
   }
   if (!repoFull) return { required: false, merged: true, source: "no_repo" };
   const prNumber = typeof extra.evolution_pr_number === "number" ? extra.evolution_pr_number : null;
+  // N6a: repositório novo criado pelo próprio filho, publicado e fechado (`done`): o código já está em `dev`; não existe PR a esperar.
+  if (!prNumber && row.repo_full_name && extra.evolution_publish_mode === "direct_dev" && extra.evolution_publish_state === "done") {
+    return { required: false, merged: true, source: "direct_push" };
+  }
   if (!prNumber) return { required: true, merged: false, source: "unverified", detail: "no_pr" };
   if (!row.installation_id || row.revoked_at) return { required: true, merged: false, source: "unverified", detail: "no_installation" };
   const [owner, repo] = repoFull.split("/");
@@ -73,7 +82,34 @@ export async function verifyChildPrMerged(pool: Pick<Pool, "query">, childId: st
   const lookup = deps.getPullRequest ?? (await import("./github.js")).getPullRequest;
   const pr = await lookup(Number(row.installation_id), { owner, repo, number: prNumber }).catch(() => ({ ok: false as const }));
   if (pr.ok && pr.merged) return { required: true, merged: true, source: "github" };
+  // N8: filho superado cujo PR foi fechado sem merge — o sucessor empurra o snapshot completo e, mergeado, contém esta versão.
+  if (pr.ok && pr.state === "closed" && isSupersededChild(row.status, extra)) {
+    if (await successorMerged(pool, extra, lookup, Number(row.installation_id), { owner, repo }, 0)) return { required: true, merged: true, source: "successor_merged" };
+    return { required: true, merged: false, source: "unverified", detail: "pr_closed_successor_not_merged" };
+  }
   return { required: true, merged: false, source: "unverified", detail: pr.ok ? "pr_not_merged" : "pr_lookup_failed" };
+}
+
+/** A versão sucessora (`superseded_by`, até 5 elos) já foi mergeada? Merge do Genesis registrado ou PR do sucessor mergeado no GitHub. */
+async function successorMerged(
+  pool: Pick<Pool, "query">, extra: Json, lookup: NonNullable<DeliveryDeps["getPullRequest"]>, installationId: number,
+  repo: { owner: string; repo: string }, depth: number,
+): Promise<boolean> {
+  const succId = typeof extra.superseded_by === "string" ? extra.superseded_by : "";
+  if (!succId || depth >= 5) return false;
+  const s = (await pool.query("SELECT status, extra FROM projects WHERE id = $1", [succId])).rows[0] as { status: string; extra: Json | null } | undefined;
+  if (!s) return false;
+  const sx = s.extra ?? {};
+  if (s.status !== "accepted" && !isSupersededChild(s.status, sx)) return false;
+  if (sx.evolution_push_pending === true || sx.evolution_publish_state === "pending" || sx.evolution_publish_state === "failed") return false;
+  if (typeof sx.evolution_merged_at === "string" && sx.evolution_merged_at) return true;
+  const n = typeof sx.evolution_pr_number === "number" ? sx.evolution_pr_number : null;
+  if (n) {
+    const pr = await lookup(installationId, { ...repo, number: n }).catch(() => ({ ok: false as const }));
+    if (pr.ok && pr.merged) return true;
+  }
+  // Sucessor ainda não mergeado (aberto, fechado ou direto): o sucessor do sucessor também carrega o snapshot completo.
+  return successorMerged(pool, sx, lookup, installationId, repo, depth + 1);
 }
 
 export type CardDeliveryOutcome =
@@ -99,7 +135,11 @@ export async function deliverCardsOfChild(pool: Pool, childId: string, deps: Del
     if (cards.length === 0) return [];
     const proof = await verifyChildPrMerged(pool, childId, deps);
     const out: CardDeliveryOutcome[] = [];
-    for (const c of cards) out.push(await deliverOne(pool, String(c.id), childId, proof));
+    for (const c of cards) {
+      const o = await deliverOne(pool, String(c.id), childId, proof);
+      out.push(o);
+      if (o.result === "delivered") await reportExecutedTasks(pool, String(c.id), childId);
+    }
     return out;
   } catch (e) {
     console.error("[cardDelivery] falha ignorada:", e instanceof Error ? e.message : String(e));
@@ -141,6 +181,22 @@ async function deliverOne(pool: Pool, ticketId: string, childId: string, proof: 
   } finally {
     client.release();
   }
+}
+
+/**
+ * M4 (consumidor de `listExecutedTasksOfCard`): ao ENTREGAR o card, registra no diálogo do filho o relatório das tasks executadas (derivadas, sem coluna
+ * `executed_*`). Roda só quando a transição foi aplicada agora (uma vez por card); best-effort — nunca desfaz a entrega. A superfície de API/portal
+ * (campo no detalhe do card) fica de fora de propósito: o contrato dos cards está congelado em fixtures do portal (decisão do Jean pendente).
+ */
+async function reportExecutedTasks(pool: Pool, ticketId: string, childId: string): Promise<void> {
+  try {
+    const tasks = await listExecutedTasksOfCard(pool, ticketId);
+    const list = tasks.length ? tasks.map((t) => t.taskId).join(", ").slice(0, 600) : "nenhuma task própria (somente herdadas)";
+    await pool.query(
+      "INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)",
+      [childId, `✅ Card entregue: ${tasks.length} task(s) executada(s) — ${list}.`],
+    );
+  } catch { /* relatório é informativo */ }
 }
 
 function refusedOf(ticketId: string, t: CardTransitionResult): CardDeliveryOutcome {

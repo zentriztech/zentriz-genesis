@@ -385,7 +385,10 @@ export function githubPushDisabled(): boolean {
   return (process.env.GENESIS_GITHUB_PUSH ?? "on").trim().toLowerCase() === "off";
 }
 
-export async function pushProjectToGitHub(projectId: string): Promise<void> {
+/** Resultado REAL do push (N1): `ok=false` = nada foi publicado (erro engolido para não falhar o aceite HTTP, mas nunca mais escondido). */
+export interface PushProjectResult { ok: boolean; error?: string }
+
+export async function pushProjectToGitHub(projectId: string): Promise<PushProjectResult> {
   const client = await pool.connect();
   try {
     if (githubPushDisabled()) {
@@ -393,7 +396,7 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
         `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)`,
         [projectId, "ℹ️ Publicação no GitHub DESLIGADA neste ambiente (GENESIS_GITHUB_PUSH=off) — nenhum repositório criado."],
       );
-      return;
+      return { ok: false, error: "GENESIS_GITHUB_PUSH=off" };
     }
     // ── 1. Load project + tenant ──────────────────────────────────────────────
     const projRes = await client.query(
@@ -407,7 +410,7 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
       [projectId],
     );
     const row = projRes.rows[0];
-    if (!row) { console.warn(`[GitHubPush] Project ${projectId} not found`); return; }
+    if (!row) { console.warn(`[GitHubPush] Project ${projectId} not found`); return { ok: false, error: "projeto não encontrado" }; }
     if (!row.installation_id) {
       console.log(`[GitHubPush] Tenant has no GitHub App installation — skipping`);
       // #59: never fail silently — surface WHY no repo was created so the portal/tenant sees it.
@@ -416,7 +419,7 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
          VALUES ($1, 'system', 'system', 'step', $2)`,
         [projectId, `⚠️ Repositório GitHub não criado: o tenant ainda não instalou o GitHub App da Zentriz. Instale o App (Settings → Integrações) e reprocesse o projeto para publicar o código.`],
       );
-      return;
+      return { ok: false, error: "sem GitHub App" };
     }
 
     // ── 2. Idempotency ────────────────────────────────────────────────────────
@@ -426,7 +429,7 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
     );
     if (existing.rows.length > 0) {
       console.log(`[GitHubPush] Repo already exists for ${projectId}: ${existing.rows[0].repo_url}`);
-      return;
+      return { ok: true };
     }
 
     const installationId = row.installation_id as number;
@@ -577,6 +580,7 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
         `🐙 Repositório GitHub criado para *${row.title}*\nhttps://github.com/${fullName}`,
       ).catch(() => {});
     }
+    return { ok: true };
   } catch (err) {
     console.error(`[GitHubPush] Failed for project ${projectId}:`, err);
     // Fire-and-forget: never throw — must not fail the accept request.
@@ -599,6 +603,7 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
     } catch (dialogueErr) {
       console.error(`[GitHubPush] Could not record failure dialogue for ${projectId}:`, dialogueErr);
     }
+    return { ok: false, error: safeErrorMessage(err) };
   } finally {
     client.release();
   }
@@ -662,8 +667,17 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
     const lineageRepo = await findLineageRepo(client, projectId, (row.parent_project_id as string | null) ?? null);
     if (!lineageRepo) {
       // Pai nunca publicou (sem GitHub na época?) → cria repo pelo fluxo normal (identidade pela raiz).
-      await pushProjectToGitHub(projectId);
-      return { ok: true, mode: "fallback_new_repo" };
+      // N1: o resultado REAL manda. `pushProjectToGitHub` engole o erro (não pode derrubar o aceite HTTP), então ele devolve
+      // `{ok:false}` e, por segurança, só aceitamos o sucesso se a linha do filho em `project_github_repos` de fato existe.
+      const created = await pushProjectToGitHub(projectId);
+      const own = (await client.query("SELECT 1 FROM project_github_repos WHERE project_id = $1", [projectId])).rows.length > 0;
+      if (created.ok && own) return { ok: true, mode: "fallback_new_repo" };
+      const error = created.error ?? "repositório não registrado após o push";
+      await client.query(
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)`,
+        [projectId, `⚠️ Evolução aceita, mas o repositório da linhagem não pôde ser criado (${error}). Nada foi publicado — use "Republicar".`],
+      ).catch(() => undefined);
+      return { ok: false, mode: "fallback_new_repo", error };
     }
     const installationId = row.installation_id as number;
     const [owner, repoName] = lineageRepo.repo_full_name.split("/");

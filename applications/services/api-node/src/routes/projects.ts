@@ -595,6 +595,13 @@ export async function projectRoutes(app: FastifyInstance) {
         if (cardId && cardId !== (await resolveTicketId())) {
           return reply.status(400).send({ code: "CARD_MISMATCH", message: "card_id da task não é o card que originou este projeto" });
         }
+        // B-3: o `card_id` EXPLÍCITO também só vale para o filho do card ATIVO (ticket com card_state e `child_project_id` = este projeto).
+        // Runner de filho descartado (card religado a outro filho) continua mandando `card_id`; a task fica sem vínculo em vez de poluir o card.
+        // Ticket legado (sem `card_state`) mantém o comportamento anterior.
+        if (cardId && cardId !== (await resolveChildCardId())) {
+          const own = (await client.query("SELECT card_state, child_project_id FROM tickets WHERE id = $1", [cardId])).rows[0] as { card_state: string | null; child_project_id: string | null } | undefined;
+          if (own && own.card_state !== null && own.child_project_id !== id) cardId = null;
+        }
         // A3: flag ligada e o filho nasceu de um card ⇒ TODA task não herdada recebe o `card_id` do ticket do próprio projeto, mesmo que o runner não envie.
         if (!cardId && !inherited && cardsOn) cardId = await resolveChildCardId();
         const module = (t as Record<string, unknown>).module as string ?? "backend";
@@ -806,7 +813,13 @@ export async function projectRoutes(app: FastifyInstance) {
         ["accepted", JSON.stringify({ accepted_by: acceptedBy, ...(evidence ? { accepted_evidence: evidence } : {}) }), id, current,
           JSON.stringify({ evolution_publish_state: "pending", evolution_publish_at: new Date().toISOString() })]
       );
-      if ((accepted.rowCount ?? accepted.rows.length) === 0) return reply.send({ ok: true, status: "accepted", message: "Projeto já aceito" });
+      if ((accepted.rowCount ?? accepted.rows.length) === 0) {
+        // N4: perdeu a corrida. "Já aceito" só é verdade se o status ATUAL é `accepted`; se o status mudou para outra coisa
+        // (ex.: `running`→`completed`/`stopped` pelo runner), o projeto NÃO foi aceito — resposta 409 clara, sem sucesso aparente.
+        const now = (await client.query("SELECT status FROM projects WHERE id = $1", [id])).rows[0]?.status as string | undefined;
+        if (now === "accepted") return reply.send({ ok: true, status: "accepted", message: "Projeto já aceito" });
+        return reply.status(409).send({ code: "CONFLICT", message: `O status do projeto mudou durante o aceite (agora: ${now ?? "inexistente"}); o projeto NÃO foi aceito. Tente novamente.` });
+      }
       // Notificação ops (fire-and-forget): projeto produzido 100% (aceite explícito).
       scheduleFactoryDone(pool, id);
       // SKILL_FEEDBACK (ADR-025): aceite HUMANO é oráculo (b). Aceite do Cyborg (LLM) é sinal fraco e

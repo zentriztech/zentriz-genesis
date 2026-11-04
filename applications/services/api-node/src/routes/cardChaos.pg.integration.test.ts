@@ -80,8 +80,10 @@ describePg("Fase 4 / AG — B1, A1, M1, M4 e caos 4.6 (Postgres real)", () => {
       `INSERT INTO projects (tenant_id, created_by, title, status, product_id, version_number, parent_project_id, budget_owner_project_id, extra)
        VALUES ($1,$2,$3,$4,$5,2,$6,$6,$7::jsonb) RETURNING id`,
       [s.tenantId, s.userId, `filho-${uid()}`, o.childStatus ?? "running", s.productId, s.parentId,
-        JSON.stringify({ evolution: true, ticket_number: t.number, ticket_id: t.id, ...(o.extra ?? {}) })],
+        JSON.stringify({ evolution: true, evolution_origin: "card", ticket_number: t.number, ticket_id: t.id, ...(o.extra ?? {}) })],
     )).rows[0].id as string;
+    // N2: o detector de publicação só vale para tenant com a flag de cards ligada.
+    await pool.query("INSERT INTO genesis_runtime_config (key, value, tenant_id) VALUES ('CARDS_BANCADA', '1', $1)", [s.tenantId]);
     const draft = (await pool.query(
       `INSERT INTO projects (tenant_id, created_by, title, status, product_id, version_number) VALUES ($1,$2,'rascunho','card_draft',$3,0) RETURNING id`,
       [s.tenantId, s.userId, s.productId],
