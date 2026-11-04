@@ -51,6 +51,10 @@ const CONFIG_KEYS: Record<string, { label: string; group: string; unit: string; 
   ATTACHMENT_MAX_FILES:       { label: "Anexos: máx. arquivos por card", group: "limits", unit: "", min: 1, max: MULTIPART_MAX_FILES },
   ATTACHMENT_MAX_TOTAL_BYTES: { label: "Anexos: máx. bytes somados por card", group: "limits", unit: "B", min: 1024, max: MULTIPART_MAX_TOTAL_BYTES },
   ATTACHMENT_MAX_FILE_BYTES:  { label: "Anexos: máx. bytes por arquivo", group: "limits", unit: "B", min: 1024, max: MULTIPART_MAX_FILE_BYTES },
+  // Fase 2 (2.6): paginação da lista de cards e teto de bytes da spec-base devolvida ao portal. calibrado=falso (padrões no código só valem sem a chave).
+  CARDS_LIST_PAGE_DEFAULT:    { label: "Cards: itens por página (padrão)", group: "limits", unit: "", min: 1, max: 1000 },
+  CARDS_LIST_PAGE_MAX:        { label: "Cards: itens por página (máximo)", group: "limits", unit: "", min: 1, max: 1000 },
+  CARD_BASE_SPEC_MAX_BYTES:   { label: "Cards: teto de bytes da spec-base (somente leitura)", group: "limits", unit: "B", min: 1024, max: 50000000 },
   // M-03 — flags de rollout da Fase 1' (services/featureFlags.ts). Precedência: tenant explícito > global > env (default) > off.
   // adminOnly: ligar/desligar rollout é decisão da plataforma, nunca do tenant_admin.
   ...Object.fromEntries(FLAG_NAMES.map((k) => [k, {

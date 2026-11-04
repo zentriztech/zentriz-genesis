@@ -361,6 +361,8 @@ export async function notifyFactoryDone(pool: Pool, projectId: string): Promise<
 export function scheduleFactoryStart(pool: Pool, projectId: string, opts: { origin?: string } = {}): void {
   setImmediate(() => {
     notifyFactoryStart(pool, projectId, opts).catch(() => {});
+    // Fase 2 (2.6): o card ligado a este filho passa a `in_factory` (best-effort; sem card é uma leitura e nada mais).
+    void import("./cardPromote.js").then((m) => m.syncCardForChildProject(pool, projectId)).catch(() => {});
   });
 }
 

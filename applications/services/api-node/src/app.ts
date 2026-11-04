@@ -30,6 +30,7 @@ import { managementLlmRoutes } from "./routes/managementLlm.js";
 import { opsAgentRoutes } from "./routes/opsAgent.js";
 import { productRoutes } from "./routes/products.js";
 import { ticketRoutes } from "./routes/tickets.js";
+import { cardRoutes } from "./routes/cards.js";
 import { internalLlmRoutes } from "./routes/internalLlm.js";
 import { llmGuardInternalRoutes, llmGuardUserRoutes } from "./routes/llmGuard.js";
 import { llmAnomalyRoutes } from "./routes/llmAnomaly.js";
@@ -122,6 +123,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(opsAgentRoutes);
   await app.register(productRoutes);
   await app.register(ticketRoutes); // RFC-0009: o PEDIDO de evolução (Ticket), separado da execução
+  await app.register(cardRoutes); // Fase 2 (2.6): API de cards da Bancada (atrás de CARDS_BANCADA por tenant)
   await app.register(internalLlmRoutes);
   await app.register(llmGuardInternalRoutes); // post-mortem 30/09: licença + registro de TODA chamada de LLM paga
   await app.register(llmGuardUserRoutes); // orçamento em USD por projeto + chave geral (admin)
