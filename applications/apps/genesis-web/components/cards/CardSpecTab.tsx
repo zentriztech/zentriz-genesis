@@ -293,7 +293,7 @@ export function CardSpecTab({ card, locked, canReopen, runner, onChanged, onStal
               <Button size="small" variant="outlined" disabled={busy || !newPath.trim() || !!newPathProblem} onClick={() => void createFile()} sx={{ mt: "3px" }}>Criar arquivo</Button>
             </Stack>
           )}
-          {saved && <Alert severity="success" role="status" sx={{ mt: 1 }}>Salvo. Valide o card quando terminar o refinamento.</Alert>}
+          {saved && !readOnly && <Alert severity="success" role="status" sx={{ mt: 1 }}>Salvo. Valide o card quando terminar o refinamento.</Alert>}
           {error && (
             <Alert severity="error" role="alert" sx={{ mt: 1 }} action={conflict ? <Button color="inherit" size="small" onClick={() => void loadFile(path)}>Recarregar</Button> : undefined}>{error}</Alert>
           )}
