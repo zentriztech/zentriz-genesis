@@ -33,6 +33,7 @@ import { ticketRoutes } from "./routes/tickets.js";
 import { cardRoutes } from "./routes/cards.js";
 import { internalLlmRoutes } from "./routes/internalLlm.js";
 import { llmGuardInternalRoutes, llmGuardUserRoutes } from "./routes/llmGuard.js";
+import { costPolicyRoutes } from "./routes/costPolicies.js";
 import { llmAnomalyRoutes } from "./routes/llmAnomaly.js";
 import { evolveReconcilerRoutes } from "./routes/evolveReconciler.js";
 import { projectFlagsRoutes } from "./routes/projectFlags.js";
@@ -126,6 +127,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(cardRoutes); // Fase 2 (2.6): API de cards da Bancada (atrás de CARDS_BANCADA por tenant)
   await app.register(internalLlmRoutes);
   await app.register(llmGuardInternalRoutes); // post-mortem 30/09: licença + registro de TODA chamada de LLM paga
+  await app.register(costPolicyRoutes); // C3': políticas de custo versionadas (advisor_pct, disjuntor) lidas pelo Guard
   await app.register(llmGuardUserRoutes); // orçamento em USD por projeto + chave geral (admin)
   await app.register(llmAnomalyRoutes); // tarefa 1.6: consulta dos alertas de anomalia (somente leitura, admin)
   await app.register(projectFlagsRoutes); // M-03: flags efetivas do projeto (tenant) para o runner

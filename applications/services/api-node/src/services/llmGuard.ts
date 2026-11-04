@@ -30,6 +30,7 @@ import { dailyTokenQuotaMode } from "../lib/costSource.js";
 import { PRE_FACTORY_STATUSES } from "./projectStatus.js";
 import { isSesConfigured, sendEmail } from "./emailSender.js";
 import { buildEstimator, fetchHistoryBuckets } from "./specEnrichment.js";
+import { advisorPolicyView, breakerOverrides, type AdvisorPolicyView } from "./costPolicies.js";
 
 export interface Queryable {
   query: (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }>;
@@ -64,7 +65,7 @@ export type GuardCode =
   | "BUDGET_INSUFFICIENT" | "GUARD_ERROR";
 
 export type GuardDecision =
-  | { allow: true; remainingUsd: number | null; budgetProjectId: string | null }
+  | { allow: true; remainingUsd: number | null; budgetProjectId: string | null; advisorPolicy?: AdvisorPolicyView }
   | { allow: false; code: GuardCode; message: string; budgetProjectId?: string | null };
 
 export interface PreflightInput {
@@ -366,8 +367,10 @@ export async function preflight(db: Queryable, input: PreflightInput): Promise<G
       return { allow: false, code: "KILL_SWITCH", message: "Chave geral de LLM ligada: todo LLM do Genesis está bloqueado por um administrador." };
     }
     const g = await globalSpend(db);
-    const hourCap = num(s.global_max_usd_per_hour);
-    const dayCap = num(s.global_max_usd_per_day);
+    // C3': a política `cost_policies` (breaker_*) vence o valor de llm_guard_settings/env; sem linha, nada muda.
+    const bo = await breakerOverrides(db);
+    const hourCap = bo.hour ?? num(s.global_max_usd_per_hour);
+    const dayCap = bo.day ?? num(s.global_max_usd_per_day);
     if (hourCap > 0 && g.hour >= hourCap) {
       await tripKillSwitch(db, "GLOBAL_HOURLY_CAP", { gastoUltimaHoraUsd: g.hour.toFixed(2), tetoUsd: hourCap });
       return { allow: false, code: "GLOBAL_HOURLY_CAP", message: `Teto global de US$ ${hourCap}/hora atingido — LLM bloqueado.` };
@@ -429,7 +432,9 @@ export async function preflight(db: Queryable, input: PreflightInput): Promise<G
     }
     const quotaDenied = await checkDailyTokenQuota(db, owner.tenantId, pid);
     if (quotaDenied) return { ...quotaDenied, budgetProjectId: owner.ownerId };
-    return { allow: true, remainingUsd: remaining, budgetProjectId: owner.ownerId };
+    // C3': exposição (não aplicação — isso é a C4') do teto do Advisor lido de cost_policies; ausente sem política.
+    const advisorPolicy = await advisorPolicyView(db, owner.tenantId, owner.budgetUsd);
+    return { allow: true, remainingUsd: remaining, budgetProjectId: owner.ownerId, ...(advisorPolicy ? { advisorPolicy } : {}) };
   } catch (e) {
     // FAIL-CLOSED: a lição do incidente é que gasto sem controle é pior do que trabalho parado.
     console.error(`[llmGuard] preflight falhou — NEGANDO (fail-closed): ${msg(e)}`);
@@ -711,7 +716,9 @@ export async function budgetSummary(db: Queryable, projectId: string) {
   const spend = await getBudgetSpend(db, owner.ownerId);
   const forecast = await computeForecast(db, owner, spend);
   const budget = owner.budgetUsd;
+  const advisorPolicy = await advisorPolicyView(db, owner.tenantId, budget);
   return {
+    ...(advisorPolicy ? { advisorPolicy } : {}),
     projectId, ownerProjectId: owner.ownerId, inherited: owner.ownerId !== projectId,
     budgetUsd: budget, alertStepPct: owner.alertStepPct,
     thresholds: alertThresholds(owner.alertStepPct),
