@@ -61,7 +61,8 @@ export const RECONCILER_LOCK_KEY = 0;
 export type FindingKind =
   | "claim_expired_no_effects" | "claim_expired_with_effects" | "ticket_promoted_without_child"
   | "child_ticket_mismatch" | "evolution_in_flight_stuck" | "uniqueness_index_missing" | "reconciler_disk_unverifiable"
-  | "card_status_divergence" | "evolution_publish_incomplete" | "card_published_without_pr";
+  | "card_status_divergence" | "evolution_publish_incomplete" | "card_published_without_pr"
+  | "card_child_stalled";
 
 export interface Finding {
   kind: FindingKind;
@@ -92,7 +93,7 @@ const empty = (mode: ReconcilerMode, skipped?: ReconcilerResult["skipped"]): Rec
 const ALL_KINDS: FindingKind[] = [
   "claim_expired_no_effects", "claim_expired_with_effects", "ticket_promoted_without_child",
   "child_ticket_mismatch", "evolution_in_flight_stuck", "uniqueness_index_missing", "reconciler_disk_unverifiable",
-  "card_status_divergence", "evolution_publish_incomplete", "card_published_without_pr",
+  "card_status_divergence", "evolution_publish_incomplete", "card_published_without_pr", "card_child_stalled",
 ];
 
 type Json = Record<string, unknown>;
@@ -385,6 +386,32 @@ async function detectCardPublishedWithoutPr(db: Pool, p: ReconcilerParams): Prom
   return out;
 }
 
+/**
+ * A-2 (AV): card `promoted|in_factory` cujo filho (não superado) está MORTO (`failed|archived`) ou PARADO pelo Guard de custo
+ * (`stopped` + `stopped_by='budget'`) depois da carência. É o estado que o encanamento deveria ter levado a `blocked`; se ainda aparece
+ * aqui, a transição não aconteceu (dedupe antigo, `shadow`, erro) e o card estaria "na fábrica" sem ninguém fazendo nada: ALERTA.
+ * Roda DEPOIS da sincronização de `on`, então só sobra o que a sincronização não resolveu.
+ */
+async function detectCardChildStalled(db: Pool, p: ReconcilerParams): Promise<Finding[]> {
+  const r = await db.query(
+    `SELECT t.id::text AS id, t.card_state, c.id::text AS child, c.status AS child_status, c.stopped_by,
+            extract(epoch FROM (now() - c.updated_at))::int AS age_s
+       FROM tickets t JOIN projects c ON c.id = t.child_project_id
+      WHERE t.card_state IN ('promoted', 'in_factory')
+        AND ( (c.status IN ('failed', 'archived') AND COALESCE(c.extra->>'superseded_by', '') = '')
+           OR (c.status = 'stopped' AND c.stopped_by = 'budget') )
+        AND c.updated_at < now() - ($1::int * interval '1 second')
+      ORDER BY c.updated_at LIMIT 200`,
+    [Math.floor(p.orphanGraceS)],
+  );
+  return r.rows.map((x) => ({
+    kind: "card_child_stalled" as const, entityHash: hashId(String(x.id)), projectHash: hashId(String(x.child)), ticketHash: hashId(String(x.id)),
+    severity: "critical" as const,
+    detail: { card_state: String(x.card_state), child_status: String(x.child_status), stopped_by: x.stopped_by ? String(x.stopped_by) : null,
+      age_s: Number(x.age_s), rule: "card_should_be_blocked_child_dead_or_stopped_by_budget" },
+  }));
+}
+
 async function detectMissingIndexes(db: Pool | PoolClient): Promise<Finding[]> {
   const r = await db.query("SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ANY($1::text[])",
     [UNIQUENESS_INDEXES.map((i) => i.name)]);
@@ -536,6 +563,9 @@ export async function runReconcilerPass(pool: Pool, env: NodeJS.ProcessEnv = pro
       const { deliverAcceptedCards } = await import("./cardDelivery.js");
       res.cardsDelivered = await deliverAcceptedCards(pool);
     }
+
+    // A-2 (AV): depois da sincronização — só resta o card que continua "na fábrica" com o filho morto/parado.
+    await run(["card_child_stalled"], async () => { findings.push(...await detectCardChildStalled(pool, p)); });
 
     const seen = new Set<string>();
     for (const f of findings) {
