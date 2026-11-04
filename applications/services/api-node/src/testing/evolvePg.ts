@@ -48,12 +48,37 @@ export function authMock() {
 }
 
 export async function openPg(max = 24): Promise<pg.Pool> {
-  if (!PG_URL || !/@(localhost|127\.0\.0\.1):55432\//.test(PG_URL)) {
-    throw new Error("PG_TEST_URL deve apontar para o Postgres efêmero em localhost:55432");
+  if (!PG_URL || !/@(localhost|127\.0\.0\.1):(55432|55440)\//.test(PG_URL)) {
+    throw new Error("PG_TEST_URL deve apontar para o Postgres efêmero em localhost:55432 ou 55440");
   }
   const pool = new pg.Pool({ connectionString: PG_URL, max });
   pgHolder.pool = pool;
   return pool;
+}
+
+/**
+ * Banco DESCARTÁVEL dentro do mesmo Postgres efêmero (isolamento para testes que criam/derrubam índices ou semeiam
+ * duplicatas): `CREATE DATABASE`, pool próprio (também ligado ao `pgHolder`, para o `vi.mock` das rotas) e
+ * `drop()`. As migrations ficam por conta do chamador (`initDb()` após `pgHolder.pool` apontar para cá).
+ */
+export async function createScratchDb(prefix = "evo_scratch"): Promise<{ pool: pg.Pool; name: string; drop(): Promise<void> }> {
+  if (!PG_URL || !/@(localhost|127\.0\.0\.1):(55432|55440)\//.test(PG_URL)) {
+    throw new Error("PG_TEST_URL deve apontar para o Postgres efêmero em localhost:55432 ou 55440");
+  }
+  const name = `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  const admin = new pg.Pool({ connectionString: PG_URL, max: 1 });
+  await admin.query(`CREATE DATABASE ${name}`);
+  const url = PG_URL.replace(/\/[^/?]*(\?.*)?$/, `/${name}$1`);
+  const pool = new pg.Pool({ connectionString: url, max: 24 });
+  pgHolder.pool = pool;
+  return {
+    pool, name,
+    async drop() {
+      await pool.end();
+      await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+      await admin.end();
+    },
+  };
 }
 
 let seq = 0;
