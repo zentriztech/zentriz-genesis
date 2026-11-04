@@ -239,7 +239,8 @@ def test_m03_fetch_efetivo_404_e_off_e_5xx_falha_fechado_no_estrito(monkeypatch)
     def get_404(path): calls.append(path); return None, 404
     monkeypatch.setattr(runner, "_api_get", get_404)
     assert runner._attachments_strict("p404") is False          # API antiga: off, uma tentativa só
-    assert calls == ["/api/projects/p404/effective-flags"]
+    assert [c for c in calls if c.endswith("/effective-flags")] == ["/api/projects/p404/effective-flags"]
+    monkeypatch.setattr(runner, "_is_card_child", lambda *a, **k: True)  # A-4: fail-closed é do filho de card
     monkeypatch.setattr(runner, "_api_get", lambda path: (None, 0))   # transporte
     with pytest.raises(runner.SpecReadError, match="indisponíveis"):
         runner._attachments_strict("p0")                         # leitura da spec: fail-closed

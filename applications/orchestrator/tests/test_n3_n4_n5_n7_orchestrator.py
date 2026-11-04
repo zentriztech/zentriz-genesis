@@ -78,7 +78,8 @@ def test_run_cyborg_v3_rebaixa_delivered_quando_ha_arquivo_fora_do_escopo(apps, 
 
 # ───────────── N-4 / N-5 ─────────────
 def _ctx(bl):
-    return SimpleNamespace(evolution_baseline=bl)
+    # A-4 (AV): a exigência de baseline medida vale para filho de card
+    return SimpleNamespace(evolution_baseline=bl, is_card_child=True, card_id=None)
 
 
 def test_n4_baseline_no_tests_nao_e_baseline_confiavel(monkeypatch):

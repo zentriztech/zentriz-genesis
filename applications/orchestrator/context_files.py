@@ -65,11 +65,14 @@ def iter_context_files(root: Path) -> Iterator[Path]:
 
 
 def collect_context_artifacts(root: Path, rel_to: Path, *, max_file_bytes: int | None = None,
-                              max_total_bytes: int | None = None, max_files: int | None = None) -> list[dict]:
+                              max_total_bytes: int | None = None, max_files: int | None = None,
+                              enforce_ceiling: bool = True) -> list[dict]:
     """Lê arquivos de texto de `root` como `[{path, content}]` (path relativo a `rel_to`).
 
     Arquivos > `max_file_bytes` são pulados (comportamento histórico). Se o total lido passar de
-    `max_total_bytes` ou o número de arquivos de `max_files`, levanta `ContextTooLargeError`.
+    `max_total_bytes` ou o número de arquivos de `max_files`, levanta `ContextTooLargeError` — salvo
+    `enforce_ceiling=False` (A-4/AV: fluxo legado/projeto comum não é bloqueado pelo teto; a poda de
+    node_modules/dist continua valendo para todos).
     """
     max_file = max_file_bytes or _int_env("CONTEXT_MAX_FILE_BYTES", 50_000)
     max_total = max_total_bytes or _int_env("CONTEXT_MAX_TOTAL_BYTES", 1_500_000)
@@ -84,7 +87,7 @@ def collect_context_artifacts(root: Path, rel_to: Path, *, max_file_bytes: int |
         if size >= max_file:
             continue
         total += size
-        if total > max_total or len(out) + 1 > max_n:
+        if enforce_ceiling and (total > max_total or len(out) + 1 > max_n):
             raise ContextTooLargeError(
                 f"contexto de LLM de '{root}' excede o teto defensivo "
                 f"({total} bytes/{len(out) + 1} arquivos > {max_total} bytes/{max_n} arquivos). "

@@ -697,6 +697,59 @@ def _evo_regressions(baseline: dict | None, final: dict | None) -> list[str]:
     return [f"contagem: {fp} passando agora < {bp} na baseline"] if fp < bp else []
 
 
+# A-4 (AV) — as regras novas da Fase 4 (fail-closed) valem para FILHO DE CARD (`extra.evolution_origin == "card"`);
+# o fluxo legado e os projetos comuns mantêm o comportamento ANTERIOR. Cada regra tem um override por ambiente:
+#   QA_NO_VERDICT_BLOCKS      = card (padrão) | all | off   — QA sem veredito ⇒ BLOCKED
+#   EVOLUTION_P2P_REQUIRED    = 1 (padrão, só card) | 0     — baseline não medida reprova (card)
+#   EVOLUTION_P2P_REQUIRED_LEGACY = 0 (padrão) | 1          — idem para evolução legada/comum
+#   CONTEXT_CEILING_ENFORCE   = card (padrão) | all | off   — teto de contexto (1,5 MB/3000) bloqueia o Dev
+#   EFFECTIVE_FLAGS_FAIL_CLOSED = card (padrão) | all | off — /effective-flags fora do ar ⇒ projeto failed
+_CARD_CHILD_CACHE: dict[str, bool] = {}
+
+
+def _is_card_child(project_id: str | None, pipeline_ctx=None) -> bool | None:
+    """True se o filho nasceu de um CARD; False se é legado/comum; None se NÃO deu para saber (API indisponível).
+    Só resultados conclusivos entram no cache (o `extra` do filho não muda de origem)."""
+    if pipeline_ctx is not None and (getattr(pipeline_ctx, "is_card_child", False) or getattr(pipeline_ctx, "card_id", None)):
+        return True
+    if not project_id:
+        return False
+    if project_id in _CARD_CHILD_CACHE:
+        return _CARD_CHILD_CACHE[project_id]
+    if not (os.environ.get("API_BASE_URL", "").strip() and os.environ.get("GENESIS_API_TOKEN")):
+        return False  # execução avulsa, sem API: não há card
+    from orchestrator.change_kind import is_card_child as _icc
+    for _ in range(2):
+        try:
+            data, status = _api_get(f"/api/projects/{project_id}")
+        except Exception:  # noqa: BLE001
+            continue
+        if status == 200 and isinstance(data, dict):
+            extra = data.get("extra") or {}
+            if isinstance(extra, str):
+                try:
+                    extra = json.loads(extra)
+                except Exception:  # noqa: BLE001
+                    extra = {}
+            _CARD_CHILD_CACHE[project_id] = res = _icc(extra if isinstance(extra, dict) else {})
+            return res
+        if status in (401, 403, 404):
+            return False
+    return None
+
+
+def _a4_rule_applies(env_name: str, project_id: str | None, pipeline_ctx=None, *, unknown_as: bool = False) -> bool:
+    """Aplica a regra nova? `card` (padrão) só em filho de card; `all` em todo projeto; `off` nunca.
+    `unknown_as`: valor quando não se sabe se é card (API indisponível)."""
+    mode = (os.environ.get(env_name, "card") or "card").strip().lower()
+    if mode == "all":
+        return True
+    if mode in ("off", "0", "false", "no"):
+        return False
+    st = _is_card_child(project_id, pipeline_ctx)
+    return unknown_as if st is None else st
+
+
 def _evo_p2p_unmeasured_reason(pipeline_ctx) -> str | None:
     """D-4 (AQ) — o gate de NÃO-REGRESSÃO (P2P) ficou sem baseline numa EVOLUÇÃO com código?
 
@@ -708,6 +761,11 @@ def _evo_p2p_unmeasured_reason(pipeline_ctx) -> str | None:
     if pipeline_ctx is None or os.environ.get("EVOLUTION_P2P_MODE", "final").lower() == "off":
         return None
     if os.environ.get("EVOLUTION_P2P_REQUIRED", "1").strip().lower() in ("0", "off", "false", "no"):
+        return None
+    # A-4 (AV): a exigência de baseline medida vale para filho de CARD; evolução legada/comum mantém o
+    # comportamento anterior (sem medição ⇒ só aviso) salvo EVOLUTION_P2P_REQUIRED_LEGACY=1.
+    if not (getattr(pipeline_ctx, "is_card_child", False) or getattr(pipeline_ctx, "card_id", None)) \
+            and os.environ.get("EVOLUTION_P2P_REQUIRED_LEGACY", "0").strip().lower() not in ("1", "on", "true", "yes"):
         return None
     bl = getattr(pipeline_ctx, "evolution_baseline", None)
     if not isinstance(bl, dict):
@@ -1041,7 +1099,10 @@ def _effective_flag(project_id: str | None, name: str, *, fail_closed: bool = Fa
 
 
 def _attachments_strict(project_id: str | None = None) -> bool:
-    return _effective_flag(project_id, "attachmentsStrict", fail_closed=True)
+    # A-4 (AV): /effective-flags indisponível ⇒ fail-closed só em filho de card; legado/comum degrada para "off"
+    # (comportamento anterior) em vez de derrubar o projeto. Override: EFFECTIVE_FLAGS_FAIL_CLOSED=card|all|off.
+    return _effective_flag(project_id, "attachmentsStrict",
+                           fail_closed=_a4_rule_applies("EFFECTIVE_FLAGS_FAIL_CLOSED", project_id, unknown_as=True))
 
 
 #: Allowlist de TEXTO da árvore de spec (ATTACHMENTS_STRICT=on). Sobrescrevível por SPEC_TEXT_EXTENSIONS (CSV com ponto).
@@ -3455,19 +3516,30 @@ def _qa_produced_verdict(qa_response: dict) -> bool:
     return (qa_response.get("status") or "").strip().lower() not in _QA_NO_VERDICT_STATUSES
 
 
+_QA_PASS_TOKENS = frozenset({"pass", "passed", "ok", "approved", "aprovado", "aprovada", "success", "succeeded", "done", "green"})
+_QA_FAIL_TOKENS = frozenset({
+    "fail", "failed", "failure", "nok", "not", "no", "nao", "não", "reject", "rejected", "reprovado", "reprovada",
+    "error", "blocked", "needs", "changes", "rework",
+})
+
+
 def _is_qa_pass(qa_response: dict) -> bool:
-    """Considera QA como aprovado se status ou summary indicarem sucesso (evita QA_FAIL infinito por variação do LLM).
-    Sem veredito válido (`_qa_produced_verdict` falso) NUNCA aprova — a busca de "ok" no summary casava
-    "token", "book" etc. e podia aprovar um envelope BLOCKED."""
+    """A-1 (AV) — o QA aprovou? Decide SOMENTE pelo veredito ESTRUTURADO (`status`, ou `verdict` quando o status
+    vem vazio), normalizado em tokens inteiros (`QA_PASS` → qa, pass). Texto livre (`summary`) NUNCA promove a
+    PASS: a busca por substring casava "token"/"broken"/"book" (contêm "ok") e neutralizava QA_FAIL de verdade
+    (inclusive o forçado pelo fingerprint T-08, que escreve "missing strong tokens"). Token de reprovação/negação
+    ("not ok", "NOK", "fail") vence qualquer token de aprovação. Sem veredito válido ⇒ nunca aprova."""
     if not _qa_produced_verdict(qa_response):
         return False
-    status = (qa_response.get("status") or "").strip().lower()
-    summary = (qa_response.get("summary") or "").lower()
-    if any(k in status for k in ("pass", "qa_pass", "ok", "aprovado", "success", "done")):
-        return True
-    if any(k in summary for k in ("aprovado", "passou", "ok", "sem problemas", "approved")):
-        return True
-    return False
+    raw = qa_response.get("status")
+    if not (isinstance(raw, str) and raw.strip()):
+        raw = qa_response.get("verdict")
+    if not isinstance(raw, str):
+        return False
+    tokens = [t for t in re.split(r"[^0-9a-zA-ZÀ-ÿ]+", raw.lower()) if t]
+    if not tokens or any(t in _QA_FAIL_TOKENS for t in tokens):
+        return False
+    return any(t in _QA_PASS_TOKENS for t in tokens)
 
 
 def _qa_has_blocker(qa_response: dict) -> bool:
@@ -4328,6 +4400,18 @@ def _inherited_task_ids(project_id: str) -> list[str]:
             if isinstance(t, dict) and str(t.get("taskId") or t.get("task_id") or "").startswith("TSK-INH-")]
 
 
+def _register_inherited_completed(project_id: str, pipeline_ctx) -> int:
+    """C8 (AV): garante as TSK-INH-* em `pipeline_ctx.completed_tasks` (sem duplicar). Devolve quantas foram adicionadas."""
+    if pipeline_ctx is None:
+        return 0
+    n = 0
+    for tid in _inherited_task_ids(project_id):
+        if tid not in pipeline_ctx.completed_tasks:
+            pipeline_ctx.completed_tasks.append(tid)
+            n += 1
+    return n
+
+
 def _apply_change_context(pipeline_ctx, extra: dict) -> dict:
     """Fase 4 (4.1/4.2): grava no PipelineContext o tipo do card, a origem da spec (`card:TK-NNNN`), o `card_id` e o arquivo de
     spec de origem, derivados de `projects.extra` do filho. Sem contexto, não faz nada."""
@@ -4338,6 +4422,8 @@ def _apply_change_context(pipeline_ctx, extra: dict) -> dict:
         pipeline_ctx.spec_origin = cc["spec_origin"]
         pipeline_ctx.card_id = cc["card_id"]
         pipeline_ctx.origin_spec_file = cc["origin_spec_file"]
+        from orchestrator.change_kind import is_card_child as _icc
+        pipeline_ctx.is_card_child = _icc(extra)  # A-4 (AV)
         if cc["card_id"]:
             logger.info("[F4] Card %s (tipo=%s) — TSK-EVO-* serão ligadas ao card.", cc["spec_origin"], cc["ticket_kind"])
     return cc
@@ -4369,6 +4455,70 @@ def _link_tasks_to_card(tasks: list[dict], card_id: str | None, origin_spec_file
             t = {**t, "card_id": card_id, **({"origin_spec_file": origin_spec_file} if origin_spec_file else {})}
         out.append(t)
     return out
+
+
+_TRIVIAL_TASK_ID = "TSK-TRIVIAL-001"
+_TASK_DEAD_STATUSES = ("DONE", "QA_PASS", "CANCELLED")
+
+
+def _tid_of(t: dict) -> str:
+    return str(t.get("taskId") or t.get("task_id") or "")
+
+
+def _active_pm_tasks_for_consolidation(all_tasks: list[dict]) -> list[dict]:
+    """Tasks ainda ativas que a consolidação trivial substitui (a própria TSK-TRIVIAL-001 nunca é uma delas)."""
+    return [t for t in all_tasks if t.get("status") not in _TASK_DEAD_STATUSES and _tid_of(t) != _TRIVIAL_TASK_ID]
+
+
+def _trivial_consolidation_pending(all_tasks: list[dict]) -> bool:
+    """C10 (AV): a run anterior morreu DEPOIS de criar a TSK-TRIVIAL-001 e ANTES de cancelar todas as originais.
+    Existe uma TRIVIAL viva ⇒ a consolidação já foi decidida: a retomada só termina de cancelar as originais."""
+    return any(_tid_of(t) == _TRIVIAL_TASK_ID and t.get("status") != "CANCELLED" for t in all_tasks)
+
+
+def _consolidate_trivial_tasks(project_id: str, all_tasks: list[dict], active_tasks: list[dict], pm_module: str,
+                               charter_summary: str, card_args: tuple[str | None, str | None]) -> str | None:
+    """GAP-NEW-3 + C10 (AV): consolida as tasks do PM em `TSK-TRIVIAL-001` de forma RETOMÁVEL. Ordem nova: (1) cria a
+    consolidada (upsert idempotente; nunca regride uma TRIVIAL já concluída), (2) só então cancela as originais. Antes
+    cancelava primeiro: um kill entre os dois passos deixava ZERO tasks ativas e o projeto seguia como "concluído" sem
+    trabalho. Devolve o resumo de backlog, ou None se a criação falhou (nesse caso NADA é cancelado)."""
+    existing = [t for t in all_tasks if _tid_of(t) == _TRIVIAL_TASK_ID and t.get("status") != "CANCELLED"]
+    if not existing:
+        owner_role = {"web": "DEV_WEB", "mobile": "DEV_MOBILE"}.get(pm_module, "DEV_BACKEND")
+        consolidated_reqs = "\n".join(
+            f"- {t.get('requirements') or t.get('title') or t.get('taskId', '?')}" for t in active_tasks)
+        consolidated = {
+            "task_id": _TRIVIAL_TASK_ID,
+            "taskId": _TRIVIAL_TASK_ID,
+            "module": pm_module,
+            "owner_role": owner_role,
+            "ownerRole": owner_role,
+            "status": "ASSIGNED",
+            "requirements": f"[TRIVIAL CONSOLIDADO — {len(active_tasks)} tasks unificadas]\n\n{charter_summary[:600]}\n\nTasks originais:\n{consolidated_reqs[:600]}",
+            "depends_on_files": [],
+            "target_route": "/",
+        }
+        _d, st = _api_post(f"/api/projects/{project_id}/tasks", {"tasks": _link_tasks_to_card([consolidated], *card_args)})
+        if not (200 <= st < 300):
+            logger.warning("[GAP-NEW-3] criação da TSK-TRIVIAL-001 falhou (HTTP %s) — originais mantidas (nada cancelado).", st)
+            return None
+    for t in active_tasks:
+        tid = _tid_of(t)
+        if tid:
+            _update_task(project_id, tid, status="CANCELLED")
+    return f"[TRIVIAL CONSOLIDADO] 1 task — {len(active_tasks)} tasks do PM unificadas. {charter_summary[:300]}"
+
+
+def _seed_is_complete(project_id: str, pm_module: str, existing_tasks: list[dict]) -> bool:
+    """C9 (AV): todas as tasks do BACKLOG.md já existem na API? Usado quando o POST do seed falhou mas há tasks (seed
+    parcial de API antiga, não atômica). Backlog ilegível/vazio ⇒ considera completo (não há o que comparar)."""
+    try:
+        expected = {str(t.get("task_id") or t.get("taskId") or "") for t in (_parse_tasks_from_backlog(project_id, pm_module) or [])}
+    except Exception:  # noqa: BLE001
+        return True
+    expected.discard("")
+    have = {_tid_of(t) for t in existing_tasks}
+    return expected <= have
 
 
 def _seed_tasks(project_id: str, pm_module: str = "web", card_id: str | None = None, origin_spec_file: str | None = None) -> bool:
@@ -4882,7 +5032,8 @@ def _run_monitor_loop(
                     except Exception as _fp_err:
                         logger.warning("[T-08 fingerprint] falha ao rodar: %s", _fp_err)
 
-                    if not _qa_produced_verdict(qa_response):
+                    if not _qa_produced_verdict(qa_response) and _a4_rule_applies("QA_NO_VERDICT_BLOCKS", project_id, pipeline_ctx):
+                        # A-4 (AV): só filho de card (ou QA_NO_VERDICT_BLOCKS=all); legado segue o fluxo anterior (QA_FAIL/rework).
                         # D-2/D-13 (AQ): sem veredito ≠ reprovação ≠ "QA rodou". Nada de relatório de QA,
                         # nada de rework do Dev; reaciona o QA e, esgotado, BLOQUEIA a task declarando
                         # que a entrega NÃO foi validada (nunca `DONE`).
@@ -5100,7 +5251,9 @@ def _run_monitor_loop(
                         _apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
                         if _apps_root.exists():
                             # N-1: poda node_modules/dist/.next/lockfiles e aplica teto defensivo (falha ALTO).
-                            _disk_artifacts = _context_files.collect_context_artifacts(_apps_root, _apps_root.parent.parent)
+                            _disk_artifacts = _context_files.collect_context_artifacts(
+                                _apps_root, _apps_root.parent.parent,
+                                enforce_ceiling=_a4_rule_applies("CONTEXT_CEILING_ENFORCE", project_id, pipeline_ctx))
                     except _context_files.ContextTooLargeError:
                         raise  # cai no `except Exception` do Dev: task BLOCKED + erro claro, sem chamada paga
                     except Exception:
@@ -5412,7 +5565,8 @@ def _run_monitor_loop(
                             _apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
                             if _apps_root.exists():
                                 _all_dev_artifacts = _context_files.collect_context_artifacts(
-                                    _apps_root, _apps_root.parent, max_file_bytes=30_000)
+                                    _apps_root, _apps_root.parent, max_file_bytes=30_000,
+                                    enforce_ceiling=_a4_rule_applies("CONTEXT_CEILING_ENFORCE", project_id, pipeline_ctx))
                         except Exception as _de:
                             logger.warning("[Monitor Loop] Erro ao coletar dev artifacts para DevOps: %s", _de)
                     _combined_artifacts = _all_dev_artifacts or last_dev_artifacts
@@ -7591,10 +7745,10 @@ def main() -> int:
                     _n_inh = _inherit_parent_tasks(project_id, _parent_project_id_evo)
                     if _n_inh and not _already_inh:
                         _post_step(f"Evolução: {_n_inh} task(s) da versão anterior herdadas como concluídas (TSK-INH-*).", request_id)
-                        if pipeline_ctx is not None:
-                            for _tid in _inherited_task_ids(project_id):
-                                if _tid not in pipeline_ctx.completed_tasks:
-                                    pipeline_ctx.completed_tasks.append(_tid)
+                    if _n_inh:
+                        # C8 (AV): registra SEMPRE (idempotente). Antes só na 1ª vez: kill entre o POST da herança e o
+                        # checkpoint deixava as TSK-INH fora de `completed_tasks` para sempre na retomada.
+                        _register_inherited_completed(project_id, pipeline_ctx)
                 except Exception as _e_inh:
                     logger.warning("[H6] herança de tasks do pai falhou (não crítico): %s", _e_inh)
             if not seed_ok:
@@ -7604,6 +7758,14 @@ def main() -> int:
                 if _existing_tasks:
                     logger.warning("[Monitor Loop] _seed_tasks retornou False mas %d tasks já existem — continuando.", len(_existing_tasks))
                     seed_ok = True
+                    if _a4_rule_applies("SEED_PARTIAL_STRICT", project_id, pipeline_ctx) and not _seed_is_complete(project_id, pm_module, _existing_tasks):
+                        # C9 (AV): backlog PARCIAL não segue em silêncio (filho de card): tenta o seed de novo uma vez.
+                        seed_ok = _seed_tasks(project_id, pm_module=pm_module,
+                                              card_id=getattr(pipeline_ctx, "card_id", None) if pipeline_ctx else None,
+                                              origin_spec_file=getattr(pipeline_ctx, "origin_spec_file", None) if pipeline_ctx else None)
+                        if not seed_ok:
+                            _post_error("Seed do backlog ficou PARCIAL (tasks do BACKLOG.md ausentes na API).", request_id, None)
+                            _patch_project({"status": "failed"})
                 else:
                     _post_error("Falha ao criar tarefas iniciais na API.", request_id, None)
                     _patch_project({"status": "failed"})
@@ -7614,43 +7776,428 @@ def main() -> int:
                 _hint_after_pm = _extract_complexity_hint(charter_summary) or ("trivial" if _pre_trivial_detected else "")
                 if _hint_after_pm == "trivial" and project_id and _api_available():
                     _all_pm_tasks = _get_tasks(project_id)
-                    _active_pm_tasks = [t for t in _all_pm_tasks if t.get("status") not in ("DONE", "QA_PASS", "CANCELLED")]
-                    if not _may_consolidate_trivial(_active_pm_tasks, _card_link_args(pipeline_ctx)[0]) and _active_pm_tasks:
+                    _active_pm_tasks = _active_pm_tasks_for_consolidation(_all_pm_tasks)
+                    _card_id_cons = _card_link_args(pipeline_ctx)[0]
+                    if not _may_consolidate_trivial(_active_pm_tasks, _card_id_cons) and _active_pm_tasks and _card_id_cons:
                         # AH-A3: filho de card — as tasks ligadas ao card nunca são descartadas pela consolidação.
                         logger.info("[GAP-NEW-3] filho de card: consolidação em TSK-TRIVIAL-001 pulada (%d task(s) ligadas ao card).", len(_active_pm_tasks))
-                    elif _may_consolidate_trivial(_active_pm_tasks, _card_link_args(pipeline_ctx)[0]):
-                        logger.info(
-                            "[GAP-NEW-3] complexity_hint=trivial mas PM gerou %d tasks. Consolidando em 1 task.",
-                            len(_active_pm_tasks),
-                        )
+                    elif not _card_id_cons and _active_pm_tasks and (
+                            _may_consolidate_trivial(_active_pm_tasks, None) or _trivial_consolidation_pending(_all_pm_tasks)):
                         _post_step(
                             f"Complexidade trivial com {len(_active_pm_tasks)} tasks do PM — consolidando em 1 task para evitar overhead desnecessário.",
                             request_id,
                         )
-                        # Cancelar todas as tasks do PM
-                        for _t in _active_pm_tasks:
-                            _tid = _t.get("taskId") or _t.get("task_id")
-                            if _tid:
-                                _update_task(project_id, _tid, status="CANCELLED")
-                        # Criar 1 task consolidada com todos os requisitos do backlog
-                        _owner_role = {"web": "DEV_WEB", "mobile": "DEV_MOBILE"}.get(pm_module, "DEV_BACKEND")
-                        _consolidated_reqs = "\n".join(
-                            f"- {t.get('requirements') or t.get('title') or t.get('taskId','?')}"
-                            for t in _active_pm_tasks
+                        _bs_cons = _consolidate_trivial_tasks(project_id, _all_pm_tasks, _active_pm_tasks, pm_module,
+                                                              charter_summary, _card_link_args(pipeline_ctx))
+                        if _bs_cons:
+                            backlog_summary = _bs_cons
+                _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id, pipeline_ctx=pipeline_ctx, run_log=_run_log)
+                if _run_log:
+                    try:
+                        _proj_status = _get_project_status(project_id) or "stopped"
+                        _reason = "accepted" if _proj_status == "accepted" else ("sigterm" if _shutdown_requested else "stopped")
+                        _run_log.stop_run(reason=_reason)
+                    except Exception:
+                        pass
+            persist_state(
+                spec_ref=spec_ref,
+                charter={"summary": charter_summary, "artifacts": charter_artifacts},
+                backlog={"summary": backlog_summary, "artifacts": backlog_artifacts},
+                events=["project.created", "task.assigned", "task.completed", "qa.review"],
+            )
+            return
+
+        if not pipeline_ctx or pipeline_ctx.current_step < 3:
+            max_cto_pm_rounds = int(os.environ.get("MAX_CTO_PM_ROUNDS", "3"))
+            cto_pm_questionamentos = None
+            # FT-17 fix (2026-07-02, OrienteMe V2 1b65e70b): invalidador do cache de pm_module.
+            # Bug anterior: se a inferência inicial errava (ex: cachou "backend" para projeto
+            # exclusivamente web), o PM da squad errada retornava BLOCKED com evidência
+            # coherence_check, mas o runner reutilizava o cache nas rodadas 2/3 sem reinferir.
+            # Loop custava 3× chamadas de LLM e sempre falhava. Fix: rastrear módulos
+            # já testados e rejeitados; se BLOCKED com coherence_check, invalidar cache e
+            # tentar próximo candidato (inferir do texto do BLOCKED se possível).
+            _rejected_modules: set[str] = set()
+            _prev_pm_response = None
+            for pm_round in range(1, max_cto_pm_rounds + 1):
+                _post_step(
+                    f"O PM está gerando o backlog do módulo (rodada {pm_round}/{max_cto_pm_rounds}).",
+                    request_id,
+                )
+                _post_agent_working("pm", "O PM está gerando o backlog (tarefas e critérios de aceitação).", request_id)
+                # T10 (N2): cachear pm_module em pipeline_ctx — evita 3× chamadas Bedrock por loop.
+                # FT-17 fix (2026-07-02): invalidar cache se PM anterior retornou BLOCKED c/ coherence_check.
+                _cached_module = getattr(pipeline_ctx, "current_module", None) if pipeline_ctx else None
+                _cache_invalidated = False
+                if _prev_pm_response and str(_prev_pm_response.get("status", "")).upper() == "BLOCKED":
+                    _prev_evidence = _prev_pm_response.get("evidence", []) or []
+                    _has_coherence = any(
+                        isinstance(ev, dict) and str(ev.get("type", "")).lower() in ("coherence_check", "coherence")
+                        for ev in _prev_evidence
+                    )
+                    if _has_coherence and _cached_module:
+                        _rejected_modules.add(_cached_module)
+                        _cached_module = None
+                        _cache_invalidated = True
+                        logger.warning(
+                            "[Pipeline] pm_module cache invalidado: PM anterior retornou BLOCKED com coherence_check. "
+                            "Módulos já rejeitados: %s. Reinferindo…",
+                            sorted(_rejected_modules),
                         )
-                        _consolidated_task = {
-                            "task_id":   "TSK-TRIVIAL-001",
-                            "taskId":    "TSK-TRIVIAL-001",
-                            "module":    pm_module,
-                            "owner_role": _owner_role,
-                            "ownerRole":  _owner_role,
-                            "status":    "ASSIGNED",
-                            "requirements": f"[TRIVIAL CONSOLIDADO — {len(_active_pm_tasks)} tasks unificadas]\n\n{charter_summary[:600]}\n\nTasks originais:\n{_consolidated_reqs[:600]}",
-                            "depends_on_files": [],
-                            "target_route": "/",
-                        }
-                        _api_post(f"/api/projects/{project_id}/tasks", {"tasks": _link_tasks_to_card([_consolidated_task], *_card_link_args(pipeline_ctx))})
-                        backlog_summary = f"[TRIVIAL CONSOLIDADO] 1 task — {len(_active_pm_tasks)} tasks do PM unificadas. {charter_summary[:300]}"
+                if _cached_module and _cached_module in ("web", "backend", "mobile", "fullstack") and _cached_module not in _rejected_modules:
+                    pm_module = _cached_module
+                    logger.info("[Pipeline] pm_module lido do cache (pipeline_ctx.current_module=%s) — sem re-inferir (rodada %s)", pm_module, pm_round)
+                else:
+                    _ptype_for_mod = (getattr(pipeline_ctx, "project_type", "") if pipeline_ctx else "")
+                    pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content, project_type=_ptype_for_mod)
+                    # Se a inferência devolver um módulo já rejeitado, tentar próximo candidato.
+                    if pm_module in _rejected_modules:
+                        # Ordem de fallback depende do tipo: libs/backends NUNCA caem p/ web/mobile
+                        # (achado #10: lib_ts rejeitada no backend caía p/ web → backlog errado).
+                        _pt_low = str(_ptype_for_mod or "").lower()
+                        if _pt_low in ("lib_ts", "lib_cli", "lib_plugin") or _pt_low.startswith("backend"):
+                            _fallback_order = ("backend",)  # lib/backend só fazem sentido como backend
+                        elif _pt_low.startswith("mobile"):
+                            # achado #39: um app mobile (Expo/RN) NUNCA é web/backend. Antes o
+                            # fallback caía p/ "web" → PM Web gerava backlog vazio → projeto zumbi
+                            # eterno em "running" (SPEC-19). Mobile só faz sentido como mobile.
+                            _fallback_order = ("mobile",)
+                        else:
+                            _fallback_order = ("web", "backend", "mobile", "fullstack")
+                        _picked = False
+                        for _candidate in _fallback_order:
+                            if _candidate not in _rejected_modules:
+                                pm_module = _candidate; _picked = True
+                                logger.warning(
+                                    "[Pipeline] inferência devolveu módulo rejeitado; fallback (tipo=%s) → %s",
+                                    _pt_low or "?", pm_module,
+                                )
+                                break
+                        # lib/backend com backend já rejeitado: mantém backend (não há alternativa válida)
+                        if not _picked and (_pt_low in ("lib_ts","lib_cli","lib_plugin") or _pt_low.startswith("backend")):
+                            pm_module = "backend"
+                        # achado #39: mobile com "mobile" já rejeitado não tem alternativa válida —
+                        # mantém mobile (não cai p/ web) e deixa o gate pós-loop bloquear terminalmente
+                        # em vez de seedar backlog vazio → zumbi.
+                        elif not _picked and _pt_low.startswith("mobile"):
+                            pm_module = "mobile"
+                            logger.warning(
+                                "[Pipeline] achado #39: tipo mobile com módulo 'mobile' rejeitado e "
+                                "sem alternativa válida — mantendo mobile (gate pós-loop bloqueará se backlog vazio)."
+                            )
+                    logger.info(
+                        "[Pipeline] pm_module inferido: %s (rodada %s, cache %s)",
+                        pm_module, pm_round, "invalidado" if _cache_invalidated else "miss",
+                    )
+                    # T10: persistir no ctx para próximas rodadas
+                    if pipeline_ctx and hasattr(pipeline_ctx, "current_module"):
+                        pipeline_ctx.current_module = pm_module
+                        try:
+                            pipeline_ctx.save_checkpoint(STATE_DIR)
+                        except Exception as _e_ck:
+                            logger.debug("[T10] save_checkpoint falhou (não crítico): %s", _e_ck)
+                pm_response = call_pm(
+                    spec_ref, charter_summary, request_id,
+                    module=pm_module, engineer_proposal=engineer_summary,
+                    cto_questionamentos=cto_pm_questionamentos,
+                    pipeline_ctx=pipeline_ctx,
+                )
+                _audit_log("pm", request_id, pm_response)
+                # FT-17 fix (2026-07-02): guardar resposta atual para o próximo ciclo detectar
+                # BLOCKED+coherence_check e invalidar o cache de pm_module.
+                _prev_pm_response = pm_response
+                backlog_summary = pm_response.get("summary", "")
+                backlog_artifacts = pm_response.get("artifacts", [])
+                pm_status = pm_response.get("status", "?")
+                logger.info("[Pipeline] PM respondeu (status: %s)", pm_status)
+                if project_id and storage and storage.is_enabled():
+                    storage.write_doc(project_id, "pm", "backlog", _content_for_doc(pm_response), title="Backlog")
+                    for i, art in enumerate(backlog_artifacts):
+                        if not isinstance(art, dict) or not art.get("content"):
+                            continue
+                        path_val = (art.get("path") or "").strip()
+                        content = art.get("content", "")
+                        title = art.get("purpose", f"Artifact {i}")
+                        if path_val.startswith("docs/"):
+                            try:
+                                storage.write_doc_by_path(project_id, "pm", path_val[5:].lstrip("/"), content, title=title)
+                            except Exception as _e:
+                                logger.warning("[Pipeline] write_doc_by_path PM falhou, fallback: %s", _e)
+                                storage.write_doc(project_id, "pm", f"artifact_{i}", content, title=title)
+                        else:
+                            storage.write_doc(project_id, "pm", f"artifact_{i}", content, title=title)
+                _post_step("O CTO está validando o backlog do PM.", request_id)
+                _post_agent_working("cto", "O CTO está validando o backlog.", request_id)
+                # Achado #29 (2026-08-10): o CTO validava o backlog recebendo apenas
+                # `pm_response.summary` (1 parágrafo), NUNCA o BACKLOG.md real do disco
+                # (que tem as tasks TSK-* com aceites DADO/QUANDO/ENTÃO). Resultado: CTO
+                # reprovava backlog COMPLETO por "insuficiência de detalhe" e queimava as
+                # 3 rodadas PM↔CTO num gap de plumbing. Fix: carregar o BACKLOG.md do disco
+                # (autoritativo) e passá-lo ao CTO; cair no summary só se o disco estiver vazio.
+                _backlog_disk = _load_file_from_disk(project_id, f"docs/pm/{pm_module}/BACKLOG.md")
+                if not _backlog_disk:
+                    # Fallbacks: alguns módulos gravam em docs/pm/web/BACKLOG.md ou docs/pm_backlog.md
+                    _backlog_disk = (
+                        _load_file_from_disk(project_id, "docs/pm/web/BACKLOG.md")
+                        or _load_file_from_disk(project_id, "docs/pm_backlog.md")
+                    )
+                _backlog_for_cto = _backlog_disk or backlog_summary
+                if _backlog_disk:
+                    logger.info("[Pipeline] CTO validará BACKLOG.md do disco (%s chars) — não o summary (achado #29)", len(_backlog_disk))
+                else:
+                    logger.warning("[Pipeline] BACKLOG.md não encontrado no disco para pm_module=%s — CTO validará o summary (achado #29 fallback)", pm_module)
+                # T03 (N1): passar engineer_proposal + pm_module_used ao CTO no modo
+                # validate_backlog para que ele possa cruzar a coerência do backlog
+                # com a proposta do Engineer (evita "PM Backend com 0 tasks" ser
+                # aprovado quando Engineer declarou "1 squad Web + 4 tasks").
+                cto_backlog_response = call_cto(
+                    spec_ref, request_id,
+                    engineer_proposal=engineer_summary,
+                    backlog_summary=_backlog_for_cto,
+                    validate_backlog_only=True,
+                    pipeline_ctx=pipeline_ctx,
+                    extra_instruction=(
+                        f"[T03/N1] pm_module_used={pm_module}. "
+                        "Cruze coerência com engineer_stack_proposal.squads[]. "
+                        "Se pm_module divergir de squads[*].module OU se backlog tem 0 tasks "
+                        "quando Engineer declarou target_tasks>0, retorne status: REVISION "
+                        "com pergunta explícita ao PM (não aprovar por LEI 2/no-invent). "
+                        # RFC-0007 F1: o guarda acima só checava PERTINÊNCIA ("o módulo escolhido
+                        # está entre os declarados?") — e por isso aprovou 7 de 7 entregas parciais
+                        # em prod. Falta a pergunta de COBERTURA.
+                        "[RFC-0007] COBERTURA (obrigatório): declare no seu parecer, em campo próprio, "
+                        "`squads_declaradas` e `squads_cobertas_por_este_backlog`. Se houver squad "
+                        "declarada pelo Engineer que ESTE backlog não cobre, diga isso EXPLICITAMENTE "
+                        "e liste quais — não aprove como se o produto estivesse completo. Um projeto "
+                        "hospeda UMA aplicação, então squad não coberta não é defeito deste backlog: "
+                        "é pendência de produto (projeto irmão). Registre como ressalva, não como bloqueio."
+                    ),
+                )
+                cto_backlog_ok = (str(cto_backlog_response.get("status", "")).upper() == "OK")
+                # GAP-P1/Q1: validar LEI 8 antes de aprovar o backlog — se PM gerou tasks com
+                # mais de 3 arquivos estimados, forçar nova rodada com instrução explícita.
+                if cto_backlog_ok and backlog_summary:
+                    try:
+                        from orchestrator.pipeline_context import validate_backlog_tasks_max_files
+                        _lei8_tasks = _get_tasks(project_id) if project_id else []
+                        _lei8_issues = validate_backlog_tasks_max_files(_lei8_tasks) if _lei8_tasks else []
+                        if not _lei8_issues:
+                            # Também verificar no texto do backlog via heurística de arquivos estimados
+                            import re as _re
+                            _estimated = _re.findall(r"estimated_files[^\d]*(\d+)", backlog_summary, _re.IGNORECASE)
+                            _lei8_issues = [f"task com {n} arquivos estimados" for n in _estimated if int(n) > 3]
+                        if _lei8_issues and pm_round < max_cto_pm_rounds:
+                            _post_step(
+                                f"LEI 8 violada: {len(_lei8_issues)} task(s) com mais de 3 arquivos. "
+                                f"PM deve decompor antes de avançar (rodada {pm_round}/{max_cto_pm_rounds}).",
+                                request_id,
+                            )
+                            logger.warning("[GAP-P1] LEI 8: %s — devolvendo ao PM.", _lei8_issues[:3])
+                            cto_backlog_ok = False
+                            cto_pm_questionamentos = (
+                                "BLOCKER LEI 8: as seguintes tasks têm mais de 3 arquivos estimados: "
+                                + str(_lei8_issues[:5])
+                                + ". Decompor cada uma em sub-tasks de no máximo 3 arquivos antes de entregar o backlog."
+                            )
+                            continue
+                    except Exception as _lei8_e:
+                        logger.debug("[GAP-P1] LEI 8 check falhou (não crítico): %s", _lei8_e)
+                if cto_backlog_ok:
+                    # T06 (P12'): gate — se PM aprovou 0 tasks mas spec/charter têm FRs,
+                    # bloquear pipeline. Sem esse gate, o runner segue com backlog vazio
+                    # e o Dev NO-OP infla os custos em ~US$ 2 antes do Cyborg detectar.
+                    # T06-fix (2026-07-02): usar _parse_tasks_from_backlog (lê BACKLOG.md do disco),
+                    # não _get_tasks (só é populado após _seed_tasks, que roda depois deste gate).
+                    try:
+                        _fr_count_total = len(re.findall(r"\bFR-\d+", (spec_content or "") + (charter_summary or ""), re.IGNORECASE))
+                        _tasks_parsed = _parse_tasks_from_backlog(project_id, pm_module) if project_id else []
+                        _tasks_count = len(_tasks_parsed)
+                        # Também detecta backlog textual "0 tasks" (fallback para casos raros).
+                        # FT-18 fix (2026-07-02, OrienteMe V4): "nenhuma task" sem contexto de negação
+                        # dava falso positivo — o PM Web escreveu "Nenhuma task depende de backend"
+                        # (frase legítima descrevendo independência), o regex marcou como declares_zero=True
+                        # e o pipeline bloqueou COM 12 tasks já parseadas. Fix: heurística textual só
+                        # dispara quando `_tasks_count == 0` (fallback puro), nunca quando o parser
+                        # já encontrou tasks reais no BACKLOG.md.
+                        _bl_text = (backlog_summary or "").lower()
+                        _bl_declares_zero = _tasks_count == 0 and any(sig in _bl_text for sig in (
+                            "0 tasks", "trivial (0 tasks)", "nenhuma task foi",
+                            "nenhuma task será", "backlog vazio",
+                            "sem tasks nesta iteração", "modo: trivial (0"
+                        ))
+                        # Considera scope docs-only como exceção legítima
+                        _scope = _read_charter_scope(project_id) if project_id else "code"
+                        if _fr_count_total > 0 and (_tasks_count == 0 or _bl_declares_zero) and _scope in ("code", "mixed"):
+                            _reason_t06 = (
+                                f"[T06-EMPTY-BACKLOG] spec/charter tem {_fr_count_total} FRs mas "
+                                f"backlog aprovado tem {_tasks_count} tasks (scope={_scope}, bl_declares_zero={_bl_declares_zero}). "
+                                f"pm_module_used={pm_module}. Provável divergência Engineer↔PM."
+                            )
+                            logger.error(_reason_t06)
+                            _post_step(
+                                f"BLOCKED — backlog vazio com {_fr_count_total} FRs pendentes. "
+                                f"O PM (módulo={pm_module}) não gerou tasks. Verifique se a squad correta foi acionada.",
+                                request_id,
+                            )
+                            _patch_project({"status": "blocked_backlog_empty_with_frs", "blocked_reason": _reason_t06})
+                            return
+                        logger.info("[T06] gate OK: %d tasks parseadas do BACKLOG (module=%s, FRs=%d)", _tasks_count, pm_module, _fr_count_total)
+                    except Exception as _e_t06:
+                        logger.warning("[T06-EMPTY-BACKLOG] check falhou (não crítico): %s", _e_t06)
+
+                    _post_step("O CTO aprovou o backlog. Acionando a squad.", request_id)
+                    break
+                if pm_round == max_cto_pm_rounds:
+                    _has_pm_artifacts = any(
+                        (a.get("path") or "").strip().startswith("docs/pm/")
+                        for a in (backlog_artifacts or []) if isinstance(a, dict)
+                    )
+                    if _has_pm_artifacts:
+                        _post_step("Máximo de rodadas CTO↔PM atingido. Usando último backlog.", request_id)
+                    else:
+                        _post_step("Máximo de rodadas CTO↔PM atingido. PM não entregou artefatos formais (docs/pm/); usando resumo disponível.", request_id)
+                    break
+                cto_pm_questionamentos = cto_backlog_response.get("summary", "") or _content_for_doc(cto_backlog_response)
+                _post_step("O CTO enviou ajustes ao PM. Nova rodada.", request_id)
+
+            if pipeline_ctx:
+                pipeline_ctx.set_backlog(backlog_summary)
+                emitted = _emit_connect_contracts("backlog", pipeline_ctx, project_id, storage, request_id)
+                if emitted:
+                    _post_step(
+                        "ServiceManifest(s) do Connect emitidos após a aprovação do backlog.",
+                        request_id,
+                    )
+                pipeline_ctx.current_step = 3
+                pipeline_ctx.save_checkpoint(STATE_DIR)
+                # GAP-54b: Engineer e PM já leram — a cobertura de cada um vira artefato aqui, antes de
+                # a run entrar no Monitor Loop (onde Dev/QA acrescentam as próprias linhas).
+                _write_spec_dossier_coverage(project_id, pipeline_ctx, storage)
+        _post_step(
+            f"O PM concluiu a geração do backlog. O módulo está planejado com tarefas e prioridades. Status: {pm_status}.",
+            request_id,
+        )
+        emit_event("module.planned", {"spec_ref": spec_ref, "backlog_summary": backlog_summary[:200]}, request_id)
+        _post_dialogue(
+            "pm", "cto", "module.planned",
+            _get_summary_human("module.planned", "pm", "cto", backlog_summary[:200]),
+            request_id,
+        )
+
+        # ── Gate definitivo pré-seed (achado #39): NUNCA seedar com backlog vazio ──
+        # O gate T06 acima só roda no ramo cto_backlog_ok=True. Quando o loop CTO↔PM
+        # ESGOTA as rodadas com o PM ainda BLOCKED (ex.: coherence_check de módulo — SPEC-19
+        # mobile roteado como web), o pipeline chegava aqui com 0 tasks reais e seedava só o
+        # TSK-FULL-TEST sintético → projeto ZUMBI eterno em "running". Este gate cobre TODOS
+        # os caminhos de saída do loop (OK, max-rounds, resume) antes do _seed_tasks e bloqueia
+        # terminalmente (blocked_backlog_empty_with_frs — não re-despachado), evitando o zumbi.
+        if project_id and _api_available():
+            try:
+                _fr_final = len(re.findall(r"\bFR-\d+", (spec_content or "") + (charter_summary or ""), re.IGNORECASE))
+                _tasks_final = _parse_tasks_from_backlog(project_id, pm_module) or []
+                _scope_final = _read_charter_scope(project_id)
+                if _fr_final > 0 and len(_tasks_final) == 0 and _scope_final in ("code", "mixed"):
+                    _reason_final = (
+                        f"[ACHADO-39 backlog-vazio-pós-loop] spec/charter tem {_fr_final} FRs mas o backlog "
+                        f"parseado tem 0 tasks (module={pm_module}, scope={_scope_final}, pm_status={pm_status}). "
+                        f"Deadlock de módulo (PM BLOCKED por coherence_check e rodadas esgotadas) ou squad errada "
+                        f"convocada. Bloqueio terminal para não seedar TSK-FULL-TEST fantasma → projeto zumbi."
+                    )
+                    logger.error(_reason_final)
+                    _post_step(
+                        f"BLOCKED — backlog sem tasks executáveis para {_fr_final} FRs (módulo={pm_module}). "
+                        "Squad correta não convocada ou deadlock de módulo. Requer intervenção humana.",
+                        request_id,
+                    )
+                    _patch_project({"status": "blocked_backlog_empty_with_frs", "blocked_reason": _reason_final})
+                    if _run_log:
+                        try:
+                            _run_log.stop_run(reason="blocked")
+                        except Exception:
+                            pass
+                    return
+            except Exception as _e_final:
+                logger.warning("[ACHADO-39] gate pós-loop de backlog vazio falhou (não crítico): %s", _e_final)
+
+        # ── RFC-0007 F1: declarar as squads que ficaram de fora ────────
+        # O módulo desta run já está fechado aqui. Se o Engineer declarou mais de uma squad,
+        # o que não vai ser entregue precisa aparecer ANTES do Monitor Loop — e ficar no
+        # checkpoint, para o `product_ready` repetir a pendência no fim.
+        try:
+            _squads_decl = _parse_squads_yaml(engineer_summary or "")
+            if pipeline_ctx is not None and _squads_decl:
+                pipeline_ctx.squads_declared = _squads_decl
+                try:
+                    pipeline_ctx.save_checkpoint(STATE_DIR)
+                except Exception as _e_sq_ck:
+                    logger.debug("[RFC-0007] save_checkpoint das squads falhou (não crítico): %s", _e_sq_ck)
+            _declarar_squads_pendentes(_squads_decl, pm_module, request_id)
+        except Exception as _e_sq:
+            logger.warning("[RFC-0007] declaração de squads pendentes falhou (não crítico): %s", _e_sq)
+
+        # ── Fase 2: Monitor Loop (quando API e PROJECT_ID definidos) ───
+        if project_id and _api_available():
+            _post_step(
+                "Squad criada. Iniciando Monitor Loop: Dev/QA/DevOps serão acionados até você aceitar o projeto ou parar.",
+                request_id,
+            )
+            seed_ok = _seed_tasks(project_id, pm_module=pm_module,
+                                  card_id=getattr(pipeline_ctx, "card_id", None) if pipeline_ctx else None,
+                                  origin_spec_file=getattr(pipeline_ctx, "origin_spec_file", None) if pipeline_ctx else None)
+            # Evoluir bloco 2 H6: tasks DONE do pai entram como HERDADAS (TSK-INH-*, status DONE) — visíveis no
+            # portal como "já entregues na versão anterior", fora do contador de progresso e do Dev/QA.
+            if seed_ok and _is_evolution and _parent_project_id_evo:
+                try:
+                    _already_inh = bool(_inherited_task_ids(project_id))  # restart: upsert é idempotente, a mensagem não
+                    _n_inh = _inherit_parent_tasks(project_id, _parent_project_id_evo)
+                    if _n_inh and not _already_inh:
+                        _post_step(f"Evolução: {_n_inh} task(s) da versão anterior herdadas como concluídas (TSK-INH-*).", request_id)
+                    if _n_inh:
+                        # C8 (AV): registra SEMPRE (idempotente). Antes só na 1ª vez: kill entre o POST da herança e o
+                        # checkpoint deixava as TSK-INH fora de `completed_tasks` para sempre na retomada.
+                        _register_inherited_completed(project_id, pipeline_ctx)
+                except Exception as _e_inh:
+                    logger.warning("[H6] herança de tasks do pai falhou (não crítico): %s", _e_inh)
+            if not seed_ok:
+                # Verificar se as tasks foram criadas mesmo com erro (upsert parcial)
+                # Isso acontece quando ON CONFLICT DO UPDATE falha em alguma task mas outras são inseridas.
+                _existing_tasks = _get_tasks(project_id)
+                if _existing_tasks:
+                    logger.warning("[Monitor Loop] _seed_tasks retornou False mas %d tasks já existem — continuando.", len(_existing_tasks))
+                    seed_ok = True
+                    if _a4_rule_applies("SEED_PARTIAL_STRICT", project_id, pipeline_ctx) and not _seed_is_complete(project_id, pm_module, _existing_tasks):
+                        # C9 (AV): backlog PARCIAL não segue em silêncio (filho de card): tenta o seed de novo uma vez.
+                        seed_ok = _seed_tasks(project_id, pm_module=pm_module,
+                                              card_id=getattr(pipeline_ctx, "card_id", None) if pipeline_ctx else None,
+                                              origin_spec_file=getattr(pipeline_ctx, "origin_spec_file", None) if pipeline_ctx else None)
+                        if not seed_ok:
+                            _post_error("Seed do backlog ficou PARCIAL (tasks do BACKLOG.md ausentes na API).", request_id, None)
+                            _patch_project({"status": "failed"})
+                else:
+                    _post_error("Falha ao criar tarefas iniciais na API.", request_id, None)
+                    _patch_project({"status": "failed"})
+            if seed_ok:
+                # GAP-NEW-3: PM rodou completo mas complexity_hint=trivial → PM gerou N tasks
+                # quando deveria ter gerado 1. Consolidar em 1 task única antes do Monitor Loop
+                # para evitar 7 tasks para uma landing page estática.
+                _hint_after_pm = _extract_complexity_hint(charter_summary) or ("trivial" if _pre_trivial_detected else "")
+                if _hint_after_pm == "trivial" and project_id and _api_available():
+                    _all_pm_tasks = _get_tasks(project_id)
+                    _active_pm_tasks = _active_pm_tasks_for_consolidation(_all_pm_tasks)
+                    _card_id_cons = _card_link_args(pipeline_ctx)[0]
+                    if not _may_consolidate_trivial(_active_pm_tasks, _card_id_cons) and _active_pm_tasks and _card_id_cons:
+                        # AH-A3: filho de card — as tasks ligadas ao card nunca são descartadas pela consolidação.
+                        logger.info("[GAP-NEW-3] filho de card: consolidação em TSK-TRIVIAL-001 pulada (%d task(s) ligadas ao card).", len(_active_pm_tasks))
+                    elif not _card_id_cons and _active_pm_tasks and (
+                            _may_consolidate_trivial(_active_pm_tasks, None) or _trivial_consolidation_pending(_all_pm_tasks)):
+                        _post_step(
+                            f"Complexidade trivial com {len(_active_pm_tasks)} tasks do PM — consolidando em 1 task para evitar overhead desnecessário.",
+                            request_id,
+                        )
+                        _bs_cons = _consolidate_trivial_tasks(project_id, _all_pm_tasks, _active_pm_tasks, pm_module,
+                                                              charter_summary, _card_link_args(pipeline_ctx))
+                        if _bs_cons:
+                            backlog_summary = _bs_cons
                 _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id, pipeline_ctx=pipeline_ctx, run_log=_run_log)
                 # Após o Monitor Loop, marcar projeto como completed se todas as tasks estiverem DONE.
                 # Sem isso o portal fica mostrando status=running mesmo com tudo concluído.

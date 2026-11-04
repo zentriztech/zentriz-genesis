@@ -160,7 +160,8 @@ def test_d3_runner_usa_o_helper_no_ramo_manual():
 # ───────────────────────── D-4: baseline P2P ─────────────────────────
 
 def _ctx(bl):
-    return SimpleNamespace(evolution_baseline=bl)
+    # A-4 (AV): a exigência de baseline medida vale para filho de card
+    return SimpleNamespace(evolution_baseline=bl, is_card_child=True, card_id=None)
 
 
 def test_d4_baseline_com_erro_reprova_alto(monkeypatch):
