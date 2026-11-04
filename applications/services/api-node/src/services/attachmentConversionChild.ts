@@ -8,9 +8,24 @@
  * Sem rede: `fetch` é substituído por um erro e as bibliotecas da rota de texto não abrem sockets. ISOLAMENTO DE REDE REAL
  * é do container (sem egress) — nem processo filho nem Node 20 o garantem.
  */
+import Module from "module";
 import { convertBuffer, ConversionError, type ConvertMeta, type ConversionLimits } from "./attachmentConverters.js";
 
 interface Header { ext: string; meta: Omit<ConvertMeta, "now"> & { now: string }; limits: ConversionLimits }
+
+/**
+ * S-15: a extração de TEXTO do pdf.js não precisa do binário nativo `@napi-rs/canvas` (só usado para polyfill de
+ * DOMMatrix/ImageData/Path2D e para renderizar). Aqui ele NÃO é carregado (menos código nativo no processo que lê PDF
+ * hostil, e o carregamento reserva muito espaço de endereçamento sob `ulimit -v`); os três globais viram stubs inertes.
+ */
+const g = globalThis as Record<string, unknown>;
+for (const n of ["DOMMatrix", "ImageData", "Path2D"]) if (!g[n]) g[n] = class {};
+const mod = Module as unknown as { _resolveFilename: (request: string, ...rest: unknown[]) => string };
+const resolveOrig = mod._resolveFilename;
+mod._resolveFilename = function (this: unknown, request: string, ...rest: unknown[]): string {
+  if (request.startsWith("@napi-rs/canvas")) throw new Error("módulo nativo de canvas desabilitado na conversão de texto");
+  return resolveOrig.call(this, request, ...rest);
+};
 
 (globalThis as { fetch?: unknown }).fetch = () => { throw new Error("rede desabilitada no processo de conversão"); };
 
