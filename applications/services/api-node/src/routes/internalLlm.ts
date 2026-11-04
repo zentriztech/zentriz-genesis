@@ -104,7 +104,13 @@ export async function internalLlmRoutes(app: FastifyInstance): Promise<void> {
         // o slot ESCOLHIDO no topo (nenhum consumidor existente muda), com a fila completa em
         // `candidates` — campo aditivo que o Cyborg e o runner usam para cair para a contingência
         // sem voltar aqui. Cada item traz o envelope INTEIRO: trocar de slot troca de credencial.
-        const [cfg, ...contingencias] = await resolveProjectLlmCandidates(projectId, { strategy });
+        const [cfg0, ...contingencias0] = await resolveProjectLlmCandidates(projectId, { strategy });
+        // `byoc_exempt` (tenants.byoc_exempt) viaja em snake_case, como flag booleana do slot: é o que
+        // autoriza o EXECUTOR a usar a conta da Zentriz (IMDS) para slot Bedrock sem chave. Estrito
+        // `=== true` (qualquer outra coisa ⇒ false, fail-closed). Sem segredo novo.
+        const withFlag = ({ byocExempt, ...rest }: typeof cfg0) => ({ ...rest, byoc_exempt: byocExempt === true });
+        const cfg = withFlag(cfg0);
+        const contingencias = contingencias0.map(withFlag);
         // Nunca retornar api_key completa — runner_server injeta via env, não via response body
         // Mas aqui sim retornamos tudo pois é chamada interna server-to-server (não browser)
         return reply.send({

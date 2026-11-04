@@ -3257,6 +3257,12 @@ def _project_id() -> str | None:
     return os.environ.get("PROJECT_ID")
 
 
+def _byoc_exempt_do_run() -> bool:
+    """O tenant deste run é `byoc_exempt`? Fonte: `GENESIS_LLM_BYOC_EXEMPT`, que `runner_server`
+    escreve a partir de `GET /api/internal/project-llm-config`. Só o literal "1" vale (fail-closed)."""
+    return os.environ.get("GENESIS_LLM_BYOC_EXEMPT", "").strip() == "1"
+
+
 def _llm_envelope_do_run() -> dict:
     """Envelope de LLM DESTE run — provider, modelo e credencial.
 
@@ -5929,6 +5935,9 @@ Execute agora sem pedir confirmação.
                                 "api_key":      os.environ.get("CLAUDE_API_KEY", ""),
                                 "llm_config":   _llm_envelope_do_run(),
                                 "model_id":     os.environ.get("CLAUDE_MODEL", ""),
+                                # tenants.byoc_exempt (escrito por runner_server a partir da API): único
+                                # caso em que o executor roda slot Bedrock SEM chave na conta da Zentriz.
+                                "byoc_exempt":  _byoc_exempt_do_run(),
                             }
                             _post_step("🤖 TASK-FULL-TEST: Claude Code Agent iniciado via full-test-server.", request_id)
                             _update_task(project_id, "TSK-FULL-TEST", status="IN_PROGRESS")

@@ -67,6 +67,12 @@ export interface ResolvedLlmConfig {
   isDefault:           boolean;
   priority:            number;
   /**
+   * `tenants.byoc_exempt` do dono do slot (mesma fonte de `slotUsability`). Viaja ao runner/executor
+   * para que um slot Bedrock SEM chave só rode na identidade do host (instance role/IMDS) quando o
+   * tenant foi isentado EXPLICITAMENTE por `zentriz_admin`. Não é segredo; presente SÓ quando `true` (ausente ⇒ `false`).
+   */
+  byocExempt?:         boolean;
+  /**
    * 2A.3 — modelos por papel do slot. Presente SOMENTE com `LLM_ROLES_MODE != off`; com `off` o
    * objeto resolvido é byte-idêntico ao anterior. Na transição as colunas legadas são as
    * autoritativas (Orchestrator = model_id, Advisor = model_id_fallback normalizado, Staff = coluna
@@ -473,6 +479,8 @@ function toResolved(cfg: TenantLlmConfig): ResolvedLlmConfig {
     azureApiVersion:    c.api_version,
     isDefault:          false,
     priority:           cfg.priority,
+    // Só aparece quando `true`: o objeto de tenant comum segue byte-idêntico ao anterior (contrato `LLM_ROLES_MODE=off`).
+    ...(cfg.byocExempt === true ? { byocExempt: true } : {}),
     ...(cfg.roleModels ? { models: cfg.roleModels } : {}),
     ...(cfg.roleModels && rolesRoutingOn() ? { roles_contract_version: ROLES_CONTRACT_VERSION } : {}),
   };

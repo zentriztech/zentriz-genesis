@@ -484,6 +484,19 @@ Escopo da frente `evo/r2` (api-node). O que é do orchestrator/`scripts/` é da 
 
 Efeito em quem sobe o FTS: **reiniciar o FTS com o código novo e sem `FTS_BIND` faz o servidor escutar só no loopback** e o runner (container) passa a levar `Connection refused`, como na 4.5. Suba com `scripts/dev/start-fts.sh` ou defina `FTS_BIND` no `EnvironmentFile`. A AY **não** reiniciou o FTS em execução.
 
+### 11.4 Executor × slot: `byoc_exempt` × chaves próprias (T1)
+
+O `TSK-FULL-TEST` (e `/cyborg-build`, `/cyborg-engineer`) roda o `claude` no host pelo `full-test-server`, que se roteia **pelo slot do tenant** (LEI dos slots). Regra:
+
+| Slot | Tenant | Resultado no executor |
+|---|---|---|
+| Bedrock **com** `aws_access_key_id`/`aws_secret_access_key` | qualquer | Roda com as chaves do slot (conta do tenant), região e modelos do slot |
+| Bedrock **sem** chaves | `byoc_exempt = true` | Roda com `CLAUDE_CODE_USE_BEDROCK=1`, região e modelos do slot e **sem chaves**: a cadeia padrão do AWS SDK (IMDS do host) resolve a credencial = **conta da Zentriz**. Log e resposta (`llm_slot`) dizem `executando na conta da Zentriz (tenant byoc_exempt)` |
+| Bedrock **sem** chaves | **não** isento | Recusado (fail-closed): `502` no `TSK-FULL-TEST`, motivo "habilite byoc_exempt ou cadastre chaves no slot do tenant" |
+| Bedrock com chave **parcial** (só metade do par, ou só session token) | qualquer | Recusado: é slot mal configurado, não isenção |
+
+Como a flag chega: `tenants.byoc_exempt` → `GET /api/internal/project-llm-config/:id` (campo `byoc_exempt`, estrito `true`) → `runner_server` (`GENESIS_LLM_BYOC_EXEMPT=1` no env do run, sempre reescrito) → corpo do `/run-full-test` e do `/cyborg-engineer` → `_cli_env_from_slot(..., byoc_exempt=)`. A probe real do slot continua obrigatória antes da sessão longa. Só `zentriz_admin` liga a isenção (`PATCH /api/tenants/:id`); ela é decisão explícita e auditável, não um default. Detalhe e evidência: [`EVOLUIR-PROJETO-AZ`](../analysis/EVOLUIR-PROJETO-AZ-executor-slot-byoc-exempt.md).
+
 ## 12. Decisões e assunções
 
 **Decisões do Jean (2026-11-04), tabela do plano §8:**

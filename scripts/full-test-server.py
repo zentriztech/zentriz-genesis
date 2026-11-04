@@ -307,8 +307,21 @@ def _build_cyborg_sandbox_env(project_id: str, prod_id: str, model_id: str,
 # sessão de 30-60 min nele, e caem para a próxima contingência quando o slot não responde.
 # ═══════════════════════════════════════════════════════════════════════════
 
+ZENTRIZ_ACCOUNT_NOTE = "executando na conta da Zentriz (tenant byoc_exempt)"
+
+
+def _bedrock_uses_host_identity(llm: dict, byoc_exempt: bool) -> bool:
+    """Slot Bedrock SEM nenhuma credencial própria + tenant `byoc_exempt` estrito (`is True`) ⇒ a
+    identidade é a do HOST (instance role/IMDS = conta da Zentriz). Chave parcial (só uma metade do
+    par, ou só session token) NÃO conta: é slot mal configurado, não isenção — fail-closed."""
+    if (llm.get("provider") or "").strip().lower() != "bedrock" or byoc_exempt is not True:
+        return False
+    return not any((llm.get(k) or "").strip() for k in
+                   ("aws_access_key_id", "aws_secret_access_key", "aws_session_token"))
+
+
 def _cli_env_from_slot(llm: dict, model_id: str = "", fallback_id: str = "",
-                       creds_dir: str = "") -> dict | None:
+                       creds_dir: str = "", byoc_exempt: bool = False) -> dict | None:
     """Roteamento do `claude` CLI para a identidade do slot. `None` ⇒ slot inutilizável AQUI.
 
     Devolve `None` (e não um env parcial) em três casos, todos deliberados:
@@ -317,6 +330,10 @@ def _cli_env_from_slot(llm: dict, model_id: str = "", fallback_id: str = "",
       executor, e por isso é PULADO em vez de derrubar o job.
     - **slot sem credencial própria** (bedrock/anthropic "legado"): rodar assim é rodar no
       instance role da Zentriz. É exatamente a fatura que a LEI proíbe.
+      ÚNICA exceção, explícita e auditável: slot **Bedrock** sem chaves de um tenant
+      `byoc_exempt` (migration 069; só `zentriz_admin` liga — mesma regra de `slotUsability` na API).
+      Aí o env sai com `CLAUDE_CODE_USE_BEDROCK=1`, região e modelos DO SLOT e SEM chaves: a cadeia
+      padrão do AWS SDK (IMDS do host) é a conta da Zentriz. Tenant não isento segue recusado.
     - **Vertex sem diretório temporário**: a service account precisa virar arquivo em disco
       (`GOOGLE_APPLICATION_CREDENTIALS` é um caminho), e ele tem de ser apagado depois.
     """
@@ -328,15 +345,20 @@ def _cli_env_from_slot(llm: dict, model_id: str = "", fallback_id: str = "",
     if prov == "bedrock":
         key = (llm.get("aws_access_key_id") or "").strip()
         sec = (llm.get("aws_secret_access_key") or "").strip()
-        if not key or not sec:
-            return None
         region = (llm.get("aws_region") or "us-east-1").strip()
-        out.update({"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_ACCESS_KEY_ID": key,
-                    "AWS_SECRET_ACCESS_KEY": sec,
-                    "AWS_REGION": region, "AWS_DEFAULT_REGION": region})
-        tok = (llm.get("aws_session_token") or "").strip()
-        if tok:
-            out["AWS_SESSION_TOKEN"] = tok
+        if not key or not sec:
+            if not _bedrock_uses_host_identity(llm, byoc_exempt):
+                return None
+            # Sem chaves de propósito: o IMDS do host resolve a credencial (conta da Zentriz).
+            out.update({"CLAUDE_CODE_USE_BEDROCK": "1",
+                        "AWS_REGION": region, "AWS_DEFAULT_REGION": region})
+        else:
+            out.update({"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_ACCESS_KEY_ID": key,
+                        "AWS_SECRET_ACCESS_KEY": sec,
+                        "AWS_REGION": region, "AWS_DEFAULT_REGION": region})
+            tok = (llm.get("aws_session_token") or "").strip()
+            if tok:
+                out["AWS_SESSION_TOKEN"] = tok
     elif prov == "anthropic":
         key = (llm.get("api_key") or "").strip()
         if not key:
@@ -391,7 +413,7 @@ def _cli_env_from_slot(llm: dict, model_id: str = "", fallback_id: str = "",
     return out
 
 
-def _slot_unusable_reason(llm: dict, model: str = "") -> str:
+def _slot_unusable_reason(llm: dict, model: str = "", byoc_exempt: bool = False) -> str:
     """N-7 (4.5b) — POR QUE um slot "não dirige o executor". Mesma árvore de decisão de `_cli_env_from_slot`,
     só que devolvendo o motivo acionável (sem segredo). Causa-raiz do 502 do `/run-full-test` no dev: o slot
     Bedrock do tenant chegou SEM `aws_access_key_id`/`aws_secret_access_key` (o runner só os repassa se estiverem
@@ -403,8 +425,15 @@ def _slot_unusable_reason(llm: dict, model: str = "") -> str:
         return "slot sem provider/modelo"
     if prov == "bedrock":
         if not (llm.get("aws_access_key_id") or "").strip() or not (llm.get("aws_secret_access_key") or "").strip():
-            return ("slot Bedrock sem credencial própria (aws_access_key_id/aws_secret_access_key ausentes — "
-                    "instance role do host é proibida pela LEI dos slots); cadastre as chaves no slot do tenant")
+            if _bedrock_uses_host_identity(llm, byoc_exempt):
+                return "credencial do slot inutilizável"
+            if byoc_exempt is True:
+                return ("slot Bedrock com credencial PARCIAL (só metade de aws_access_key_id/aws_secret_access_key "
+                        "ou só session token) — complete o par ou remova as chaves do slot; a isenção byoc_exempt "
+                        "só vale para slot sem nenhuma chave")
+            return ("slot Bedrock sem credencial própria (aws_access_key_id/aws_secret_access_key ausentes) e "
+                    "tenant NÃO isento — a instance role do host é proibida pela LEI dos slots: habilite "
+                    "byoc_exempt (zentriz_admin, PATCH /api/tenants/:id) ou cadastre chaves no slot do tenant")
     elif prov == "anthropic":
         if not (llm.get("api_key") or "").strip():
             return "slot Anthropic sem api_key"
@@ -441,14 +470,21 @@ def _slot_cli_attempts(payload: dict, creds_dir: str = "", skipped: list | None 
         if chave in vistos:
             continue
         vistos.add(chave)
-        env = _cli_env_from_slot(llm, model, fb, creds_dir)
+        exempt = payload.get("byoc_exempt") is True or llm.get("byoc_exempt") is True
+        env = _cli_env_from_slot(llm, model, fb, creds_dir, byoc_exempt=exempt)
         if env is None:
-            _why = _slot_unusable_reason(llm, model)
+            _why = _slot_unusable_reason(llm, model, byoc_exempt=exempt)
             log.warning(f"[slot] {prov or '?'}/{model or '?'} não dirige o executor — pulado: {_why}")
             if skipped is not None:
                 skipped.append(f"{prov or '?'}/{model or '?'}: {_why}")
             continue
-        out.append((env, f"{prov}/{model}"))
+        label = f"{prov}/{model}"
+        if _bedrock_uses_host_identity(llm, exempt):
+            # Decisão explícita e auditável: vai ao log e ao `llm_slot` da resposta/diálogo.
+            label = f"{label} [{ZENTRIZ_ACCOUNT_NOTE}]"
+            log.warning(f"[slot] {prov}/{model}: {ZENTRIZ_ACCOUNT_NOTE} — slot Bedrock sem chaves, "
+                        "identidade do host (IMDS)")
+        out.append((env, label))
     return out
 
 

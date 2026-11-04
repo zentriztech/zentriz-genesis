@@ -39,10 +39,14 @@ vi.mock("../db/client.js", () => ({
 // FILA de slots; o 1º continua sendo o corpo da resposta e a fila inteira vai em `candidates`.
 // Cada contingência traz credencial PRÓPRIA — daí o `KEY-FOR-...-alt`, que prova que a chave do
 // slot 2 não é a do slot 1.
-const fila = vi.hoisted(() => ({ contingencias: [] as Record<string, unknown>[] }));
+const fila = vi.hoisted(() => ({
+  contingencias: [] as Record<string, unknown>[],
+  // `byocExempt` do slot ESCOLHIDO, como `resolveProjectLlmCandidates` o devolve (tenants.byoc_exempt).
+  byocExempt: undefined as unknown,
+}));
 vi.mock("../services/tenantLlmConfig.js", () => ({
   resolveProjectLlmCandidates: async (projectId: string) => [
-    { provider: "openai", modelId: "gpt-4o", apiKey: `KEY-FOR-${projectId}` },
+    { provider: "openai", modelId: "gpt-4o", apiKey: `KEY-FOR-${projectId}`, byocExempt: fila.byocExempt },
     ...fila.contingencias,
   ],
   resolveProjectLlmConfig: async (projectId: string) => ({
@@ -76,6 +80,7 @@ beforeEach(() => {
   projectOwnerTenant = TENANT;
   cyborgProjectRow = { tenant_id: TENANT, created_by: "owner-1", owner_email: "owner@x", owner_role: "user" };
   fila.contingencias = [];
+  fila.byocExempt = undefined;
 });
 
 function get(projectId: string, token: string, header: "x-internal-token" | "authorization" = "x-internal-token") {
@@ -142,6 +147,33 @@ describe("GET /api/internal/project-llm-config/:projectId — binding por projet
     expect(cands).toHaveLength(2);
     // Trocar de slot troca de CREDENCIAL — é isso que faz a fatura ser do tenant certo.
     expect(cands[1]).toMatchObject({ provider: "bedrock", apiKey: "KEY-ALT" });
+  });
+
+  it("T1 byoc_exempt: tenant isento ⇒ `byoc_exempt: true` no corpo e em cada candidato (snake_case, sem camelCase duplicado)", async () => {
+    fila.byocExempt = true;
+    fila.contingencias = [{ provider: "bedrock", modelId: "m2", apiKey: "", byocExempt: true }];
+    const res = await get(PROJECT, STATIC_TOKEN);
+    expect(res.statusCode).toBe(200);
+    const j = res.json();
+    expect(j.byoc_exempt).toBe(true);
+    expect(j.byocExempt).toBeUndefined();
+    expect((j.candidates as Record<string, unknown>[]).map((c) => c.byoc_exempt)).toEqual([true, true]);
+  });
+
+  it("T1 byoc_exempt: tenant NÃO isento (ou flag ausente/não-booleana) ⇒ `false` (fail-closed)", async () => {
+    for (const v of [false, undefined, "true", 1]) {
+      fila.byocExempt = v;
+      const res = await get(PROJECT, STATIC_TOKEN);
+      expect(res.json().byoc_exempt).toBe(false);
+    }
+  });
+
+  it("T1 byoc_exempt: cross-tenant — token de run de OUTRO projeto continua 403 e NÃO vaza a flag", async () => {
+    fila.byocExempt = true;
+    const token = signToken({ sub: "u1", email: "u@x", role: "user", tenantId: OTHER_TENANT, svc: "runner", projectId: OTHER_PROJECT }, "1h");
+    const res = await get(PROJECT, token);
+    expect(res.statusCode).toBe(403);
+    expect(JSON.stringify(res.json())).not.toContain("byoc_exempt");
   });
 
   it("token de run escopado usado em rota do próprio projeto via Authorization header → 200", async () => {

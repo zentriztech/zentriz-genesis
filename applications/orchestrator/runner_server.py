@@ -451,6 +451,13 @@ def run(body: RunBody):
 
                 env["GENESIS_LLM_PROVIDER"] = _effective_provider
                 env["CLAUDE_MODEL"]          = _model_id
+                # tenants.byoc_exempt: decisão explícita (zentriz_admin) de que este tenant roda na
+                # conta da Zentriz. Viaja ao executor (TSK-FULL-TEST) via runner.py. Só `True` estrito;
+                # nunca herdado do env do container (sempre reescrito aqui).
+                if _llm_cfg.get("byoc_exempt") is True:
+                    env["GENESIS_LLM_BYOC_EXEMPT"] = "1"
+                else:
+                    env.pop("GENESIS_LLM_BYOC_EXEMPT", None)
                 if _roles_on:
                     # 2A.5: envs de TRANSPORTE (não de escolha) do contrato por papel; sem credencial por
                     # papel (os 3 papéis usam a credencial do slot injetada abaixo).

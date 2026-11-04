@@ -225,6 +225,9 @@ def _resolve_slot_llm(project_id: str) -> dict:
         "model_id_fallback": (cfg.get("fallbackModelId") or "").strip(),
         "llm_config": llm,
         "llm_candidates": cands if len(cands) > 1 else [],
+        # `tenants.byoc_exempt` (API): só com `True` estrito o executor pode rodar slot Bedrock SEM
+        # chave na conta da Zentriz. Qualquer outro valor/ausência ⇒ False (fail-closed).
+        "byoc_exempt": cfg.get("byoc_exempt") is True,
         # Auditoria da escolha (sem credencial): QUAL slot venceu, por quê, e a lista de ids
         # cadastrados. `slot_models` é o que autoriza (ou não) o override `CYBORG_V3_MODEL`.
         "selection_why": str(_sel.get("why") or ""),
@@ -289,10 +292,16 @@ def _rework_attempt_plan(att: int, *, feature_mode: bool, model_id: str, fallbac
     return model, {"llm_role": "advisor", "effective_role": "orchestrator"}
 
 
-def _slot_body_fields(model_id: str = "") -> dict:
-    """Campos de LLM a espalhar no corpo de `/invoke/raw` — modelo E credenciais do slot."""
+def _slot_body_fields(model_id: str = "", for_executor: bool = False) -> dict:
+    """Campos de LLM a espalhar no corpo de `/invoke/raw` — modelo E credenciais do slot.
+
+    `for_executor=True` (corpo do full-test-server) acrescenta `byoc_exempt` do tenant: é a decisão
+    explícita que deixa o executor usar a conta da Zentriz para slot Bedrock sem chave. Fica fora do
+    corpo de `/invoke/raw` (os agents decidem isso por conta própria, via API)."""
     env = _SLOT_LLM.get() or {}
     out: dict = {}
+    if for_executor:
+        out["byoc_exempt"] = env.get("byoc_exempt") is True
     if env.get("llm_config"):
         out["llm_config"] = env["llm_config"]
     _m = (model_id or env.get("model_id") or "").strip()
@@ -942,7 +951,7 @@ Comece analisando o audit (via `zentriz-audit {project_id}`) e o estado atual do
         # modelo do tenant e o rodava com a identidade do host (instance role da EC2 da Zentriz).
         # Agora vai o envelope inteiro — provider, credencial e a fila de contingências —, e é o
         # FTS quem testa slot a slot antes de gastar a sessão longa.
-        **_slot_body_fields(model_id),
+        **_slot_body_fields(model_id, for_executor=True),
     }
 
     # LLM GUARD: a sessão longa do `claude` no executor é a chamada mais cara do Cyborg — licença
