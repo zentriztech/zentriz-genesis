@@ -13,6 +13,7 @@
 
 import { pool } from "../../db/client.js";
 import { getInstallationTokenForClone, repoShortName } from "../github.js";
+import { safeErrorMessage } from "../../lib/redactSecrets.js";
 import { signDeployCallbackToken } from "../../auth.js";
 import { resolveAwsCredentials } from "./awsCredentials.js";
 import { resolveDeployCredentials } from "./deployCredentials.js";
@@ -119,7 +120,7 @@ export async function deployBackendCloud(req: BackendDeployRequest): Promise<Bac
       permissions: { contents: "read" },
     });
   } catch (err) {
-    await setStatus(row.id, "failed", `installation token error: ${err instanceof Error ? err.message : String(err)}`);
+    await setStatus(row.id, "failed", `installation token error: ${safeErrorMessage(err)}`);
     return { ok: false, code: "GITHUB_TOKEN_ERROR",
       message: "Não foi possível gerar token de acesso ao GitHub para clonar o repositório." };
   }

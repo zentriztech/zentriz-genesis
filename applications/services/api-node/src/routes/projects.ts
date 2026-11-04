@@ -1,4 +1,4 @@
-import { attachmentsStrict, classifyAttachment } from "../services/ticketAttachments.js";
+import { attachmentsStrictEnabled, classifyAttachment } from "../services/ticketAttachments.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readFile, writeFile, readdir, stat } from "fs/promises";
 import path from "path";
@@ -37,6 +37,7 @@ import { costUsd, priceCaseSql } from "../lib/modelPricing.js";
 import { getProjectSpendUsd, getTenantMonthSpendUsd, resolveTenantMonthlyBudgetUsd } from "../services/tenantCostCap.js";
 import { emitValueEvent } from "../services/valueEvents.js";
 import { recordProjectOutcome } from "../services/skillFeedback.js";
+import { redactSecrets, safeErrorMessage } from "../lib/redactSecrets.js";
 import { llmRolesMode, normalizeLlmRole } from "../lib/llmRoles.js";
 import {
   evolutionRequestHeader, loadTicket, materializeTicketIntoSpecTree, reopenTicketsOfChild,
@@ -3251,7 +3252,7 @@ export async function projectRoutes(app: FastifyInstance) {
         // Tarefa 1.5 (ATTACHMENTS_STRICT=on): anexos de card não-texto (pdf/doc/docx/png/…) NÃO são arquivos de spec.
         // Linhas legadas em `tickets/TK-*/anexos` com extensão fora de txt/md saem desta lista; os anexos do card
         // têm listagem própria (GET /api/projects/:id/ticket-attachments).
-        if (attachmentsStrict()) {
+        if (await attachmentsStrictEnabled(client, (row as { tenant_id?: string | null }).tenant_id ?? null)) {
           return reply.send((rows as Array<{ filename: string; relDir: string | null }>).filter((r) =>
             !/^tickets\/[^/]+\/anexos$/.test(r.relDir ?? "") || classifyAttachment(r.filename) === "spec_text"));
         }
@@ -3698,9 +3699,11 @@ export async function projectRoutes(app: FastifyInstance) {
           }
         }
       } catch (err) {
-        evolutionSourceError = err instanceof Error ? err.message : String(err);
-        request.log.warn({ err, childId }, "[evolve] Falha ao preparar o código do filho");
+        // M-01: a mensagem vai para `projects.extra`, a resposta HTTP e o log — nunca com segredo (token/Authorization).
+        evolutionSourceError = safeErrorMessage(err);
+        request.log.warn({ err: evolutionSourceError, childId }, "[evolve] Falha ao preparar o código do filho");
       }
+      if (evolutionSourceError) evolutionSourceError = redactSecrets(evolutionSourceError); // M-01: última barreira antes de gravar/responder
       await client.query(
         `UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1`,
         [childId, JSON.stringify({ evolution_source: evolutionSource, evolution_source_error: evolutionSourceError, evolution_inherited_files: inherited, evolution_inherited_spec: inheritedSpec })],

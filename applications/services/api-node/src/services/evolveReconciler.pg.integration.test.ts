@@ -372,6 +372,11 @@ describePg("Fase 1' / 1.8 — reconciliador do /evolve (banco descartável)", ()
     const c = await mkClaim({ steps: { code: { source: "none" } } });
     await run("on");
     const url = "/api/admin/evolve-reconciler/findings";
+    // M-19: com o reconciliador off a rota não existe (404), mas a autorização vem primeiro (tenant_admin segue 403).
+    const adminHdr = { authorization: "Bearer x", "x-test-role": "zentriz_admin" };
+    expect((await app.inject({ method: "GET", url, headers: adminHdr })).statusCode).toBe(404);
+    expect((await app.inject({ method: "GET", url, headers: { authorization: "Bearer x", "x-test-role": "tenant_admin" } })).statusCode).toBe(403);
+    process.env.EVOLVE_RECONCILER = "shadow"; // modo efetivo (M-03: config global > env > off) — aqui pelo env
     const noAuth = await app.inject({ method: "GET", url });
     const tenant = await app.inject({ method: "GET", url, headers: { authorization: "Bearer x", "x-test-role": "tenant_admin" } });
     const svc = await app.inject({ method: "GET", url, headers: { authorization: "Bearer x", "x-test-role": "zentriz_admin", "x-test-svc": "runner" } });
@@ -383,6 +388,7 @@ describePg("Fase 1' / 1.8 — reconciliador do /evolve (banco descartável)", ()
     expect(ok.body).not.toContain(c.childId);
     const byKind = JSON.parse((await app.inject({ method: "GET", url: `${url}?kind=uniqueness_index_missing&open=false`, headers: { authorization: "Bearer x", "x-test-role": "zentriz_admin" } })).body);
     expect(byKind.findings.every((f: { kind: string }) => f.kind === "uniqueness_index_missing")).toBe(true);
+    delete process.env.EVOLVE_RECONCILER;
     ev("endpoint", { codes: [noAuth.statusCode, tenant.statusCode, svc.statusCode, ok.statusCode], achadosDoProjeto: body.findings.length });
   });
 

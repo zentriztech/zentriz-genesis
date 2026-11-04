@@ -5,24 +5,20 @@
  * `on`  = claim curto/transacional com advisory lock por linhagem + passos idempotentes fora da
  *         transação + orçamento herdado do dono da versão corrente (services/evolveClaim.ts).
  *
- * Resolução (a mais específica vence):
- *   1. env `EVOLVE_CLAIM` = on|off (também 1|0, true|false) — chave geral de emergência/teste;
- *   2. `genesis_runtime_config.EVOLVE_CLAIM` (0|1) lido por `readRuntimeNumber`: override do TENANT
- *      do recurso vence o global. A leitura por tenant já está pronta; LIGAR por tenant é decisão da
- *      Fase 2 (a chave ainda não está em CONFIG_KEYS, então nenhum tenant_admin a edita pela UI);
- *   3. ausente/ inválido / erro de banco ⇒ `off`.
+ * Resolução (M-03; featureFlags.ts): tenant explícito > padrão global em `genesis_runtime_config` > env `EVOLVE_CLAIM`
+ * (on|off, 1|0, true|false) como DEFAULT de plataforma (nunca sobrepõe o tenant) > `off`. Só `zentriz_admin` grava a chave.
  */
 import { readRuntimeNumber, type RuntimeConfigDb } from "./runtimeTunables.js";
+import { flagEnabled, parseEnvFlag, tenantOfProject } from "./featureFlags.js";
 
 export const EVOLVE_CLAIM_KEY = "EVOLVE_CLAIM";
 /** Saldo livre mínimo (US$, inteiro) do dono do orçamento para criar/promover uma versão. */
 export const EVOLVE_MIN_FREE_BUDGET_KEY = "EVOLVE_MIN_FREE_BUDGET_USD";
 
-export function evolveClaimEnvOverride(): boolean | null {
-  const raw = (process.env.EVOLVE_CLAIM ?? "").trim().toLowerCase();
-  if (["on", "1", "true"].includes(raw)) return true;
-  if (["off", "0", "false"].includes(raw)) return false;
-  return null;
+/** Default de PLATAFORMA vindo do ambiente (`null` = ausente). Não sobrepõe o tenant. */
+export function evolveClaimEnvDefault(): boolean | null {
+  const n = parseEnvFlag(process.env.EVOLVE_CLAIM, "bool");
+  return n === null ? null : n === 1;
 }
 
 /**
@@ -33,20 +29,8 @@ export async function evolveClaimEnabled(
   db: RuntimeConfigDb,
   opts: { parentProjectId?: string | null; userTenantId?: string | null },
 ): Promise<boolean> {
-  const env = evolveClaimEnvOverride();
-  if (env !== null) return env;
-  let tenantId: string | null = null;
-  if (opts.parentProjectId) {
-    try {
-      const r = await db.query("SELECT tenant_id FROM projects WHERE id = $1", [opts.parentProjectId]);
-      const t = r.rows[0]?.tenant_id;
-      tenantId = t ? String(t) : null;
-    } catch {
-      tenantId = null; // id inválido etc.: a rota devolve o erro de sempre
-    }
-  }
-  tenantId = tenantId ?? opts.userTenantId ?? null;
-  return (await readRuntimeNumber(db, EVOLVE_CLAIM_KEY, tenantId, { min: 0, max: 1 })) === 1;
+  const tenantId = (await tenantOfProject(db, opts.parentProjectId)) ?? opts.userTenantId ?? null;
+  return flagEnabled(db, "EVOLVE_CLAIM", tenantId);
 }
 
 /** Saldo livre mínimo configurado (US$) ou `null` (chave ausente/inválida: vale só a regra do Guard). */

@@ -49,6 +49,14 @@ def assert_not_utf8(raw: bytes) -> None:
         raw.decode("utf-8")
 
 
+def set_effective_flags(monkeypatch, attachments_strict: bool = False, task_inherit: bool = False, raw=None) -> None:
+    """M-03: o runner NÃO lê mais ATTACHMENTS_STRICT/TASK_INHERIT_TRANSITIVE do ambiente — recebe o valor efetivo do projeto
+    pela API (`GET /api/projects/:id/effective-flags`). Os testes injetam esse valor aqui (`raw` = corpo bruto, p/ casos inválidos)."""
+    runner._EFFECTIVE_FLAGS_CACHE.clear()
+    body = raw if raw is not None else {"attachmentsStrict": attachments_strict, "taskInheritTransitive": task_inherit}
+    monkeypatch.setattr(runner, "_fetch_effective_flags", lambda project_id: body)
+
+
 class FakeSpecApi:
     """Fake de `/api/projects/:id/spec-files` — a lista que o runner concatena (inclui anexos, como a API real)."""
 
@@ -140,7 +148,7 @@ def test_controle_arvore_so_de_texto_concatena_todos_os_arquivos(tmp_path, monke
 @pytest.mark.parametrize("binario", sorted(BINARIOS))
 def test_anexo_binario_nao_apaga_a_spec_em_silencio(tmp_path, monkeypatch, binario):
     """Desejado: ou ERRO explícito, ou a spec de texto intacta. NUNCA '' silencioso. (corrigido pela tarefa 1.5, ATTACHMENTS_STRICT=on)"""
-    monkeypatch.setenv("ATTACHMENTS_STRICT", "on")
+    set_effective_flags(monkeypatch, attachments_strict=True)
     _build_tree(tmp_path, monkeypatch, binary=binario)
     try:
         out = runner.load_spec_all("p")
@@ -163,7 +171,7 @@ def test_evidencia_anexo_binario_devolve_vazio_e_o_caller_so_ve_o_primario(tmp_p
 
 
 def test_unico_arquivo_binario_tambem_nao_e_silencioso(tmp_path, monkeypatch):
-    monkeypatch.setenv("ATTACHMENTS_STRICT", "on")
+    set_effective_flags(monkeypatch, attachments_strict=True)
     api = FakeSpecApi(tmp_path)
     api.add("print.png", make_png_bytes(), mime="image/png")
     api.install(monkeypatch)
@@ -184,7 +192,7 @@ def test_controle_heranca_de_um_nivel_funciona_como_documentado(monkeypatch):
 
 
 def test_heranca_transitiva_v3_conhece_o_trabalho_da_v1(monkeypatch):
-    monkeypatch.setenv("TASK_INHERIT_TRANSITIVE", "on")  # corrigido pela tarefa 1.6
+    set_effective_flags(monkeypatch, task_inherit=True)  # corrigido pela tarefa 1.6
     store = FakeTaskStore(); store.install(monkeypatch)
     store.seed("v1", "TSK-BE-001", requirements="CRUD de entregas")
     runner._inherit_parent_tasks("v2", "v1")                              # v2 herda a TSK-BE-001 da v1
@@ -195,7 +203,7 @@ def test_heranca_transitiva_v3_conhece_o_trabalho_da_v1(monkeypatch):
 
 
 def test_v4_guarda_as_duas_TSK_EVO_001_de_origens_diferentes_sem_colisao(monkeypatch):
-    monkeypatch.setenv("TASK_INHERIT_TRANSITIVE", "on")  # corrigido pela tarefa 1.6
+    set_effective_flags(monkeypatch, task_inherit=True)  # corrigido pela tarefa 1.6
     store = FakeTaskStore(); store.install(monkeypatch)
     # v3 (pai da v4) tem a EVO-001 da v2 (herdada) e a EVO-001 da própria v3 (aceita)
     store.seed("v3", "TSK-INH-EVO-001", requirements="[HERDADA da versão anterior — TSK-EVO-001] origem v2: exportar CSV")

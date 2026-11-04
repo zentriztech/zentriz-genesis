@@ -17,7 +17,7 @@
 import type { PoolClient, Pool } from "pg";
 import { sha256Hex } from "../lib/specTreeHash.js";
 import {
-  attachmentsStrict, classifyAttachment, attachmentExt, utf8Problem, AttachmentUnreadableError,
+  attachmentsStrictEnabled, classifyAttachment, attachmentExt, utf8Problem, AttachmentUnreadableError,
 } from "./ticketAttachments.js";
 import { getAttachmentConverter, conversionOrigin } from "./attachmentConversion.js";
 
@@ -69,7 +69,7 @@ export interface TicketAttachmentRow {
   mime_type: string | null;
   size_bytes: string | number;
   content_sha256: string | null;
-  /** Só preenchidos por `loadTicketAttachments(.., {extended:true})` (ATTACHMENTS_STRICT=on, migration 141). */
+  /** Só preenchidos por `loadTicketAttachments(.., {extended:true})` (ATTACHMENTS_STRICT=on, migration 143). */
   kind?: string;
   origin?: string;
   derived_from_attachment_id?: string | null;
@@ -233,7 +233,7 @@ export async function materializeTicketIntoSpecTree(
     const childDir = join(uploadDir, args.childProjectId, relDir);
     mkdirSync(childDir, { recursive: true });
 
-    const strict = attachmentsStrict();
+    const strict = await attachmentsStrictEnabled(db, args.ticket.tenant_id);
     if (strict) await runAttachmentConversions(db, args.ticket.id);
     const allAttachments = await loadTicketAttachments(db, args.ticket.id);
     // ATTACHMENTS_STRICT=on: só txt/md (ou derivados .md) seguem para a árvore da spec. pdf/doc/docx e qualquer

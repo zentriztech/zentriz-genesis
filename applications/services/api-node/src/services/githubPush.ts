@@ -31,6 +31,7 @@ const execFileAsync = promisify(execFile);
 import { notifyTelegramTenant } from "../routes/telegram.js";
 import { validateDeployMatrix } from "./provision/deployMatrix.js";
 import { ticketStamp } from "./tickets.js";
+import { safeErrorMessage } from "../lib/redactSecrets.js";
 import { renderMobileRncliBundle } from "./provision/renderers/mobileRncliRenderer.js";
 import { renderMobileEasBundle } from "./provision/renderers/mobileEasRenderer.js";
 
@@ -208,7 +209,7 @@ export async function registerProjectWithDeadpool(
       clearTimeout(timeout);
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = safeErrorMessage(err);
     console.warn("[GitHubPush] Deadpool register-project failed (non-fatal):", err);
     return { ok: false, error: msg };
   }
@@ -268,8 +269,23 @@ export async function checkoutNewBranch(projectId: string, branch: string): Prom
     await git(["checkout", "-q", "-B", branch]);
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: safeErrorMessage(err) };
   }
+}
+
+/**
+ * Ambiente do `git` com o header de autenticação do GitHub App passado por `GIT_CONFIG_COUNT/KEY/VALUE`
+ * (git >= 2.31). Diferente de `-c http.extraheader=…`, o valor NÃO aparece no argv — logo não vaza na mensagem de
+ * erro do `execFile` (M-01). Use só na invocação que precisa de rede.
+ */
+export function gitAuthEnv(token: string, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return {
+    ...base,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.extraheader",
+    GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+  };
 }
 
 /**
@@ -287,12 +303,12 @@ export async function fetchAndResetBranch(opts: {
   branch: string;
   token: string;
 }): Promise<{ ok: boolean; head?: string; error?: string }> {
-  const git = (args: string[]) =>
-    execFileAsync("git", ["-C", opts.localPath, ...args], { timeout: 60_000, maxBuffer: 16 * 1024 * 1024 });
+  const git = (args: string[], env?: NodeJS.ProcessEnv) =>
+    execFileAsync("git", ["-C", opts.localPath, ...args], { timeout: 60_000, maxBuffer: 16 * 1024 * 1024, ...(env ? { env } : {}) });
   try {
-    // Auth via header (Basic x-access-token:token) só nesta invocação — não fica em nenhum config.
-    const authHeader = `http.extraheader=Authorization: Basic ${Buffer.from(`x-access-token:${opts.token}`).toString("base64")}`;
-    await git(["-c", authHeader, "fetch", "--depth=1", "-q", "origin", opts.branch]);
+    // Auth via header (Basic x-access-token:token) só nesta invocação — não fica em nenhum config NEM no argv
+    // (M-01): o `err.message` do execFile inclui o argv, então o segredo vai por variáveis de ambiente do git.
+    await git(["fetch", "--depth=1", "-q", "origin", opts.branch], gitAuthEnv(opts.token));
     // Cria/troca para o branch local <branch> no HEAD atual (não toca a árvore) e então força ao tip.
     await git(["checkout", "-q", "-B", opts.branch]);
     await git(["reset", "--hard", "-q", `origin/${opts.branch}`]);
@@ -301,7 +317,7 @@ export async function fetchAndResetBranch(opts: {
     const { stdout } = await git(["rev-parse", "HEAD"]);
     return { ok: true, head: stdout.trim() };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: safeErrorMessage(err, [opts.token]) };
   }
 }
 
@@ -355,7 +371,7 @@ export async function gitLinkProjectFolder(opts: {
     if (!aligned.ok) return { ok: false, localPath, error: aligned.error };
     return { ok: true, localPath };
   } catch (err) {
-    return { ok: false, localPath, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, localPath, error: safeErrorMessage(err) };
   }
 }
 
@@ -561,7 +577,7 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
     // Fire-and-forget: never throw — must not fail the accept request.
     // #59: but never swallow silently — record WHY so the portal/tenant sees the failure.
     try {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = safeErrorMessage(err);
       const status = (err as { status?: number })?.status;
       // #59: 403 "Resource not accessible by integration" ao criar repo em org = o GitHub App
       // não tem a permissão de REPOSITÓRIO "Administration: Read & write" (distinta de
@@ -712,7 +728,7 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
     }
     return { ok: true, mode: "evolution", fullName: lineageRepo.repo_full_name, branch, fileCount, deleted, prUrl: pr.ok ? pr.url : undefined, compareUrl: pr.ok ? undefined : pr.compareUrl, prNumber: pr.ok ? pr.number : undefined, headSha: sha };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = safeErrorMessage(err);
     console.error(`[GitHubPush] Evolution push failed for ${projectId}:`, err);
     try {
       await client.query(

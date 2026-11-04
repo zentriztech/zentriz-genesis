@@ -2,7 +2,7 @@
  * Fase 1' — resolução da flag EVOLVE_CLAIM e do saldo livre mínimo (sem banco: db falso).
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { evolveClaimEnabled, evolveClaimEnvOverride, readEvolveMinFreeBudgetUsd } from "./evolveFlags.js";
+import { evolveClaimEnabled, evolveClaimEnvDefault, readEvolveMinFreeBudgetUsd } from "./evolveFlags.js";
 
 type Row = Record<string, unknown>;
 function fakeDb(config: { global?: string; tenant?: Record<string, string>; parentTenant?: string | null; fail?: boolean }) {
@@ -14,8 +14,10 @@ function fakeDb(config: { global?: string; tenant?: Record<string, string>; pare
       if (config.fail) throw new Error("db down");
       if (/FROM projects/.test(sql)) return { rows: config.parentTenant === undefined ? [] : [{ tenant_id: config.parentTenant }] };
       const tenant = params?.[1] as string | null;
-      const v = (tenant && config.tenant?.[tenant]) ?? config.global;
-      return { rows: v === undefined ? [] : [{ value: v }] };
+      const rows: Row[] = [];
+      if (tenant && config.tenant?.[tenant] !== undefined) rows.push({ tenant_id: tenant, value: config.tenant[tenant] });
+      if (config.global !== undefined) rows.push({ tenant_id: null, value: config.global });
+      return { rows: rows.slice(0, /LIMIT 1/.test(sql) ? 1 : rows.length) };
     },
   };
 }
@@ -27,17 +29,18 @@ describe("EVOLVE_CLAIM — resolução da flag", () => {
     vi.stubEnv("EVOLVE_CLAIM", "");
     expect(await evolveClaimEnabled(fakeDb({}), { parentProjectId: "p", userTenantId: "t" })).toBe(false);
   });
-  it("env on/off vence tudo (chave geral) e não consulta o banco", async () => {
-    const db = fakeDb({ global: "1" });
-    vi.stubEnv("EVOLVE_CLAIM", "off");
-    expect(await evolveClaimEnabled(db, { parentProjectId: "p" })).toBe(false);
+  it("M-03: o env é só o DEFAULT de plataforma — vale sem linha de config e NUNCA sobrepõe o tenant nem o global", async () => {
     vi.stubEnv("EVOLVE_CLAIM", "on");
-    expect(await evolveClaimEnabled(db, { parentProjectId: "p" })).toBe(true);
-    expect(db.calls).toHaveLength(0);
+    expect(await evolveClaimEnabled(fakeDb({}), { parentProjectId: "p" })).toBe(true); // sem config: env liga
+    expect(await evolveClaimEnabled(fakeDb({ tenant: { A: "0" }, parentTenant: "A" }), { parentProjectId: "p" })).toBe(false); // tenant 0 vence env on
+    expect(await evolveClaimEnabled(fakeDb({ global: "0" }), { parentProjectId: "p" })).toBe(false); // global 0 vence env on
+    vi.stubEnv("EVOLVE_CLAIM", "off");
+    expect(await evolveClaimEnabled(fakeDb({ tenant: { A: "1" }, parentTenant: "A" }), { parentProjectId: "p" })).toBe(true); // tenant 1 vence env off
+    expect(await evolveClaimEnabled(fakeDb({ global: "1" }), { parentProjectId: "p" })).toBe(true);
     vi.stubEnv("EVOLVE_CLAIM", "1");
-    expect(evolveClaimEnvOverride()).toBe(true);
+    expect(evolveClaimEnvDefault()).toBe(true);
     vi.stubEnv("EVOLVE_CLAIM", "banana");
-    expect(evolveClaimEnvOverride()).toBeNull();
+    expect(evolveClaimEnvDefault()).toBeNull();
   });
   it("sem env: genesis_runtime_config global 1 liga; override do TENANT DO RECURSO vence o global (leitura por tenant pronta)", async () => {
     vi.stubEnv("EVOLVE_CLAIM", "");

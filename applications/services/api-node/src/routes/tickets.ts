@@ -25,7 +25,8 @@ import {
   allowedTicketTargets, applyTicketTransition, isTicketStatus, isValidTicketTransition, ticketTransitionsEnabled, type TicketStatus,
 } from "../services/ticketTransitions.js";
 import {
-  attachmentsStrict, classifyAttachment, loadAttachmentLimits, validateAttachments,
+  attachmentsStrictEnabled, attachmentContentDisposition, classifyAttachment, downloadContentType, loadAttachmentLimits,
+  validateAttachments, MULTIPART_MAX_FILES, MULTIPART_MAX_FILE_BYTES, type AttachmentError,
 } from "../services/ticketAttachments.js";
 
 function getUser(request: FastifyRequest): AuthUser {
@@ -122,16 +123,33 @@ export async function ticketRoutes(app: FastifyInstance) {
       // `files()`, um envio sem nenhum arquivo não emite NADA — os campos se perdiam e todo
       // pedido sem anexo virava 400. (`file()` teria o outro defeito: só a 1ª parte de arquivo.)
       const req = request as unknown as { parts: () => AsyncIterableIterator<Part> };
-      for await (const part of req.parts()) {
-        if (part.type === "file" || part.filename) {
-          files.push({ filename: safeFilename(part.filename), buffer: await part.toBuffer(), mimeType: part.mimetype || "application/octet-stream" });
-          continue;
+      try {
+        for await (const part of req.parts()) {
+          if (part.type === "file" || part.filename) {
+            files.push({ filename: safeFilename(part.filename), buffer: await part.toBuffer(), mimeType: part.mimetype || "application/octet-stream" });
+            continue;
+          }
+          const v = typeof part.value === "string" ? part.value.trim() : "";
+          if (part.fieldname === "title") title = v;
+          else if (part.fieldname === "body") body = v;
+          else if (part.fieldname === "changeKind" && v) changeKind = v;
+          else if (part.fieldname === "projectId") projectId = v || null;
         }
-        const v = typeof part.value === "string" ? part.value.trim() : "";
-        if (part.fieldname === "title") title = v;
-        else if (part.fieldname === "body") body = v;
-        else if (part.fieldname === "changeKind" && v) changeKind = v;
-        else if (part.fieldname === "projectId") projectId = v || null;
+      } catch (err) {
+        // M-17: estouro do teto do multipart (app.ts) — com ATTACHMENTS_STRICT=on responde no formato da lista da 1.5
+        // (ATTACHMENT_INVALID + errors[]) em vez do 413 genérico. Com `off` o erro segue o caminho histórico.
+        const code = (err as { code?: string })?.code;
+        if (await attachmentsStrictEnabled(pool, product.tenant_id)) {
+          const limits = await loadAttachmentLimits(pool, product.tenant_id);
+          let e: AttachmentError | null = null;
+          if (code === "FST_REQ_FILE_TOO_LARGE") {
+            e = { code: "ATTACHMENT_TOO_LARGE", filename: "", message: `Um dos arquivos é maior que ${Math.min(limits.maxFileBytes, MULTIPART_MAX_FILE_BYTES)} bytes.` };
+          } else if (code === "FST_FILES_LIMIT") {
+            e = { code: "ATTACHMENT_TOO_MANY", filename: "", message: `Máximo de ${Math.min(limits.maxFiles, MULTIPART_MAX_FILES)} arquivo(s) por card.` };
+          }
+          if (e) return reply.status(400).send({ code: "ATTACHMENT_INVALID", message: e.message, errors: [e] });
+        }
+        throw err;
       }
     } else {
       const b = (request.body ?? {}) as { title?: string; body?: string; changeKind?: string; projectId?: string };
@@ -164,7 +182,7 @@ export async function ticketRoutes(app: FastifyInstance) {
 
     // Tarefa 1.5 (ATTACHMENTS_STRICT=on): allowlist por extensão + magic bytes + tetos por card (genesis_runtime_config).
     // Recusa o pedido INTEIRO com a lista completa de problemas — nada de aceitar parte e sumir com o resto.
-    const strictAttachments = attachmentsStrict();
+    const strictAttachments = await attachmentsStrictEnabled(pool, product.tenant_id);
     if (strictAttachments && files.length > 0) {
       const limits = await loadAttachmentLimits(pool, product.tenant_id);
       const problems = validateAttachments(files, limits);
@@ -249,7 +267,7 @@ export async function ticketRoutes(app: FastifyInstance) {
       return reply.status(404).send({ code: "NOT_FOUND", message: "Pedido não encontrado" });
     }
     const [out] = await hydrate([ticket]);
-    const strictAtt = attachmentsStrict();
+    const strictAtt = await attachmentsStrictEnabled(pool, ticket.tenant_id);
     const attachments = (await loadTicketAttachments(pool, ticket.id, { extended: strictAtt })).map((a) => ({
       id: a.id, filename: a.filename, mimeType: a.mime_type, sizeBytes: Number(a.size_bytes),
       // ATTACHMENTS_STRICT=on: tipo, hash e origem (upload | converted:<id>) — off mantém o formato anterior.
@@ -412,6 +430,10 @@ export async function ticketRoutes(app: FastifyInstance) {
     if (!proj || !canAccessProjectRow(user, proj)) {
       return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
     }
+    // M-19: com ATTACHMENTS_STRICT efetivo `off` a rota nova não existe (404). A autorização acima vem primeiro.
+    if (!(await attachmentsStrictEnabled(pool, proj.tenant_id))) {
+      return reply.status(404).send({ code: "NOT_FOUND", message: "Recurso indisponível" });
+    }
     const rows = (await pool.query(
       `SELECT a.id, a.ticket_id, t.number, a.filename, a.mime_type, a.size_bytes, a.content_sha256, a.kind, a.origin, a.derived_from_attachment_id
          FROM ticket_attachments a JOIN tickets t ON t.id = a.ticket_id
@@ -446,9 +468,12 @@ export async function ticketRoutes(app: FastifyInstance) {
       const { readFile } = await import("fs/promises");
       const buf = await readFile(att.file_path).catch(() => null);
       if (!buf) return reply.status(410).send({ code: "GONE", message: "Arquivo do anexo não está mais no disco." });
+      // M-14: Content-Type derivado da extensão validada (não do mimetype que o cliente declarou), `nosniff` e nome
+      // seguro para qualquer charset (nome fora de Latin-1 lançava ERR_INVALID_CHAR ⇒ 500).
       return reply
-        .header("Content-Type", att.mime_type ?? "application/octet-stream")
-        .header("Content-Disposition", `attachment; filename="${att.filename.replace(/"/g, "")}"`)
+        .header("Content-Type", downloadContentType(att.filename))
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Content-Disposition", attachmentContentDisposition(att.filename))
         .send(buf);
     },
   );

@@ -924,8 +924,61 @@ class SpecReadError(RuntimeError):
     """Arquivo de spec registrado que NÃO pôde ser lido (ATTACHMENTS_STRICT=on). Erro explícito: nunca vira ""."""
 
 
-def _attachments_strict() -> bool:
-    return (os.environ.get("ATTACHMENTS_STRICT", "off") or "off").strip().lower() == "on"
+class EffectiveFlagsUnavailable(RuntimeError):
+    """A API está configurada mas não devolveu as flags efetivas do projeto (transporte/5xx após nova tentativa)."""
+
+
+#: Flags EFETIVAS por projeto (tenant), entregues pela API (M-03). O runner NÃO lê mais ATTACHMENTS_STRICT nem
+#: TASK_INHERIT_TRANSITIVE do próprio ambiente: api e runner decidem pelo mesmo valor
+#: (precedência tenant > global > env da API > off, resolvida em services/featureFlags.ts).
+_EFFECTIVE_FLAGS_TTL_S = 30.0
+_EFFECTIVE_FLAGS_CACHE: dict[str, tuple[float, dict | None]] = {}
+
+
+def _fetch_effective_flags(project_id: str) -> dict | None:
+    """GET /api/projects/:id/effective-flags. dict em 200; None se a API não está configurada (execução avulsa) ou não
+    oferece a rota/permissão (404/405/501/401/403 = API antiga: flags `off`). Transporte/5xx: 2 tentativas e depois
+    EffectiveFlagsUnavailable (quem decide se falha fechado ou aberto é o chamador)."""
+    if not (os.environ.get("API_BASE_URL", "").strip() and os.environ.get("GENESIS_API_TOKEN")):
+        return None
+    last = 0
+    for _ in range(2):
+        data, status = _api_get(f"/api/projects/{project_id}/effective-flags")
+        if status == 200 and isinstance(data, dict):
+            return data
+        if status == 200:
+            logger.warning("[flags] /effective-flags devolveu um corpo inesperado (%s) — tratado como flags off", type(data).__name__)
+            return None
+        last = status
+        if status in (401, 403, 404, 405, 501):
+            logger.warning("[flags] /effective-flags indisponível (HTTP %s) — flags tratadas como off (API antiga ou sem permissão)", status)
+            return None
+    raise EffectiveFlagsUnavailable(f"flags efetivas do projeto {project_id[:8]} indisponíveis (HTTP {last})")
+
+
+def _effective_flag(project_id: str | None, name: str, *, fail_closed: bool = False) -> bool:
+    """Valor efetivo (tenant do projeto) de uma flag entregue pela API. Sem project_id ⇒ off.
+    Falha de transporte: `fail_closed` levanta SpecReadError (leitura da spec não pode cair em silêncio no modo errado);
+    senão devolve off com aviso."""
+    if not project_id:
+        return False
+    now = time.monotonic()
+    hit = _EFFECTIVE_FLAGS_CACHE.get(project_id)
+    if hit is None or now - hit[0] > _EFFECTIVE_FLAGS_TTL_S:
+        try:
+            flags = _fetch_effective_flags(project_id)
+        except EffectiveFlagsUnavailable as exc:
+            if fail_closed:
+                raise SpecReadError(str(exc)) from exc
+            logger.warning("[flags] %s — flag %s tratada como off", exc, name)
+            return False
+        _EFFECTIVE_FLAGS_CACHE[project_id] = hit = (now, flags)
+    flags = hit[1]
+    return bool(flags and flags.get(name) is True)
+
+
+def _attachments_strict(project_id: str | None = None) -> bool:
+    return _effective_flag(project_id, "attachmentsStrict", fail_closed=True)
 
 
 #: Allowlist de TEXTO da árvore de spec (ATTACHMENTS_STRICT=on). Sobrescrevível por SPEC_TEXT_EXTENSIONS (CSV com ponto).
@@ -957,7 +1010,20 @@ def load_spec_all(project_id: str) -> str:
     frontmatter YAML dos manifestos é removido (vira prosa no prompt senão).
     """
     try:
-        data, status = _api_get(f"/api/projects/{project_id}/spec-files")
+        strict = _attachments_strict(project_id)  # flag EFETIVA do tenant, vinda da API (M-03); falha de transporte ⇒ SpecReadError
+        try:
+            data, status = _api_get(f"/api/projects/{project_id}/spec-files")
+        except Exception as exc:  # noqa: BLE001
+            if strict:
+                raise SpecReadError(f"falha de transporte ao obter a árvore de spec: {exc}") from exc
+            raise
+        if strict:
+            # M-08: em modo estrito a falha da API (HTTP != 200 ou erro de transporte, status 0) NÃO vira "" (o main cairia
+            # em silêncio no arquivo primário). Lista vazia com 200 continua "" (projeto sem árvore registrada).
+            if status != 200:
+                raise SpecReadError(f"a API não devolveu a árvore de spec (HTTP {status}); a leitura estrita não cai no arquivo primário")
+            if not isinstance(data, list):
+                raise SpecReadError("a API devolveu um corpo inesperado para a árvore de spec")
         if status != 200 or not isinstance(data, list) or len(data) == 0:
             return ""
         # R4 PR3: `connect.yaml` (SpecConnectDeclaration) é machine-readable e NÃO entra no prompt do
@@ -968,7 +1034,6 @@ def load_spec_all(project_id: str) -> str:
             mime = str(entry.get("mimeType") or entry.get("mime_type") or "").lower()
             return name.endswith((".yaml", ".yml")) or mime == "application/yaml"
         data = [e for e in data if isinstance(e, dict) and not _is_machine_readable(e)]
-        strict = _attachments_strict()
         if strict:
             # Tarefa 1.5: só TEXTO entra na árvore. Tudo o mais (pdf/doc/docx/png/xlsx…) é ignorado COM AVISO.
             _allowed = _spec_text_extensions()
@@ -3946,9 +4011,10 @@ def _parse_tasks_from_backlog(project_id: str, pm_module: str = "web") -> list[d
 _INHERIT_SKIP_TASKS = ("TSK-DEVOPS-001", "TSK-FULL-TEST")
 
 
-def _task_inherit_transitive() -> bool:
-    """Tarefa 1.6: herança transitiva de tasks (todas as versões da linhagem). `off` (padrão) = comportamento anterior."""
-    return (os.environ.get("TASK_INHERIT_TRANSITIVE", "off") or "off").strip().lower() == "on"
+def _task_inherit_transitive(project_id: str | None = None) -> bool:
+    """Tarefa 1.6: herança transitiva de tasks (todas as versões da linhagem). `off` (padrão) = comportamento anterior.
+    Valor EFETIVO do tenant do projeto filho, vindo da API (M-03); indisponível ⇒ off (comportamento anterior)."""
+    return _effective_flag(project_id, "taskInheritTransitive")
 
 
 #: ID herdado transitivo: `TSK-INH-V<n>-<ID original sem "TSK-">` (ex.: TSK-EVO-001 da v2 → TSK-INH-V2-EVO-001).
@@ -3957,10 +4023,14 @@ def _task_inherit_transitive() -> bool:
 #: Não precisa mudar o regex de backlog `TSK-[A-Z]+-\d+`: IDs herdados são criados pelo runner, não parseados do texto do PM
 #: (e, por conter `V<n>` após `INH-`, o regex nem os casa por engano).
 _INH_VERSIONED_RE = re.compile(r"^TSK-INH-V(\d+)-")
+#: M-24: sem a versão do pai (API indisponível) o rótulo usa `X<8 hex do id do pai>` — letra DISTINTA de `V`, então nunca
+#: se confunde com uma versão e o resumo reconhece a origem sem versão (`TSK-INH-X1A2B3C4D-EVO-001`).
+_INH_FALLBACK_RE = re.compile(r"^TSK-INH-X([0-9A-F]{8})-")
 
 
 def _inherited_task_id(version: int | str, tid: str) -> str:
-    return f"TSK-INH-V{version}-{tid.removeprefix('TSK-')}"
+    tag = f"V{version}" if str(version).isdigit() else str(version)  # "X<8hex>" já traz a letra
+    return f"TSK-INH-{tag}-{tid.removeprefix('TSK-')}"
 
 
 def _get_project_version(project_id: str) -> int | None:
@@ -3988,12 +4058,12 @@ def _inherit_parent_tasks(project_id: str, parent_id: str, parent_version: int |
         return 0
     rows = data if isinstance(data, list) else (data.get("tasks") if isinstance(data, dict) else None) or []
     inherited: list[dict] = []
-    transitive = _task_inherit_transitive()
+    transitive = _task_inherit_transitive(project_id)
     origin_label: int | str = ""
     if transitive:
         # Versão de origem das tasks PRÓPRIAS do pai. Sem a versão (API indisponível) usa o início do id do pai, que
         # também é único por versão — melhor um rótulo feio do que a colisão que esta flag existe para evitar.
-        origin_label = parent_version if parent_version is not None else (_get_project_version(parent_id) or f"P{parent_id[:8].upper()}")
+        origin_label = parent_version if parent_version is not None else (_get_project_version(parent_id) or f"X{parent_id[:8].upper()}")
     for t in rows:
         if not isinstance(t, dict):
             continue
@@ -4017,7 +4087,8 @@ def _inherit_parent_tasks(project_id: str, parent_id: str, parent_version: int |
                 "task_id": _inherited_task_id(origin_label, tid),
                 "module": str(t.get("module") or "backend"),
                 "owner_role": str(t.get("ownerRole") or t.get("owner_role") or "DEV"),
-                "requirements": f"[HERDADA da v{origin_label} — {tid}] " + str(t.get("requirements") or "")[:1500],
+                "requirements": (f"[HERDADA da v{origin_label} — {tid}] " if str(origin_label).isdigit()
+                                 else f"[HERDADA de versão não identificada ({origin_label}) — {tid}] ") + str(t.get("requirements") or "")[:1500],
                 "status": "DONE",
             })
             continue
@@ -4057,8 +4128,11 @@ def _summarize_inherited_tasks(done_rows: list[dict], parent_version: int | None
         if not tid or tid in _INHERIT_SKIP_TASKS:
             continue
         m = _INH_VERSIONED_RE.match(tid)
+        mx = _INH_FALLBACK_RE.match(tid)
         if m:
             label = f"v{m.group(1)}"
+        elif mx:
+            label = f"origem sem versão registrada (pai X{mx.group(1)})"
         elif tid.startswith("TSK-INH-"):
             label = "origem não registrada (herança legada)"
         else:
@@ -6139,7 +6213,7 @@ def main() -> int:
                         and str(t.get("taskId") or t.get("task_id") or "") not in _INHERIT_SKIP_TASKS]
             if _pt_status != 200:
                 logger.warning("[H6] tasks do pai indisponíveis para o contexto do CTO/PM (HTTP %s) — token escopado? ver auth.ts (ancestrais)", _pt_status)
-            if _pt_status == 200 and _pt_done and _task_inherit_transitive():
+            if _pt_status == 200 and _pt_done and _task_inherit_transitive(project_id):
                 # Tarefa 1.6: resumo COMPACTO de todas as versões da linhagem, com teto de tokens configurável.
                 _parent_done_block = _summarize_inherited_tasks(_pt_done, _get_project_version(_parent_project_id_evo))
             elif _pt_status == 200 and _pt_done:

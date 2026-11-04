@@ -7,7 +7,7 @@
 -- Rollback e por flag (EVOLVE_RECONCILER=off), nao por migration.
 --
 -- NOTA runner de migrations: sem ponto e virgula em literais ou comentarios, sem blocos DO.
--- (A numeracao pula a 144, reservada a frente de ticket_events.)
+-- (Numeracao final: 143 anexos, 144 ticket_events, 145 achados do reconciliador. A 143 foi renumerada de 141 antes do merge.)
 
 CREATE TABLE IF NOT EXISTS evolve_reconciler_findings (
   id BIGSERIAL PRIMARY KEY,

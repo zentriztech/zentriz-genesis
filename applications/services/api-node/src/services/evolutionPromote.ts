@@ -16,20 +16,20 @@
  *
  * A avaliação de prontidão (`assessEvolutionReadiness`) vive em `promotability.ts` (junto do veredito) para não criar import circular.
  *
- * Flag `EVOLUTION_PROMOTE_BANCADA` (`off` padrão = comportamento histórico byte a byte). Resolução como `evolveFlags.ts`:
- * env on|off → `genesis_runtime_config` (override do tenant vence o global) → `off`.
+ * Flag `EVOLUTION_PROMOTE_BANCADA` (`off` padrão = comportamento histórico byte a byte). Resolução (M-03; featureFlags.ts):
+ * tenant explícito > padrão global em `genesis_runtime_config` > env como DEFAULT de plataforma (nunca sobrepõe o tenant) > `off`.
  */
-import { readRuntimeNumber, type RuntimeConfigDb } from "./runtimeTunables.js";
+import type { RuntimeConfigDb } from "./runtimeTunables.js";
+import { flagEnabled, parseEnvFlag } from "./featureFlags.js";
 
 export const EVOLUTION_PROMOTE_BANCADA_KEY = "EVOLUTION_PROMOTE_BANCADA";
 /** Status do filho de evolução que a Bancada pode promover (R4: `spec_submitted` fica; `draft` = pai sem arquivos). */
 export const EVOLUTION_PROMOTABLE_STATUSES = ["draft", "spec_submitted"] as const;
 
-export function evolutionPromoteEnvOverride(): boolean | null {
-  const raw = (process.env.EVOLUTION_PROMOTE_BANCADA ?? "").trim().toLowerCase();
-  if (["on", "1", "true"].includes(raw)) return true;
-  if (["off", "0", "false"].includes(raw)) return false;
-  return null;
+/** Default de PLATAFORMA vindo do ambiente (`null` = ausente). Não sobrepõe o tenant. */
+export function evolutionPromoteEnvDefault(): boolean | null {
+  const n = parseEnvFlag(process.env.EVOLUTION_PROMOTE_BANCADA, "bool");
+  return n === null ? null : n === 1;
 }
 
 /** Ligada para este recurso? Tenant do RECURSO (projeto ou produto) primeiro; o do usuário é reserva. */
@@ -37,8 +37,6 @@ export async function evolutionPromoteEnabled(
   db: RuntimeConfigDb,
   opts: { projectId?: string | null; productId?: string | null; tenantId?: string | null; userTenantId?: string | null } = {},
 ): Promise<boolean> {
-  const env = evolutionPromoteEnvOverride();
-  if (env !== null) return env;
   let tenantId: string | null = opts.tenantId ?? null;
   try {
     if (!tenantId && opts.projectId) {
@@ -51,7 +49,7 @@ export async function evolutionPromoteEnabled(
     tenantId = null;
   }
   tenantId = tenantId ? String(tenantId) : (opts.userTenantId ?? null);
-  return (await readRuntimeNumber(db, EVOLUTION_PROMOTE_BANCADA_KEY, tenantId, { min: 0, max: 1 })) === 1;
+  return flagEnabled(db, "EVOLUTION_PROMOTE_BANCADA", tenantId);
 }
 
 export function isEvolutionExtra(extra: Record<string, unknown> | null | undefined): boolean {

@@ -12,7 +12,7 @@ import pytest
 
 import orchestrator.runner as runner
 from orchestrator.tests.test_evolve_repro_f0 import (
-    FakeSpecApi, FakeTaskStore, SPEC_EXTRA, SPEC_PRIMARIA, make_pdf_bytes, make_png_bytes, make_xlsx_bytes,
+    FakeSpecApi, FakeTaskStore, SPEC_EXTRA, SPEC_PRIMARIA, make_pdf_bytes, make_png_bytes, make_xlsx_bytes, set_effective_flags,
 )
 
 DOCX = b"PK\x03\x04[Content_Types].xml word/document.xml"
@@ -38,7 +38,7 @@ BINARIOS = {"print.png": make_png_bytes(), "planilha.xlsx": make_xlsx_bytes(), "
 
 
 def test_strict_binarios_fora_da_arvore_e_spec_de_texto_intacta(tmp_path, monkeypatch, caplog):
-    monkeypatch.setenv("ATTACHMENTS_STRICT", "on")
+    set_effective_flags(monkeypatch, attachments_strict=True)
     _tree(tmp_path, monkeypatch, BINARIOS)
     with caplog.at_level("WARNING"):
         out = runner.load_spec_all("p")
@@ -50,14 +50,14 @@ def test_strict_binarios_fora_da_arvore_e_spec_de_texto_intacta(tmp_path, monkey
 
 
 def test_strict_so_binarios_e_erro_explicito_nao_vazio(tmp_path, monkeypatch):
-    monkeypatch.setenv("ATTACHMENTS_STRICT", "on")
+    set_effective_flags(monkeypatch, attachments_strict=True)
     api = FakeSpecApi(tmp_path); api.add("manual.pdf", make_pdf_bytes(), mime="application/pdf"); api.install(monkeypatch)
     with pytest.raises(runner.SpecReadError, match="nenhum arquivo de texto"):
         runner.load_spec_all("p")
 
 
 def test_strict_arquivo_de_spec_ilegivel_levanta_erro_explicito(tmp_path, monkeypatch):
-    monkeypatch.setenv("ATTACHMENTS_STRICT", "on")
+    set_effective_flags(monkeypatch, attachments_strict=True)
     api = _tree(tmp_path, monkeypatch, {})
     api.add("quebrado.md", b"ok \xff\xfe\x80 inv\xc3\x28lido", rel_dir="docs")  # .md mas NÃO é UTF-8
     with pytest.raises(runner.SpecReadError, match="docs/quebrado.md"):
@@ -65,7 +65,7 @@ def test_strict_arquivo_de_spec_ilegivel_levanta_erro_explicito(tmp_path, monkey
 
 
 def test_strict_arquivo_registrado_ausente_no_disco_levanta_erro(tmp_path, monkeypatch):
-    monkeypatch.setenv("ATTACHMENTS_STRICT", "on")
+    set_effective_flags(monkeypatch, attachments_strict=True)
     api = _tree(tmp_path, monkeypatch, {})
     (tmp_path / "docs" / "contratos.md").unlink()
     with pytest.raises(runner.SpecReadError, match="não existe no disco"):
@@ -73,19 +73,17 @@ def test_strict_arquivo_registrado_ausente_no_disco_levanta_erro(tmp_path, monke
 
 
 def test_strict_allowlist_de_texto_configuravel(tmp_path, monkeypatch):
-    monkeypatch.setenv("ATTACHMENTS_STRICT", "on")
+    set_effective_flags(monkeypatch, attachments_strict=True)
     monkeypatch.setenv("SPEC_TEXT_EXTENSIONS", ".md")
     _tree(tmp_path, monkeypatch, {})
     out = runner.load_spec_all("p")
     assert "TEXTO-EXTRA" in out and "NOTA-TXT" not in out  # .txt deixou de ser texto da spec
 
 
-@pytest.mark.parametrize("flag", [None, "off", "OFF", "qualquer"])
-def test_off_e_byte_identico_ao_comportamento_anterior(tmp_path, monkeypatch, caplog, flag):
-    if flag is None:
-        monkeypatch.delenv("ATTACHMENTS_STRICT", raising=False)
-    else:
-        monkeypatch.setenv("ATTACHMENTS_STRICT", flag)
+@pytest.mark.parametrize("raw", [None, {}, {"attachmentsStrict": False}, {"attachmentsStrict": "on"}, {"attachmentsStrict": 1}])
+def test_off_e_byte_identico_ao_comportamento_anterior(tmp_path, monkeypatch, caplog, raw):
+    # só `True` booleano liga (a API devolve booleano); ausente/falso/qualquer outra coisa ⇒ off
+    set_effective_flags(monkeypatch, raw=raw if raw is not None else {})
     _tree(tmp_path, monkeypatch, {"print.png": make_png_bytes()})
     with caplog.at_level("WARNING"):
         assert runner.load_spec_all("p") == ""  # defeito histórico preservado com a flag off
@@ -94,9 +92,9 @@ def test_off_e_byte_identico_ao_comportamento_anterior(tmp_path, monkeypatch, ca
 
 def test_off_arvore_de_texto_igual_com_e_sem_flag(tmp_path, monkeypatch):
     _tree(tmp_path, monkeypatch, {})
-    monkeypatch.delenv("ATTACHMENTS_STRICT", raising=False)
+    set_effective_flags(monkeypatch)
     off = runner.load_spec_all("p")
-    monkeypatch.setenv("ATTACHMENTS_STRICT", "on")
+    set_effective_flags(monkeypatch, attachments_strict=True)
     assert runner.load_spec_all("p") == off  # árvore só de texto: mesma saída
 
 
@@ -114,7 +112,7 @@ def _chain(store: FakeTaskStore, monkeypatch=None):
 
 
 def test_v1_v2_v3_v4_herda_tudo_sem_colisao(monkeypatch):
-    monkeypatch.setenv("TASK_INHERIT_TRANSITIVE", "on")
+    set_effective_flags(monkeypatch, task_inherit=True)
     store = FakeTaskStore(); store.install(monkeypatch)
     _chain(store)
     inh = lambda pid: [i for i in store.ids(pid) if i.startswith("TSK-INH-")]  # noqa: E731
@@ -131,7 +129,7 @@ def test_v1_v2_v3_v4_herda_tudo_sem_colisao(monkeypatch):
 
 
 def test_idempotente_reaplicar_nao_duplica(monkeypatch):
-    monkeypatch.setenv("TASK_INHERIT_TRANSITIVE", "on")
+    set_effective_flags(monkeypatch, task_inherit=True)
     store = FakeTaskStore(); store.install(monkeypatch)
     _chain(store)
     before = dict(store.tasks["v4"])
@@ -140,7 +138,7 @@ def test_idempotente_reaplicar_nao_duplica(monkeypatch):
 
 
 def test_so_herda_done_e_qa_pass(monkeypatch):
-    monkeypatch.setenv("TASK_INHERIT_TRANSITIVE", "on")
+    set_effective_flags(monkeypatch, task_inherit=True)
     store = FakeTaskStore(); store.install(monkeypatch)
     store.seed("v1", "TSK-BE-001", status="DONE"); store.seed("v1", "TSK-BE-002", status="ASSIGNED")
     store.seed("v1", "TSK-BE-003", status="QA_PASS")
@@ -149,7 +147,7 @@ def test_so_herda_done_e_qa_pass(monkeypatch):
 
 
 def test_heranca_legada_do_pai_segue_como_esta(monkeypatch):
-    monkeypatch.setenv("TASK_INHERIT_TRANSITIVE", "on")
+    set_effective_flags(monkeypatch, task_inherit=True)
     store = FakeTaskStore(); store.install(monkeypatch)
     store.seed("v3", "TSK-INH-EVO-001", requirements="[HERDADA da versão anterior — TSK-EVO-001] origem v2")
     store.seed("v3", "TSK-EVO-001", requirements="origem v3")
@@ -158,15 +156,15 @@ def test_heranca_legada_do_pai_segue_como_esta(monkeypatch):
 
 
 def test_sem_versao_do_pai_usa_rotulo_unico_pelo_id_do_pai(monkeypatch):
-    monkeypatch.setenv("TASK_INHERIT_TRANSITIVE", "on")
+    set_effective_flags(monkeypatch, task_inherit=True)
     store = FakeTaskStore(); store.install(monkeypatch)  # o fake devolve LISTA em /api/projects/<id> ⇒ versão indisponível
     store.seed("0a1b2c3d-pai", "TSK-BE-001")
     runner._inherit_parent_tasks("filho", "0a1b2c3d-pai")
-    assert store.ids("filho") == ["TSK-INH-VP0A1B2C3D-BE-001"]
+    assert store.ids("filho") == ["TSK-INH-X0A1B2C3D-BE-001"]
 
 
 def test_off_e_byte_identico_ao_comportamento_anterior(monkeypatch):
-    monkeypatch.delenv("TASK_INHERIT_TRANSITIVE", raising=False)
+    set_effective_flags(monkeypatch)
     store = FakeTaskStore(); store.install(monkeypatch)
     store.seed("v1", "TSK-BE-001", requirements="CRUD de entregas")
     store.seed("v2", "TSK-INH-BE-001", requirements="herdada"); store.seed("v2", "TSK-EVO-001", requirements="exportar CSV")
@@ -218,3 +216,71 @@ def test_resumo_limite_por_env_com_padrao_e_faixa(monkeypatch):
     assert runner._task_inherit_summary_max_tokens() == 20000
     monkeypatch.setenv("TASK_INHERIT_SUMMARY_MAX_TOKENS", "lixo")
     assert runner._task_inherit_summary_max_tokens() == 1500
+
+
+# ───────────────────── revisão adversarial M (M-03, M-08, M-24) ─────────────────────
+
+def test_m03_runner_nao_le_mais_as_flags_do_proprio_ambiente(tmp_path, monkeypatch):
+    """O ambiente do runner diz `on`, mas a API (valor efetivo do tenant) diz `off`: vale a API. E o inverso."""
+    monkeypatch.setenv("ATTACHMENTS_STRICT", "on")
+    monkeypatch.setenv("TASK_INHERIT_TRANSITIVE", "on")
+    set_effective_flags(monkeypatch)  # API: ambas off
+    assert runner._attachments_strict("p") is False
+    assert runner._task_inherit_transitive("p") is False
+    monkeypatch.delenv("ATTACHMENTS_STRICT"); monkeypatch.delenv("TASK_INHERIT_TRANSITIVE")
+    set_effective_flags(monkeypatch, attachments_strict=True, task_inherit=True)  # API: ambas on, ambiente vazio
+    assert runner._attachments_strict("p") is True
+    assert runner._task_inherit_transitive("p") is True
+
+
+def test_m03_fetch_efetivo_404_e_off_e_5xx_falha_fechado_no_estrito(monkeypatch):
+    monkeypatch.setenv("API_BASE_URL", "http://api.invalid"); monkeypatch.setenv("GENESIS_API_TOKEN", "t")
+    calls = []
+    def get_404(path): calls.append(path); return None, 404
+    monkeypatch.setattr(runner, "_api_get", get_404)
+    assert runner._attachments_strict("p404") is False          # API antiga: off, uma tentativa só
+    assert calls == ["/api/projects/p404/effective-flags"]
+    monkeypatch.setattr(runner, "_api_get", lambda path: (None, 0))   # transporte
+    with pytest.raises(runner.SpecReadError, match="indisponíveis"):
+        runner._attachments_strict("p0")                         # leitura da spec: fail-closed
+    assert runner._task_inherit_transitive("p0b") is False       # herança: fail-open (comportamento anterior)
+    monkeypatch.setattr(runner, "_api_get", lambda path: ({"attachmentsStrict": True, "taskInheritTransitive": False}, 200))
+    assert runner._attachments_strict("pok") is True
+
+
+@pytest.mark.parametrize("status", [0, 404, 500, 502])
+def test_m08_estrito_api_com_falha_e_erro_explicito_nao_vazio(monkeypatch, status):
+    set_effective_flags(monkeypatch, attachments_strict=True)
+    monkeypatch.setattr(runner, "_api_get", lambda path: (None, status))
+    with pytest.raises(runner.SpecReadError, match=rf"HTTP {status}"):
+        runner.load_spec_all("p")
+
+
+def test_m08_estrito_excecao_de_transporte_e_erro_explicito(monkeypatch):
+    set_effective_flags(monkeypatch, attachments_strict=True)
+    def boom(path): raise ConnectionError("rede caiu")
+    monkeypatch.setattr(runner, "_api_get", boom)
+    with pytest.raises(runner.SpecReadError, match="transporte"):
+        runner.load_spec_all("p")
+
+
+def test_m08_estrito_lista_vazia_com_200_continua_vazio_e_off_segue_historico(monkeypatch):
+    set_effective_flags(monkeypatch, attachments_strict=True)
+    monkeypatch.setattr(runner, "_api_get", lambda path: ([], 200))
+    assert runner.load_spec_all("p") == ""
+    set_effective_flags(monkeypatch)  # off: status != 200 continua devolvendo "" (histórico)
+    monkeypatch.setattr(runner, "_api_get", lambda path: (None, 500))
+    assert runner.load_spec_all("p") == ""
+
+
+def test_m24_rotulo_de_fallback_usa_letra_x_e_o_resumo_reconhece(monkeypatch):
+    set_effective_flags(monkeypatch, task_inherit=True)
+    store = FakeTaskStore(); store.install(monkeypatch)
+    store.seed("0a1b2c3d-pai", "TSK-BE-001", requirements="crud")
+    runner._inherit_parent_tasks("filho", "0a1b2c3d-pai")
+    [tid] = store.ids("filho")
+    assert tid == "TSK-INH-X0A1B2C3D-BE-001"
+    assert not runner._INH_VERSIONED_RE.match(tid) and runner._INH_FALLBACK_RE.match(tid)
+    assert store.tasks["filho"][tid]["requirements"].startswith("[HERDADA de versão não identificada (X0A1B2C3D)")
+    out = runner._summarize_inherited_tasks([{"taskId": tid, "status": "DONE", "requirements": "crud"}], parent_version=None, max_tokens=5000)
+    assert "origem sem versão registrada (pai X0A1B2C3D)" in out and "herança legada" not in out

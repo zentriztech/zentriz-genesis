@@ -34,6 +34,8 @@ import { internalLlmRoutes } from "./routes/internalLlm.js";
 import { llmGuardInternalRoutes, llmGuardUserRoutes } from "./routes/llmGuard.js";
 import { llmAnomalyRoutes } from "./routes/llmAnomaly.js";
 import { evolveReconcilerRoutes } from "./routes/evolveReconciler.js";
+import { projectFlagsRoutes } from "./routes/projectFlags.js";
+import { MULTIPART_MAX_FILES, MULTIPART_MAX_FILE_BYTES } from "./services/ticketAttachments.js";
 import { telegramRoutes } from "./routes/telegram.js";
 import { runtimeConfigRoutes } from "./routes/runtimeConfig.js";
 import { skillsRoutes } from "./routes/skills.js";
@@ -80,7 +82,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
     }
   });
   await app.register(fastifyMultipart, {
-    limits: { files: 10, fileSize: 10 * 1024 * 1024 },
+    limits: { files: MULTIPART_MAX_FILES, fileSize: MULTIPART_MAX_FILE_BYTES }, // M-17: as faixas de ATTACHMENT_MAX_* param aqui
   });
 
   app.get("/health", async (_request, reply) => {
@@ -124,6 +126,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(llmGuardInternalRoutes); // post-mortem 30/09: licença + registro de TODA chamada de LLM paga
   await app.register(llmGuardUserRoutes); // orçamento em USD por projeto + chave geral (admin)
   await app.register(llmAnomalyRoutes); // tarefa 1.6: consulta dos alertas de anomalia (somente leitura, admin)
+  await app.register(projectFlagsRoutes); // M-03: flags efetivas do projeto (tenant) para o runner
   await app.register(evolveReconcilerRoutes); // tarefa 1.8: achados do reconciliador do /evolve (somente leitura, admin)
   await app.register(telegramRoutes);
   await app.register(runtimeConfigRoutes);
