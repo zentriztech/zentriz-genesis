@@ -22,6 +22,7 @@
 import { observer } from "mobx-react-lite";
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useCardsEnabled } from "@/lib/cards/useCardsEnabled";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -42,6 +43,7 @@ import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
+import ViewKanbanOutlinedIcon from "@mui/icons-material/ViewKanbanOutlined";
 import Inventory2OutlinedIcon from "@mui/icons-material/Inventory2Outlined";
 import RocketLaunchIcon from "@mui/icons-material/RocketLaunch";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
@@ -122,6 +124,8 @@ function lifecycleChip(ls: string | null): { label: string; color: "default" | "
 function ProductsPageInner() {
   const router = useRouter();
   const [products, setProducts] = useState<ProductRow[]>([]);
+  // Cards da Bancada: a flag é do tenant; um produto da lista serve de sonda (sem flag, nada muda na tela).
+  const cardsOn = useCardsEnabled(products[0]?.id);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -423,6 +427,16 @@ function ProductsPageInner() {
         // Sem ação de escrita aqui: a leitura é o que resta, então ela é a primária.
         primary: temDocs,
         onClick: () => { void openPlan(p); },
+      });
+    }
+    // 4b) Cards de evolução (flag CARDS_BANCADA) — só quando o produto já tem projeto.
+    if (cardsOn && p.project_count > 0) {
+      acoes.push({
+        key: "cards",
+        label: "Cards de evolução",
+        icon: <ViewKanbanOutlinedIcon sx={{ fontSize: "0.9rem" }} />,
+        tooltip: "Quadro de cards: pedidos de evolução, correção e recurso novo deste produto.",
+        onClick: () => router.push(`/products/${p.id}/cards`),
       });
     }
     // 5) Relatórios em PDF — em qualquer estado: o valor é contar a construção.

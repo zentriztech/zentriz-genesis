@@ -17,11 +17,14 @@ function getAuthHeaders(): Record<string, string> {
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string | undefined;
-  constructor(message: string, status: number, code?: string) {
+  /** Corpo JSON do erro (campos extras como `details`, `errors[]`, `freeUsd`), quando houver. */
+  readonly body: Record<string, unknown> | undefined;
+  constructor(message: string, status: number, code?: string, body?: Record<string, unknown>) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.body = body;
   }
 }
 
@@ -39,7 +42,12 @@ function getErrorCode(text: string): string | undefined {
 async function toApiError(res: Response): Promise<ApiError> {
   const text = await res.clone().text().catch(() => "");
   const message = await getErrorMessage(res);
-  return new ApiError(message, res.status, getErrorCode(text));
+  let body: Record<string, unknown> | undefined;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Record<string, unknown>;
+  } catch { /* corpo não JSON */ }
+  return new ApiError(message, res.status, getErrorCode(text), body);
 }
 
 /** Extrai mensagem amigável do corpo de erro da API (ex.: { code, message }) */
