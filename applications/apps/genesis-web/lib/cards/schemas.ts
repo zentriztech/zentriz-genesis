@@ -48,6 +48,19 @@ export const s = {
       for (const [k, x] of Object.entries(v)) inner.check(x, `${p}.${k}`, e);
     },
   }),
+  /** Variantes do mesmo código (ex.: corpo por rota): vale se QUALQUER uma passar; senão reporta os erros da mais próxima. */
+  oneOf: <A extends Sch<unknown>[]>(...alts: A): Sch<Out<A[number]>> => ({
+    check: (v, p, e) => {
+      let best: string[] | null = null;
+      for (const a of alts) {
+        const errs: string[] = [];
+        a.check(v, p, errs);
+        if (errs.length === 0) return;
+        if (!best || errs.length < best.length) best = errs;
+      }
+      e.push(...(best ?? [`${p}: nenhuma variante aceita`]));
+    },
+  }),
   object: <S extends Shape>(shape: S, opts: { passthrough?: boolean } = {}): Sch<Flat<ObjOut<S>>> => ({
     check: (v, p, e) => {
       if (!v || typeof v !== "object" || Array.isArray(v)) { e.push(`${p}: esperado objeto, veio ${kind(v)}`); return; }
@@ -204,11 +217,21 @@ export const ERROR_SCHEMAS: Record<string, Sch<unknown>> = {
   EVOLUTION_RFC_INVALID: E("EVOLUTION_RFC_INVALID", { details: s.array(rfcProblem) }),
   EVOLUTION_RFC_REQUIRED: E("EVOLUTION_RFC_REQUIRED", { details: s.object({ template_endpoint: s.string, rfc_dir: s.string }) }),
   USE_CARD_PROMOTE: E("USE_CARD_PROMOTE", { cardId: s.string }),
+  // Códigos da correção L1/AC — schemas ESTRITOS gravados a partir das respostas reais (AB-04). Cada um tem fixture em `__contract__/`.
+  USE_CARDS: E("USE_CARDS"),
+  INVALID_ID: E("INVALID_ID"),
+  USE_CARD_DELETE: E("USE_CARD_DELETE", { cardId: s.string, hint: s.string }),
+  CARD_ACTION_NOT_ALLOWED: E("CARD_ACTION_NOT_ALLOWED"),
+  CARD_SPEC_CHANGED: E("CARD_SPEC_CHANGED"),
+  CARD_ATTACHMENT_CONVERSION_PENDING: E("CARD_ATTACHMENT_CONVERSION_PENDING", {
+    pending: s.array(s.object({ id: s.string, filename: s.string, state: s.string })),
+  }),
+  // Duas formas, conforme a rota: escrita (`path`, um arquivo) e validar/promover (`paths`, o conjunto; `state` só na promoção).
+  CARD_PATH_COLLIDES_WITH_BASE: s.oneOf(
+    s.object({ code: s.literal("CARD_PATH_COLLIDES_WITH_BASE"), ...errBase, path: s.string }),
+    s.object({ code: s.literal("CARD_PATH_COLLIDES_WITH_BASE"), ...errBase, paths: s.array(s.string), state: s.optional(s.string) }),
+  ),
 };
-// Códigos que o backend (frente L1) ainda vai enviar: o portal já os aceita com o formato básico até a fixture real chegar na integração
-// — nessa hora o teste de contrato exige o schema estrito deles (campos extras = erro).
-export const ERROR_SCHEMAS_PREPARED = ["USE_CARDS", "INVALID_ID", "USE_CARD_DELETE", "CARD_PATH_COLLIDES_WITH_BASE"] as const;
-for (const code of ERROR_SCHEMAS_PREPARED) ERROR_SCHEMAS[code] ??= E(code);
 
 /** Corpo de erro genérico (só para tipar o que o cliente recebe): o contrato estrito é `errorSchemaFor(code)`. */
 export const errorBodySchema = s.object({ code: s.string, message: s.string, userMessage: s.optional(s.string) }, { passthrough: true });

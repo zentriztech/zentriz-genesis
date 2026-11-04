@@ -9,6 +9,7 @@ import { evolveClaimEnabled } from "../services/evolveFlags.js";
 import { runEvolveWithClaim } from "../services/evolveClaim.js";
 import { legacyEvolveBlockedByCard } from "../services/cardPromote.js";
 import { cardsBancadaEnabled } from "../services/cardState.js";
+import { loadCard } from "../services/cardService.js";
 import { useCanonicalProjectIds } from "../lib/uuid.js";
 import { isVersionConflict } from "../services/evolutionUniqueness.js";
 import { getInstallationTokenForClone, repoShortName } from "../services/github.js";
@@ -3479,13 +3480,25 @@ export async function projectRoutes(app: FastifyInstance) {
       }
     }
 
-    // Y-10: tenant com `CARDS_BANCADA` ligada pede evolução por CARD. O /evolve sem ticket cria filho fora do modelo de cards
-    // (sem rascunho, sem RFC maturado, sem carimbo); quem tem ticket segue o caminho do ticket (que já recusa card, acima).
-    if (!ticketId && (await cardsBancadaEnabled(pool, user.tenantId ?? null).catch(() => false))) {
-      return reply.status(409).send({
-        code: "USE_CARDS",
-        message: "Este tenant usa cards: abra um card (POST /api/products/:productId/cards) em vez de evoluir direto com /evolve sem pedido.",
-      });
+    // Y-10 / AB-02: tenant com `CARDS_BANCADA` ligada pede evolução por CARD. O /evolve sem ticket cria filho fora do modelo de cards
+    // (sem rascunho, sem RFC maturado, sem carimbo); com ticket LEGADO (sem card_state, ainda não promovido) é a mesma porta dos fundos.
+    // A flag é a do tenant do PROJETO (não a de `user.tenantId`) e só vale para quem enxerga o projeto (sem vazar a flag de outro tenant).
+    {
+      const parent = (await pool.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [parentId]).catch(() => ({ rows: [] }))).rows[0] as { id: string; tenant_id: string | null; created_by: string | null } | undefined;
+      if (parent && canAccessProjectRow(user, parent) && (await cardsBancadaEnabled(pool, parent.tenant_id ?? null).catch(() => false))) {
+        let legacyTicket = !ticketId;
+        if (ticketId) {
+          const t = await loadCard(pool, ticketId);
+          // ticket inexistente ⇒ segue o caminho histórico (404); ticket legado já promovido ⇒ replay idempotente do histórico
+          legacyTicket = !!t && (t.card_state === null || t.card_state === undefined) && !t.child_project_id;
+        }
+        if (legacyTicket) {
+          return reply.status(409).send({
+            code: "USE_CARDS",
+            message: "Este tenant usa cards: abra um card (POST /api/products/:productId/cards) em vez de evoluir direto com /evolve (sem pedido ou com pedido legado).",
+          });
+        }
+      }
     }
 
     // Fase 1' (tarefas 1.1–1.3): com EVOLVE_CLAIM=on o /evolve roda em duas etapas (claim transacional com

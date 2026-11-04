@@ -73,4 +73,12 @@ describe("PromotePanel", () => {
       unmount();
     }
   });
+
+  it("AB-03: card pronto cujo papel não pode promover (actions.promote=false) não mostra o botão que daria 403 e explica por quê", () => {
+    const card = { ...detailOf("ready"), actions: { ...detailOf("ready").actions, promote: false } };
+    render(<PromotePanel card={card} journey={journeyOf("ready")} runner={runner()} />);
+    expect(screen.queryByRole("button", { name: /Promover à fábrica/ })).not.toBeInTheDocument();
+    expect(screen.getByTestId("promote-not-allowed")).toHaveTextContent(/autor do card ou um administrador do tenant/);
+    expect(screen.getByTestId("promote-not-allowed")).toHaveTextContent(/conta de gestão/);
+  });
 });

@@ -1,0 +1,8 @@
+{
+  "request": "POST /api/projects/:id/evolve",
+  "status": 409,
+  "body": {
+    "code": "USE_CARDS",
+    "message": "Este tenant usa cards: abra um card (POST /api/products/:productId/cards) em vez de evoluir direto com /evolve (sem pedido ou com pedido legado)."
+  }
+}

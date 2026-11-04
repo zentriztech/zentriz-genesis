@@ -53,6 +53,8 @@ import { connectDeclarationRoutes } from "./connectDeclaration.js";
 import { syncCardForChildProject } from "../services/cardPromote.js";
 import { transitionCard } from "../services/cardState.js";
 import { CARD_ERRORS } from "../services/cardErrors.js";
+import { cardReadyTestHooks, specHashOf } from "../services/cardService.js";
+import { randomUUID } from "crypto";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const CONTRACT_DIR = resolve(HERE, "../../../../apps/genesis-web/lib/cards/__contract__");
@@ -159,11 +161,18 @@ describePg("Contrato dos cards — respostas reais gravadas como fixtures do por
 
   const as = (s: Seed, role = "tenant_admin") => Object.assign(testUser, { id: s.userId, email: `u@${s.tenantId}.test`, role, tenantId: s.tenantId });
   const flagOn = (tenantId: string) => pool.query("INSERT INTO genesis_runtime_config (key, value, tenant_id) VALUES ('CARDS_BANCADA', '1', $1)", [tenantId]);
-  const mk = async (o: { budgetUsd?: number | null; flag?: boolean } = {}) => {
+  const mk = async (o: { budgetUsd?: number | null; flag?: boolean; withAdr?: boolean } = {}) => {
     const s = await seedAcceptedProduct(pool, {
       budgetUsd: o.budgetUsd === undefined ? 50 : o.budgetUsd,
       specContent: "# Spec do pai\n\nO app lista entregas. Prazo de 48h.\n",
-      extraFiles: [{ relDir: "docs", filename: "regras.md", content: "# Regras\n\nPrazo de 48h para entregas urgentes.\n" }],
+      extraFiles: [
+        { relDir: "docs", filename: "regras.md", content: "# Regras\n\nPrazo de 48h para entregas urgentes.\n" },
+        // AC (AB-04): versão corrente com RFC/ADR herdados, para as recusas por colisão com a base
+        ...(o.withAdr ? [
+          { relDir: "docs/adr", filename: "ADR-001-formato.md", content: "# ADR-001 — Formato\n\nDecisão herdada da versão corrente.\n" },
+          { relDir: "docs/rfc", filename: "RFC-0004-legado.md", content: "# RFC-0004 — Legado\n\nRFC histórico da versão corrente.\n" },
+        ] : []),
+      ],
     });
     seeds.push(s);
     process.env.UPLOAD_DIR = UP;
@@ -426,5 +435,65 @@ describePg("Contrato dos cards — respostas reais gravadas como fixtures do por
     const first = l.items.find((x: { filename: string }) => x.filename === "regra.txt");
     const dl = await get(s, `/api/cards/${id}/attachments/${first.id}`);
     expect(dl.statusCode).toBe(200);
+  }, 120_000);
+
+  it("AC / AB-04: códigos de erro novos — colisão com a base, conversão pendente, spec mudou, papel, id inválido, USE_CARD_DELETE e USE_CARDS", async () => {
+    const s = await mk({ withAdr: true });
+    // (1) escrita no caminho/número que a versão corrente já tem
+    const c = await create(s);
+    const d = c.draftProjectId;
+    rec("spec-write.409-path-collides-base", "POST /api/projects/:draftId/spec-file", await post(s, `/api/projects/${d}/spec-file`, { path: "docs/adr/ADR-001-formato.md", content: "# ADR-001 — reescrito\n" }), 409);
+    rec("spec-write.409-number-collides-base", "POST /api/projects/:draftId/spec-file", await post(s, `/api/projects/${d}/spec-file`, { path: "docs/rfc/RFC-0004-outro-nome.md", content: rfc({ n: 4 }) }), 409);
+    // id de projeto fora da forma canônica
+    rec("spec-write.400-invalid-id", "POST /api/projects/:id/spec-file", await post(s, `/api/projects/${d.replace(/-/g, "")}/spec-file`, { path: "tickets/TK-0001/x.md", content: "x" }), 400);
+    // rascunho não se apaga pela rota de projeto
+    rec("project-delete.409-use-card-delete", "DELETE /api/projects/:draftId", await req(s, "DELETE", `/api/projects/${d}`), 409);
+
+    // (2) 'Validar': arquivo que escapou da escrita, conversão pendente e spec que muda no meio
+    await addDraftFile(d, "docs/adr", "ADR-001-formato.md", "# ADR-001 — reescrito pelo card\n");
+    await addRfc(d, { n: 5 });
+    rec("ready.409-path-collides-base", "POST /api/cards/:id/ready", await post(s, `/api/cards/${c.id}/ready`), 409);
+    await pool.query("DELETE FROM project_spec_files WHERE project_id = $1 AND filename = 'ADR-001-formato.md'", [d]);
+    const pdfDir = join(UP, "att", c.id);
+    mkdirSync(pdfDir, { recursive: true });
+    const pdf = join(pdfDir, "contrato.pdf");
+    writeFileSync(pdf, "%PDF-1.4 fake");
+    const att = (await pool.query(
+      `INSERT INTO ticket_attachments (ticket_id, filename, file_path, mime_type, size_bytes, content_sha256, kind, origin)
+       VALUES ($1,'contrato.pdf',$2,'application/pdf',13,$3,'card_only','upload') RETURNING id`, [c.id, pdf, sha256("%PDF-1.4 fake")])).rows[0].id as string;
+    await pool.query("INSERT INTO attachment_conversions (attachment_id, content_sha256, status) VALUES ($1,$2,'pending')", [att, sha256("%PDF-1.4 fake")]);
+    rec("ready.409-conversion-pending", "POST /api/cards/:id/ready", await post(s, `/api/cards/${c.id}/ready`), 409);
+    await pool.query("UPDATE attachment_conversions SET status = 'empty' WHERE attachment_id = $1", [att]);
+    cardReadyTestHooks.afterSnapshot = async () => { await addDraftFile(d, "docs", "nota-na-janela.md", "# Nota\n\nEscrita entre a leitura e o carimbo.\n"); };
+    try {
+      rec("ready.409-spec-changed", "POST /api/cards/:id/ready", await post(s, `/api/cards/${c.id}/ready`), 409);
+    } finally { cardReadyTestHooks.afterSnapshot = undefined; }
+    await pool.query("DELETE FROM project_spec_files WHERE project_id = $1 AND filename = 'nota-na-janela.md'", [d]);
+    expect((await post(s, `/api/cards/${c.id}/ready`)).statusCode).toBe(200);
+
+    // (3) papéis: user não autor e conta de gestão não promovem
+    const mkUser = async (role: string) => (await pool.query(`INSERT INTO users (email, name, role, tenant_id) VALUES ($1,'u',$2,$3) RETURNING id`, [`r-${randomUUID()}@x.test`, role, s.tenantId])).rows[0].id as string;
+    Object.assign(testUser, { id: await mkUser("user"), role: "user", tenantId: s.tenantId });
+    rec("promote.403-not-allowed", "POST /api/cards/:id/promote", await app.inject({ method: "POST", url: `/api/cards/${c.id}/promote` }), 403);
+    Object.assign(testUser, { id: await mkUser("user"), role: "zentriz_admin", tenantId: s.tenantId });
+    rec("promote.403-zentriz-admin", "POST /api/cards/:id/promote", await app.inject({ method: "POST", url: `/api/cards/${c.id}/promote` }), 403);
+
+    // (4) carimbo válido + colisão que escapou: o claim recusa e o card volta a refining
+    await addDraftFile(d, "docs/adr", "ADR-001-formato.md", "# ADR-001 — reescrito depois do ready\n");
+    await pool.query(`UPDATE projects SET extra = jsonb_set(extra, '{card_ready,draft_spec_hash}', to_jsonb($2::text)) WHERE id = $1`, [d, await specHashOf(pool, d)]);
+    rec("promote.409-path-collides-base", "POST /api/cards/:id/promote", await post(s, `/api/cards/${c.id}/promote`), 409);
+
+    // (5) flag ligada: pedidos fora da máquina de cards
+    rec("legacy-evolve.409-use-cards", "POST /api/projects/:id/evolve", await post(s, `/api/projects/${s.parentId}/evolve`, { request: "evoluir direto" }), 409);
+    rec("legacy-ticket-create.409-use-cards", "POST /api/products/:productId/tickets", await post(s, `/api/products/${s.productId}/tickets`, { title: "legado", body: "pedido legado" }), 409);
+  }, 120_000);
+
+  it("AC / AB-04: jornada com o bloqueador 'globs não conferidos' (base andou, sem clone para conferir)", async () => {
+    const s = await mk();
+    filesRoot();
+    const c = await readyCard(s);
+    await addV2(s);
+    rec("revalidate.stale-globs-unverified", "POST /api/cards/:id/revalidate", await post(s, `/api/cards/${c.id}/revalidate`), 200);
+    rec("journey.ready-globs-unverified", "GET /api/cards/:id/journey", await get(s, `/api/cards/${c.id}/journey`), 200);
   }, 120_000);
 });

@@ -1,0 +1,9 @@
+{
+  "request": "POST /api/cards/:id/promote",
+  "status": 403,
+  "body": {
+    "code": "CARD_ACTION_NOT_ALLOWED",
+    "message": "Promover um card exige ser o autor dele ou administrador do tenant (a conta de gestão não promove).",
+    "userMessage": "Só o autor do card ou um administrador do tenant pode fazer isto."
+  }
+}

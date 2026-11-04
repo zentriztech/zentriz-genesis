@@ -1,0 +1,8 @@
+{
+  "request": "POST /api/products/:productId/tickets",
+  "status": 409,
+  "body": {
+    "code": "USE_CARDS",
+    "message": "Este tenant usa cards: abra o pedido por POST /api/products/00000000-0000-4000-8000-000000000001/cards (a rota de pedido legado não cria mais tickets)."
+  }
+}

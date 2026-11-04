@@ -1,0 +1,10 @@
+{
+  "request": "DELETE /api/projects/:draftId",
+  "status": 409,
+  "body": {
+    "code": "USE_CARD_DELETE",
+    "message": "Este projeto é o rascunho de um card: exclua o card (DELETE /api/cards/00000000-0000-4000-8000-000000000001, só em draft) ou recuse-o (POST /api/cards/00000000-0000-4000-8000-000000000001/reject).",
+    "cardId": "00000000-0000-4000-8000-000000000001",
+    "hint": "DELETE /api/cards/00000000-0000-4000-8000-000000000001"
+  }
+}

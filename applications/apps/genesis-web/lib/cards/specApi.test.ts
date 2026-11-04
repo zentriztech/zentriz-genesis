@@ -34,6 +34,9 @@ describe("escopo de escrita do card (espelho do backend, provado contra as fixtu
   it("sugere docs/rfc/RFC-NNNN-<slug>.md logo após o maior número presente", () => {
     expect(suggestRfcPath([], "Exportar entregas em CSV")).toBe("docs/rfc/RFC-0001-exportar-entregas-em-csv.md");
     expect(suggestRfcPath(["docs/rfc/RFC-0007-a.md", "docs/rfc/RFC-0003-b.md"], "Ação rápida!")).toBe("docs/rfc/RFC-0008-acao-rapida.md");
+    // AB-05: a versão corrente também reserva números — HEAD com RFC-0001 e rascunho vazio ⇒ RFC-0002 (antes sugeria RFC-0001 e duplicava)
+    expect(suggestRfcPath([], "Exportar CSV", ["docs/rfc/RFC-0001-exportar.md"])).toBe("docs/rfc/RFC-0002-exportar-csv.md");
+    expect(suggestRfcPath(["docs/rfc/RFC-0002-a.md"], "x", ["docs/rfc/RFC-0004-legado.md", "docs/adr/ADR-009-y.md"])).toBe("docs/rfc/RFC-0005-x.md");
     expect(newFilePathProblem("TK-0001", suggestRfcPath([], "qualquer título"))).toBeNull();
   });
 });

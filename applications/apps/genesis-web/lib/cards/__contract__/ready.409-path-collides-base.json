@@ -1,0 +1,12 @@
+{
+  "request": "POST /api/cards/:id/ready",
+  "status": 409,
+  "body": {
+    "code": "CARD_PATH_COLLIDES_WITH_BASE",
+    "paths": [
+      "docs/adr/ADR-001-formato.md"
+    ],
+    "message": "O rascunho tem arquivo(s) que já existem na versão corrente e seriam reescritos na promoção: docs/adr/ADR-001-formato.md. Renomeie ou remova do card.",
+    "userMessage": "Este arquivo já existe na versão corrente e não pode ser reescrito pelo card. Use outro nome ou número."
+  }
+}

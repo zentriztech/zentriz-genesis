@@ -493,6 +493,38 @@ describe("CardDetailView — aba da especificação", () => {
     expect(get.mock.calls.filter((c) => c[0] === `/api/cards/${ID}`).length).toBeGreaterThanOrEqual(2);              // e o card (o RFC move o rascunho para 'Refinando')
   });
 
+  it("AB-01: enquanto o planner de RFC gera, 'Validar' fica desabilitado (com aviso) e volta ao terminar", async () => {
+    route(detailOf("draft"), journeyOf("draft-ready-to-validate"), { __onlyRequest: true });
+    post.mockResolvedValue(specBody("evolution-plan.post-202"));
+    const user = userEvent.setup();
+    render_({ initialTab: "spec" });
+    const validar = await screen.findByRole("button", { name: "Validar" });
+    expect(validar).toBeEnabled();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const base = get.getMockImplementation()!;
+    get.mockImplementation(async (url: string) => {
+      if (url.includes("/evolution-plan/")) { await gate; return specBody("evolution-plan.get-done"); }
+      return base(url);
+    });
+    await user.click(screen.getByRole("button", { name: "Gerar RFC com a IA" }));
+    expect(await screen.findByRole("button", { name: "Gerando o RFC…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Validar" })).toBeDisabled();
+    expect(screen.getByText(/Aguarde o arquiteto terminar de escrever o RFC para validar/)).toBeInTheDocument();
+    release();
+    await screen.findByTestId("plan-done");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Validar" })).toBeEnabled());
+    expect(screen.queryByText(/Aguarde o arquiteto terminar/)).not.toBeInTheDocument();
+  });
+
+  it("AB-05: o caminho sugerido para o novo arquivo considera também os RFCs da versão corrente (base-spec), não só o rascunho", async () => {
+    const baseComRfc: BaseSpec = { ...BASE, files: [...BASE.files, { ...BASE.files[0], path: "docs/rfc/RFC-0001-exportar.md", relDir: "docs/rfc", filename: "RFC-0001-exportar.md", isPrimary: false }] };
+    route(detailOf("draft"), journeyOf("draft-no-rfc"), { __onlyRequest: true, [`/api/cards/${ID}/base-spec`]: baseComRfc });
+    render_({ initialTab: "spec" });
+    const field = await screen.findByLabelText(/Novo arquivo/);
+    await waitFor(() => expect(field).toHaveValue("docs/rfc/RFC-0002-exportar-entregas-em-csv.md"));
+  });
+
   it("planner: 402 de orçamento (corpo real) e job em erro (fixture real) viram mensagens claras, sem travar a tela", async () => {
     route(detailOf("draft"), journeyOf("draft-no-rfc"), { __onlyRequest: true });
     post.mockRejectedValueOnce(apiErrorFrom("promote.402-budget-paused"));

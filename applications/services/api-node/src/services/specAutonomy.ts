@@ -49,6 +49,7 @@
  * laço é o que é do PROJETO: edição humana, spec que saiu de edição, snapshot indisponível.
  */
 import { randomUUID } from "node:crypto";
+import { noteCardSpecWrite } from "./cardSpecGuard.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Pool } from "pg";
@@ -766,6 +767,8 @@ async function writeSpecFile(
     [sha256Hex(Buffer.from(content, "utf-8")), projectId, filePath],
   );
   await db.query("UPDATE projects SET spec_dirty_at = now() WHERE id = $1", [projectId]);
+  // AB-09: rascunho de card ⇒ escrita tardia derruba `ready` → `refining` (e descarta o carimbo); projeto comum: no-op.
+  await noteCardSpecWrite(db as never, projectId);
 }
 
 async function projectStatusOf(db: Db, projectId: string): Promise<string | null> {
@@ -2970,6 +2973,7 @@ async function createNewSpecFile(db: Db, projectId: string, relPath: string, con
     [projectId, filename, physical, sha256Hex(Buffer.from(content, "utf-8")), relDir],
   );
   await db.query("UPDATE projects SET spec_dirty_at = now() WHERE id = $1", [projectId]);
+  await noteCardSpecWrite(db as never, projectId); // AB-09
   return physical;
 }
 

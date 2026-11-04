@@ -37,13 +37,13 @@ function ScopeBadge({ kind }: { kind: "initial" | "card" }) {
     : <Chip size="small" color="primary" icon={<EditNoteIcon />} label="Spec deste card" />;
 }
 
-function BasePanel({ card, onStale, stale }: { card: CardDetail; onStale: (v: boolean) => void; stale?: boolean | null }) {
+function BasePanel({ card, onStale, stale, onFiles }: { card: CardDetail; onStale: (v: boolean) => void; stale?: boolean | null; onFiles?: (paths: string[]) => void }) {
   const [base, setBase] = useState<BaseSpec | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sel, setSel] = useState(0);
   useEffect(() => {
     let alive = true;
-    cardsApi.baseSpec(card.id).then((b) => { if (!alive) return; setBase(b); setSel(Math.max(0, b.files.findIndex((f) => f.isPrimary))); onStale(b.stale); })
+    cardsApi.baseSpec(card.id).then((b) => { if (!alive) return; setBase(b); setSel(Math.max(0, b.files.findIndex((f) => f.isPrimary))); onStale(b.stale); onFiles?.(b.files.map((f) => f.path)); })
       .catch((e) => { if (alive) setError(cardErrorMessage(e)); });
     return () => { alive = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -77,10 +77,12 @@ function BasePanel({ card, onStale, stale }: { card: CardDetail; onStale: (v: bo
   );
 }
 
-export function CardSpecTab({ card, locked, canReopen, runner, onChanged, onStale, baseStale, planRequested = false, onPlanStarted }: {
+export function CardSpecTab({ card, locked, canReopen, runner, onChanged, onStale, baseStale, planRequested = false, onPlanStarted, onPlanBusy }: {
   card: CardDetail; locked: boolean; canReopen: boolean; runner: CardRunner; onChanged: () => void | Promise<void>; onStale: (v: boolean) => void; baseStale?: boolean | null;
   /** A ação sugerida “Gerar o RFC com a IA” (situação do card) pediu o planner: a aba o dispara UMA vez e avisa por `onPlanStarted`. */
   planRequested?: boolean; onPlanStarted?: () => void;
+  /** AB-01: avisa a tela quando o planner está gerando — “Validar” fica desabilitado enquanto isso (o servidor também encerra o job ao validar). */
+  onPlanBusy?: (busy: boolean) => void;
 }) {
   const draftId = card.draftProjectId;
   const editableState = card.state === "draft" || card.state === "refining";
@@ -96,6 +98,7 @@ export function CardSpecTab({ card, locked, canReopen, runner, onChanged, onStal
   const [busy, setBusy] = useState(false);
   const [newPath, setNewPath] = useState("");
   const [newPathTouched, setNewPathTouched] = useState(false);
+  const [basePaths, setBasePaths] = useState<string[]>([]);   // arquivos da versão corrente: seus números de RFC/ADR são reservados (AB-05)
   const [versionsSignal, setVersionsSignal] = useState(0);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
@@ -112,7 +115,7 @@ export function CardSpecTab({ card, locked, canReopen, runner, onChanged, onStal
     } catch (e) { if (alive.current) { setError(cardErrorMessage(e)); setFiles([]); } }
   }, [draftId, card.code]);
   useEffect(() => { void loadFiles(); }, [loadFiles]);
-  useEffect(() => { if (files && !newPathTouched) setNewPath(suggestRfcPath(files, card.title)); }, [files, card.title, newPathTouched]);
+  useEffect(() => { if (files && !newPathTouched) setNewPath(suggestRfcPath(files, card.title, basePaths)); }, [files, card.title, newPathTouched, basePaths]);
 
   const loadFile = useCallback(async (p: string) => {
     if (!draftId || !p) { setContent(""); setOrig(""); return; }
@@ -165,8 +168,12 @@ export function CardSpecTab({ card, locked, canReopen, runner, onChanged, onStal
   const planTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (planTimer.current) clearTimeout(planTimer.current); }, []);
   const planBusy = useRef(false);
+  const planRunning = plan.state === "running";
+  useEffect(() => { onPlanBusy?.(planRunning); return () => onPlanBusy?.(false); }, [planRunning, onPlanBusy]);
+  // AB-01: gerar/criar RFC e validar são exclusivos — com a validação em curso o planner não parte.
+  const validating = runner.busy === "ready";
   const generateRfc = useCallback(async () => {
-    if (!draftId || readOnly || planBusy.current) return;
+    if (!draftId || readOnly || validating || planBusy.current) return;
     planBusy.current = true;
     setPlan({ state: "running" }); setError(null);
     try {
@@ -184,7 +191,7 @@ export function CardSpecTab({ card, locked, canReopen, runner, onChanged, onStal
       };
       await poll(PLAN_MAX_POLLS);
     } catch (e) { planBusy.current = false; if (alive.current) setPlan({ state: "error", message: cardErrorMessage(e) }); }
-  }, [draftId, readOnly, planText, loadFiles, onChanged]);
+  }, [draftId, readOnly, validating, planText, loadFiles, onChanged]);
   useEffect(() => {
     if (!planRequested) return;
     onPlanStarted?.();
@@ -239,7 +246,7 @@ export function CardSpecTab({ card, locked, canReopen, runner, onChanged, onStal
         </Alert>
       )}
       <Box sx={{ display: "grid", gap: 2, gridTemplateColumns: { xs: "1fr", lg: "1fr 1fr" }, alignItems: "start" }}>
-        <BasePanel card={card} onStale={onStale} stale={baseStale} />
+        <BasePanel card={card} onStale={onStale} stale={baseStale} onFiles={setBasePaths} />
         <Box component="section" aria-labelledby="card-spec-title" sx={{ border: "2px solid", borderColor: "primary.main", borderRadius: 1, p: 1.5, minWidth: 0 }}>
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
             <Typography id="card-spec-title" variant="subtitle2" component="h2">Especificação do card</Typography>
@@ -254,10 +261,10 @@ export function CardSpecTab({ card, locked, canReopen, runner, onChanged, onStal
               <Typography variant="body2" fontWeight={600} component="p">RFC do card</Typography>
               {!hasRfc && files !== null && <Typography variant="body2" color="text.secondary">O card ainda não tem RFC. Para validar, ele precisa de um RFC com critérios de aceite em Gherkin.</Typography>}
               <TextField size="small" fullWidth multiline minRows={2} label="Instruções para o arquiteto (opcional)" value={planText} onChange={(e) => setPlanText(e.target.value)}
-                disabled={plan.state === "running" || busy} sx={{ mt: 1 }} helperText="Sem instruções, o arquiteto usa o pedido do card. A geração usa o orçamento de IA do produto." />
+                disabled={plan.state === "running" || busy || validating} sx={{ mt: 1 }} helperText="Sem instruções, o arquiteto usa o pedido do card. A geração usa o orçamento de IA do produto." />
               <Stack direction="row" spacing={1} sx={{ mt: 1 }} flexWrap="wrap" useFlexGap alignItems="center">
-                <Button size="small" variant="contained" disabled={plan.state === "running" || busy} onClick={() => void generateRfc()}>{plan.state === "running" ? "Gerando o RFC…" : "Gerar RFC com a IA"}</Button>
-                <Button size="small" variant="outlined" disabled={plan.state === "running" || busy} onClick={() => void fromTemplate()}>Novo RFC a partir do modelo</Button>
+                <Button size="small" variant="contained" disabled={plan.state === "running" || busy || validating} onClick={() => void generateRfc()}>{plan.state === "running" ? "Gerando o RFC…" : "Gerar RFC com a IA"}</Button>
+                <Button size="small" variant="outlined" disabled={plan.state === "running" || busy || validating} onClick={() => void fromTemplate()}>Novo RFC a partir do modelo</Button>
                 {plan.state === "running" && <CircularProgress size={18} aria-label="O arquiteto está escrevendo o RFC" />}
               </Stack>
               {plan.state === "running" && <Typography variant="caption" component="p" role="status" sx={{ mt: 0.5 }}>O arquiteto está escrevendo o RFC. Isso pode levar alguns minutos; você pode continuar nesta tela.</Typography>}

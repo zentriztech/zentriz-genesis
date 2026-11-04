@@ -86,16 +86,20 @@ export function PromotePanel({ card, journey, runner, journeyLoading = false }: 
         <Item state={checks.base}>base atual: o produto não mudou de versão desde a validação.</Item>
       </Box>
       {banners}
+      {/* AB-03: quem não pode promover (usuário comum que não é autor, conta de gestão) não vê um botão que daria 403 */}
+      {!card.actions.promote && <Alert severity="info" sx={{ mb: 1 }} data-testid="promote-not-allowed">Só o autor do card ou um administrador do tenant pode promover. A conta de gestão da Zentriz não promove.</Alert>}
       <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-        <Button variant="contained" color="success" disabled={!card.actions.promote || busy !== null || blocked || journeyLoading} onClick={() => void run("promote")} aria-describedby="promote-title">
-          {busy === "promote" ? "Promovendo…" : "Promover à fábrica"}
-        </Button>
+        {card.actions.promote && (
+          <Button variant="contained" color="success" disabled={busy !== null || blocked || journeyLoading} onClick={() => void run("promote")} aria-describedby="promote-title">
+            {busy === "promote" ? "Promovendo…" : "Promover à fábrica"}
+          </Button>
+        )}
         {card.actions.revalidate && (
           <Button variant="outlined" disabled={busy !== null} onClick={() => void run("revalidate")}>{busy === "revalidate" ? "Revalidando…" : "Revalidar"}</Button>
         )}
       </Stack>
       {journeyLoading && <Typography variant="caption" component="p" color="text.secondary" role="status" sx={{ mt: 0.75 }}>Conferindo a situação do card no servidor…</Typography>}
-      {blocked && <Typography variant="caption" component="p" color="text.secondary" sx={{ mt: 0.75 }}>A promoção está indisponível enquanto houver bloqueio na situação do card (acima).</Typography>}
+      {card.actions.promote && blocked && <Typography variant="caption" component="p" color="text.secondary" sx={{ mt: 0.75 }}>A promoção está indisponível enquanto houver bloqueio na situação do card (acima).</Typography>}
     </Box>
   );
 }

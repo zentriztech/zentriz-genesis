@@ -41,6 +41,7 @@ function CardDetailViewInner({ cardId, initialTab = "request" }: { cardId: strin
   const [baseSpecStale, setBaseSpecStale] = useState<boolean | null>(null);
   const [planRequested, setPlanRequested] = useState(false);   // ação sugerida “Gerar o RFC com a IA”: abre a aba e dispara o planner (uma vez)
   const onPlanStarted = useCallback(() => setPlanRequested(false), []);
+  const [planBusy, setPlanBusy] = useState(false);   // AB-01: planner de RFC em curso na aba da spec ⇒ “Validar” desabilitado
 
   const loadJourney = useCallback(async () => {
     try { setJourney(await cardsApi.journey(cardId)); setJourneyError(null); }
@@ -74,14 +75,14 @@ function CardDetailViewInner({ cardId, initialTab = "request" }: { cardId: strin
         </Alert>
       )}
       <CardStatusPanel card={card} journey={journey} journeyError={journeyError} runner={runner} onTab={setTab} onGenerateRfc={() => { setTab("spec"); setPlanRequested(true); }} onReloadJourney={() => void loadJourney()} />
-      <CardActionsBar card={card} runner={runner} />
+      <CardActionsBar card={card} runner={runner} planBusy={planBusy} />
       <Box sx={{ mt: 2 }}><PromotePanel card={card} journey={journey} runner={runner} journeyLoading={journey === null && journeyError === null} /></Box>
       <Tabs value={tab} onChange={(_, v: CardTab) => setTab(v)} variant="scrollable" scrollButtons="auto" aria-label="Seções do card" sx={{ mt: 2, borderBottom: 1, borderColor: "divider" }}>
         {CARD_TABS.map((t) => <Tab key={t} value={t} label={TAB_LABEL[t]} id={`card-tab-${t}`} aria-controls={`card-panel-${t}`} />)}
       </Tabs>
       <Box role="tabpanel" id={`card-panel-${tab}`} aria-labelledby={`card-tab-${tab}`} sx={{ pt: 2 }}>
         {tab === "request" && <CardRequestTab card={card} onChanged={load} />}
-        {tab === "spec" && <CardSpecTab card={card} locked={locked} canReopen={canReopen} runner={runner} onChanged={load} onStale={setBaseSpecStale} baseStale={journey?.base?.stale ?? baseSpecStale} planRequested={planRequested} onPlanStarted={onPlanStarted} />}
+        {tab === "spec" && <CardSpecTab card={card} locked={locked} canReopen={canReopen} runner={runner} onChanged={load} onStale={setBaseSpecStale} baseStale={journey?.base?.stale ?? baseSpecStale} planRequested={planRequested} onPlanStarted={onPlanStarted} onPlanBusy={setPlanBusy} />}
         {tab === "versions" && (card.draftProjectId
           ? <SpecVersionsPanel projectId={card.draftProjectId} onRestored={() => void load()} />
           : <Alert severity="info">Sem rascunho de especificação para este card.</Alert>)}

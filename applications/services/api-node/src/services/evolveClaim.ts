@@ -949,6 +949,14 @@ async function stepCardSpec(
 ): Promise<Json> {
   const code = ticketCode(a.ticket.number);
   const tkDir = `tickets/${code}`;
+  // AB-01 (defesa final): só se copia o que o `ready` carimbou. Se o rascunho mudou depois do carimbo (escritor tardio, planner), o
+  // conjunto lido agora não é o validado ⇒ falha terminal; nenhum conteúdo não validado chega ao filho.
+  const stamped = (await pool.query("SELECT extra->'card_ready'->>'draft_spec_hash' AS h FROM projects WHERE id = $1", [a.draftId])).rows[0]?.h as string | null | undefined;
+  const nowHash = (await computeCurrentSpecHash(pool as never, a.draftId).catch(() => null))?.specHash ?? null;
+  // hash `null` = arquivo sumiu do disco: segue para o laço abaixo, que falha com CARD_DRAFT_UNREADABLE (causa mais precisa)
+  if (!stamped || (nowHash !== null && stamped !== nowHash)) {
+    throw new TerminalFailure("CARD_DRAFT_CHANGED", "A spec do rascunho do card mudou depois da validação (carimbo): nada foi copiado para o filho. Descarte este filho, reabra o card e valide de novo.");
+  }
   const rows = (await pool.query(
     "SELECT file_path, filename, mime_type, rel_dir FROM project_spec_files WHERE project_id = $1 ORDER BY rel_dir, filename",
     [a.draftId],

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "@/lib/api";
 import { BACKEND_ERRORS, PORTAL_ONLY, cardErrorMessage, tableMessage } from "./cardErrors";
 import { CONTRACT_DIR, SPEC_CONTRACT_DIR, fixture, fixtureNames, specFixture, specFixtureNames } from "./contractFixtures";
-import { ERROR_SCHEMAS, ERROR_SCHEMAS_PREPARED, errorSchemaFor, schemaForFixture, schemaForSpecFixture, validate } from "./schemas";
+import { ERROR_SCHEMAS, errorSchemaFor, s, schemaForFixture, schemaForSpecFixture, validate } from "./schemas";
 
 // Contrato PORTAL × BACKEND: as fixtures são as respostas reais do api-node (teste de contrato do backend:
 // `npm run contract:gen` em applications/services/api-node). Aqui o portal prova que entende cada uma delas.
@@ -118,12 +118,52 @@ describe("códigos de erro: tabela do backend × mensagens do portal", () => {
     expect(validate(schemaForFixture("x.409", 409, { code: "CODIGO_NOVO" })!, { code: "CODIGO_NOVO", message: "m" })[0]).toMatch(/sem schema estrito/);
   });
 
-  it("todo código de erro das fixtures tem schema estrito, e os códigos preparados para o backend novo estão cadastrados", () => {
+  it("todo código de erro das fixtures tem schema estrito, e todo schema estrito tem fixture real (nada 'passa sem provar')", () => {
     const codes = new Set<string>();
     for (const n of names) { const f = fixture<{ code?: string }>(n); if (f.status >= 400) codes.add(String(f.body.code)); }
     for (const n of specFixtureNames()) { const f = specFixture<{ code?: string }>(n); if (f.status >= 400) codes.add(String(f.body.code)); }
     for (const c of codes) expect(errorSchemaFor(c), c).not.toBeNull();
-    for (const c of ERROR_SCHEMAS_PREPARED) expect(ERROR_SCHEMAS[c], c).toBeDefined();
+    // AB-04: o schema "preparado" sem fixture foi o que deixou os códigos novos passarem sem comparação nenhuma
+    const semFixture = Object.keys(ERROR_SCHEMAS).filter((c) => !codes.has(c));
+    expect(semFixture, `schemas sem fixture real (grave a resposta em cards.contract.pg e rode contract:gen): ${semFixture.join(", ")}`).toEqual([]);
+  });
+
+  it("AB-04: os códigos novos são comparados DE FATO — schema divergente, campo a menos ou a mais falha", () => {
+    const novos: Array<[string, string[]]> = [
+      ["project-delete.409-use-card-delete", ["cardId", "hint"]],
+      ["ready.409-conversion-pending", ["pending"]],
+      ["ready.409-path-collides-base", ["paths"]],
+      ["promote.409-path-collides-base", ["paths"]],
+      ["spec-write.409-path-collides-base", ["path"]],
+      ["spec-write.409-number-collides-base", ["path"]],
+      ["promote.403-not-allowed", []], ["promote.403-zentriz-admin", []], ["ready.409-spec-changed", []],
+      ["legacy-evolve.409-use-cards", []], ["legacy-ticket-create.409-use-cards", []], ["spec-write.400-invalid-id", []],
+    ];
+    for (const [name, campos] of novos) {
+      const f = fixture<Record<string, unknown>>(name);
+      const sch = schemaForFixture(name, f.status, f.body)!;
+      expect(validate(sch, f.body), name).toEqual([]);
+      expect(validate(sch, { ...f.body, campoNovo: 1 }).join("\n"), `${name}: campo a mais`).toMatch(/campo desconhecido/);
+      for (const c of campos) {
+        const { [c]: gone, ...semCampo } = f.body;
+        expect(gone, `${name}.${c}`).toBeDefined();
+        expect(validate(sch, semCampo).join("\n"), `${name}: sem ${c}`).toMatch(/campo ausente/);
+      }
+    }
+    // schema divergente do corpo real (o que o schema "básico" antigo fazia): o comparador reprova
+    const f = fixture<Record<string, unknown>>("project-delete.409-use-card-delete");
+    const basico = s.object({ code: s.literal("USE_CARD_DELETE"), message: s.string, userMessage: s.optional(s.string) });
+    expect(validate(basico, f.body).join("\n")).toMatch(/cardId: campo desconhecido[\s\S]*hint: campo desconhecido/);
+    const errado = s.object({ code: s.literal("USE_CARD_DELETE"), message: s.string, userMessage: s.optional(s.string), cardId: s.number, hint: s.string });
+    expect(validate(errado, f.body).join("\n")).toMatch(/cardId: esperado number/);
+    // a forma de `path` (escrita) NÃO vale para o corpo de `paths` (validar) e vice-versa só se o campo certo vier
+    const w = fixture<Record<string, unknown>>("spec-write.409-path-collides-base").body;
+    const v = fixture<Record<string, unknown>>("ready.409-path-collides-base").body;
+    expect(validate(ERROR_SCHEMAS.CARD_PATH_COLLIDES_WITH_BASE, { ...w, path: 7 }).length).toBeGreaterThan(0);
+    expect(validate(ERROR_SCHEMAS.CARD_PATH_COLLIDES_WITH_BASE, { ...v, paths: "x" }).length).toBeGreaterThan(0);
+    // bloqueador GLOBS_UNVERIFIED da jornada (AB-07): fixture real
+    const j = fixture<{ blockers: Array<{ code: string }> }>("journey.ready-globs-unverified").body;
+    expect(j.blockers.map((b) => b.code)).toContain("GLOBS_UNVERIFIED");
   });
 
   it("o validador é estrito: campo novo ou tipo trocado no backend quebra o teste", () => {

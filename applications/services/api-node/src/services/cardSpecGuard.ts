@@ -131,7 +131,7 @@ export function cardPathOutOfScopeBody(info: CardDraftInfo, path: string): Recor
 export function cardPathCollidesBody(info: CardDraftInfo, path: string): Record<string, unknown> {
   return {
     code: "CARD_PATH_COLLIDES_WITH_BASE",
-    message: `'${path}' já existe na spec da versão corrente (somente leitura): o card não pode reescrever RFC/ADR herdado. Crie um arquivo novo com outro número ou nome${info.code ? ` (${info.code})` : ""}.`,
+    message: `'${path}' já existe na spec da versão corrente (somente leitura): o card não pode reescrever RFC/ADR herdado nem reutilizar o número dele. Crie um arquivo novo com outro número${info.code ? ` (${info.code})` : ""}.`,
     userMessage: cardUserMessage("CARD_PATH_COLLIDES_WITH_BASE"),
     path,
   };
@@ -152,28 +152,44 @@ export async function findBaseCollision(db: GuardDb, info: CardDraftInfo, relDir
   const { resolveLineageHead } = await import("./lineage.js");
   const head = await resolveLineageHead(db as never, info.targetRootId).catch(() => null);
   if (!head) return null;
-  const hit = (await db.query(
-    "SELECT rel_dir, filename FROM project_spec_files WHERE project_id = $1 AND lower(btrim(COALESCE(rel_dir, ''), '/')) = $2 AND lower(filename) = $3 LIMIT 1",
-    [head.id, dir, filename.toLowerCase()],
-  )).rows[0];
+  // AB-05: além do nome idêntico, o NÚMERO de RFC/ADR do HEAD é reservado (nome diferente com o mesmo número duplicaria o MADR no filho).
+  const num = specNumberKey(filename);
+  const rows = (await db.query(
+    num
+      ? "SELECT rel_dir, filename FROM project_spec_files WHERE project_id = $1 AND lower(btrim(COALESCE(rel_dir, ''), '/')) = $2"
+      : "SELECT rel_dir, filename FROM project_spec_files WHERE project_id = $1 AND lower(btrim(COALESCE(rel_dir, ''), '/')) = $2 AND lower(filename) = $3 LIMIT 1",
+    num ? [head.id, dir] : [head.id, dir, filename.toLowerCase()],
+  )).rows as Array<{ rel_dir: string | null; filename: string }>;
+  const hit = rows.find((r) => String(r.filename).toLowerCase() === filename.toLowerCase() || (num !== null && specNumberKey(String(r.filename)) === num));
   return hit ? `${normDir(String(hit.rel_dir ?? "")) ? `${normDir(String(hit.rel_dir))}/` : ""}${String(hit.filename)}` : null;
 }
 
-/** Todos os caminhos do conjunto `files` que já existem no HEAD (fora da pasta do próprio card). Uma consulta só. */
+/** `RFC-0001-x.md` ⇒ `rfc:1`; `ADR-007-y.md` ⇒ `adr:7`; outro nome ⇒ `null`. Chave do número reservado pelo HEAD (AB-05). */
+export function specNumberKey(filename: string): string | null {
+  const m = /^(RFC|ADR)-(\d{1,6})(?:[-_.]|$)/i.exec(filename);
+  return m ? `${m[1].toLowerCase()}:${Number(m[2])}` : null;
+}
+
+/** Todos os caminhos do conjunto `files` que já existem no HEAD (fora da pasta do próprio card), por nome OU por número de RFC/ADR. Uma consulta só. */
 export async function findBaseCollisions(db: GuardDb, info: CardDraftInfo, files: Array<{ rel_dir: string | null; filename: string }>): Promise<string[]> {
   if (!info.targetRootId || files.length === 0) return [];
   const own = info.code ? `tickets/${info.code}`.toLowerCase() : null;
   const { resolveLineageHead } = await import("./lineage.js");
   const head = await resolveLineageHead(db as never, info.targetRootId).catch(() => null);
   if (!head) return [];
-  const rows = (await db.query("SELECT rel_dir, filename FROM project_spec_files WHERE project_id = $1", [head.id])).rows;
+  const rows = (await db.query("SELECT rel_dir, filename FROM project_spec_files WHERE project_id = $1", [head.id])).rows as Array<{ rel_dir: string | null; filename: string }>;
   const key = (d: string | null | undefined, f: string) => `${lowerNorm(d)}\u0000${f.toLowerCase()}`;
-  const inHead = new Map(rows.map((r) => [key(r.rel_dir as string | null, String(r.filename)), `${normDir(r.rel_dir as string | null) ? `${normDir(r.rel_dir as string | null)}/` : ""}${String(r.filename)}`]));
+  const numKey = (d: string | null | undefined, f: string) => { const n = specNumberKey(f); return n ? `${lowerNorm(d)}\u0000${n}` : null; };
+  const display = (r: { rel_dir: string | null; filename: string }) => `${normDir(r.rel_dir as string | null) ? `${normDir(r.rel_dir as string | null)}/` : ""}${String(r.filename)}`;
+  const inHead = new Map(rows.map((r) => [key(r.rel_dir as string | null, String(r.filename)), display(r)]));
+  const numInHead = new Map<string, string>();
+  for (const r of rows) { const k = numKey(r.rel_dir as string | null, String(r.filename)); if (k && !numInHead.has(k)) numInHead.set(k, display(r)); }
   const out: string[] = [];
   for (const f of files) {
     const dir = lowerNorm(f.rel_dir);
     if (own && (dir === own || dir.startsWith(`${own}/`))) continue;
-    const hit = inHead.get(key(f.rel_dir, f.filename));
+    const nk = numKey(f.rel_dir, f.filename);
+    const hit = inHead.get(key(f.rel_dir, f.filename)) ?? (nk ? numInHead.get(nk) : undefined);
     if (hit) out.push(hit);
   }
   return out;

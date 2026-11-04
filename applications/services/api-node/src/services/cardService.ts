@@ -389,7 +389,14 @@ export async function markCardReady(pool: Pool, card: CardRow, user: AuthUser): 
   const kind = (isCardKind(card.change_kind) ? card.change_kind : "evolution") as CardKind;
 
   // Y-07: conversão de anexo em andamento ainda pode gerar texto que nenhum validador viu.
-  const att0 = await cardAttachmentsSnapshot(pool, card);
+  let att0 = await cardAttachmentsSnapshot(pool, card);
+  // AB-06: anexo `queued` = convertível, conversão ligada e SEM linha na fila (enviado com a conversão desligada, ou o `kick` do upload
+  // falhou). Nada mais o enfileiraria: "Validar" enfileira e dispara a conversão agora, para a espera terminar sozinha.
+  if (att0.open.some((o) => o.state === "queued")) {
+    const { kickTicketConversions } = await import("./attachmentConversionQueue.js");
+    await kickTicketConversions(pool as never, card.tenant_id, card.id);
+    att0 = await cardAttachmentsSnapshot(pool, card);
+  }
   if (att0.open.length > 0) return { kind: "conversion_pending", open: att0.open };
 
   // (1) leitura única: conteúdo + hash
@@ -448,6 +455,14 @@ export async function markCardReady(pool: Pool, card: CardRow, user: AuthUser): 
           SET status = 'stalled', last_error = $2, finished_at = now(), updated_at = now()
         WHERE project_id = $1 AND status IN ('pending','cto_running','applying','validating')`,
       [draft.id, "Card validado (ready): o modo autônomo foi encerrado para não alterar a spec depois do carimbo. Reabra o card para voltar a editar."],
+    );
+    // AB-01: gerador de RFC (planner) ainda em voo neste rascunho não pode mais gravar depois do carimbo. O job é encerrado aqui; o
+    // próprio planner também reconfere a trava (sob o lock do ticket) antes de cada gravação.
+    await client.query(
+      `UPDATE evolution_plan_jobs
+          SET status = 'interrupted', error = $2, finished_at = now(), updated_at = now()
+        WHERE project_id = $1 AND status IN ('pending','running')`,
+      [draft.id, "Card validado (ready): a geração de RFC em andamento foi encerrada para não alterar a spec depois do carimbo. Reabra o card para gerar de novo."],
     );
     await client.query("COMMIT");
     out = { kind: "ready", replayed: t.kind === "noop", gate };
