@@ -92,8 +92,17 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
       const checkpoint = await readEvolutionCheckpoint(proj.id);
       const pick = <T,>(k: string, fallback: T): T => (checkpoint && k in checkpoint ? (checkpoint[k] as T) : fallback);
       const violations = pick<Record<string, string[]>>("evolution_violations", {});
+      // AU (N-3/N-4/N-6): os mesmos gates que o texto do PR afirma, lidos dos dados reais — inclui o diff real de apps/ contra o escopo do RFC
+      // (o que o gate do Dev não vê: lockfile/artefato de build) e a baseline sem testes. Best-effort: falha ⇒ null.
+      const factoryGates = await (async () => {
+        try {
+          const { describeFactoryGates } = await import("../services/evolutionAccept.js");
+          return await describeFactoryGates(pool, proj.id, { scope: Array.isArray(ex.evolution_scope) ? (ex.evolution_scope as string[]) : undefined });
+        } catch { return null; }
+      })();
       return reply.send({
         projectId: proj.id,
+        factoryGates,
         checkpoint: !!checkpoint,
         checkpointSavedAt: pick<string | null>("saved_at", null),
         scope: (ex.evolution_scope as string[] | undefined) ?? pick<string[]>("evolution_scope", []),
@@ -130,6 +139,8 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
           detail: (ex.evolution_merge_detail as string | undefined) ?? null,
           prNumber: (ex.evolution_pr_number as number | undefined) ?? null,
           acceptedPermissions: (ex.evolution_merge_accepted_permissions as string | undefined) ?? null,
+          // AU: quem confirmou o risco do merge (null se nunca foi preciso confirmar).
+          confirmation: (ex.evolution_merge_confirmation as Record<string, unknown> | undefined) ?? null,
         },
         // Bloco 4 M7 (Python): métricas de reescrita do Dev em evolução (do checkpoint); null se ausente.
         rewriteStats: pick<Record<string, unknown> | null>("evolution_dev_rewrite_stats", null),
@@ -217,7 +228,7 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
   // coisa e nada é gravado ⇒ `evolution_merge_state` vazio ⇒ o botão mergeava com regressões sem pedir
   // confirmação e sem contar ao humano que havia regressões. A pergunta certa não é "o que bloqueou
   // antes?", é "o que o `force` vai contornar AGORA?".
-  app.post<{ Params: { id: string }; Body: { confirm?: string } }>(
+  app.post<{ Params: { id: string }; Body: { confirm?: string; reason?: string } }>(
     "/api/projects/:id/evolution/merge",
     { bodyLimit: 4 * 1024 },
     async (request, reply) => {
@@ -254,6 +265,13 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
         blocked_no_tests: "a linha de base não tem testes (PASS_TO_PASS vazio)",
         blocked_regressions: "há regressões no PASS_TO_PASS",
       };
+      // O QUE significa cada risco, em linguagem de quem vai clicar (AU): o usuário não sabe o que é baseline/P2P.
+      const EXPLAIN: Record<string, string> = {
+        blocked_no_tests: "O produto gerado não tem testes automatizados que o Genesis consiga executar (sem configuração de testes, p.ex. jest), então a linha de base ficou SEM TESTES: não há baseline e o PASS_TO_PASS (a prova de que o que funcionava continua funcionando) não foi calculado. Nenhuma regressão foi verificada e a TSK-FULL-TEST pode não ter validado nada. Mergear significa aceitar o código sem essa prova; a decisão fica registrada com o seu nome.",
+        blocked_regressions: "A suíte de testes mediu testes que passavam na versão anterior e agora falham (ou a medição final falhou). Mergear leva essa regressão para `dev`; a decisão fica registrada com o seu nome.",
+        blocked_major: "Mudança MAJOR é incompatível com a versão anterior e pode quebrar quem a consome; nunca é automática. A decisão fica registrada com o seu nome.",
+        blocked_compat_implicit: "O RFC não declarou a compatibilidade (patch/minor/major); o Genesis assumiu 'minor' em silêncio. A decisão fica registrada com o seu nome.",
+      };
       const risk = RISK[probe.state];
       if (risk && (request.body?.confirm ?? "") !== "MERGE") {
         return reply.status(400).send({
@@ -261,8 +279,30 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
           state: probe.state,
           blockedBy: probe.state,
           detail: probe.detail ?? null,
-          message: `Esta evolução exige confirmação: ${risk}${probe.detail ? ` (${probe.detail})` : ""}. Reenvie com { confirm: "MERGE" } para assumir o risco.`,
+          explanation: EXPLAIN[probe.state] ?? null,
+          message: `Esta evolução exige confirmação: ${risk}${probe.detail ? ` (${probe.detail})` : ""}. ${EXPLAIN[probe.state] ?? ""} Reenvie com { confirm: "MERGE" } (e, se quiser, "reason") para assumir o risco.`.replace(/\s+/g, " "),
         });
+      }
+      // Trilha do `confirm` (AU): quem, quando e por quê. Gravada ANTES do merge — fail-closed: sem trilha, não mergeia. `force` só contorna a
+      // política depois de o humano ter ficado registrado.
+      if (risk) {
+        const confirmation = {
+          by_user_id: user.id, by_email: user.email ?? null, at: new Date().toISOString(),
+          blocked_by: probe.state, risk, detail: probe.detail ?? null,
+          reason: typeof request.body?.reason === "string" ? request.body.reason.trim().slice(0, 500) || null : null,
+        };
+        try {
+          await pool.query(
+            "UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1",
+            [proj.id, JSON.stringify({ evolution_merge_confirmation: confirmation })],
+          );
+          await pool.query(
+            "INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)",
+            [proj.id, `⚠️ Merge CONFIRMADO por ${user.email || user.id} apesar de: ${risk}${probe.detail ? ` (${probe.detail})` : ""}${confirmation.reason ? ` — motivo: ${confirmation.reason}` : ""}.`],
+          );
+        } catch {
+          return reply.status(503).send({ code: "AUDIT_UNAVAILABLE", message: "Não foi possível registrar a confirmação na trilha de auditoria; o merge NÃO foi feito. Tente novamente." });
+        }
       }
       const result = await tryAutoMergeEvolution(pool, proj.id, { force: true, actorUserId: user.id });
       const merged = result.state === "merged";

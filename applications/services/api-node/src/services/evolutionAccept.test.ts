@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
+import { execFileSync } from "child_process";
 
 const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "evo-accept-"));
 process.env.UPLOAD_DIR = path.join(tmpRoot, "uploads");
@@ -181,14 +182,16 @@ describe("evolutionAccept (Evoluir E5)", () => {
     const prevRoot = process.env.PROJECT_FILES_ROOT;
     afterEach(() => { if (prevRoot === undefined) delete process.env.PROJECT_FILES_ROOT; else process.env.PROJECT_FILES_ROOT = prevRoot; });
 
-    const mkDb = (dialogue: Array<{ event_type: string | null; summary_human: string }>) => ({
-      query: vi.fn(async (sql: string) => /FROM project_dialogue/.test(sql) ? { rows: dialogue } : { rows: [] }),
+    const mkDb = (dialogue: Array<{ event_type: string | null; summary_human: string }>, taskStatus: string | null = null) => ({
+      query: vi.fn(async (sql: string) => /FROM project_dialogue/.test(sql) ? { rows: dialogue }
+        : /FROM project_tasks/.test(sql) ? { rows: taskStatus ? [{ status: taskStatus }] : [] } : { rows: [] }),
     });
-    const writeCheckpoint = async (childId: string, violations: Record<string, string[]>) => {
+    const writeCheckpoint = async (childId: string, violations: Record<string, string[]>, more: Record<string, unknown> = {}) => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "d13-"));
       process.env.PROJECT_FILES_ROOT = root;
       await fs.mkdir(path.join(root, ".runner-state", childId), { recursive: true });
-      await fs.writeFile(path.join(root, ".runner-state", childId, "checkpoint.json"), JSON.stringify({ evolution_violations: violations }));
+      await fs.writeFile(path.join(root, ".runner-state", childId, "checkpoint.json"), JSON.stringify({ evolution_violations: violations, ...more }));
+      return root;
     };
 
     it("QA reprovado e escopo violado ⇒ o texto diz FALHOU nos dois e NÃO afirma que 'rodaram'", async () => {
@@ -207,14 +210,98 @@ describe("evolutionAccept (Evoluir E5)", () => {
     it("sem checkpoint e sem registro do QA ⇒ 'não executado/sem evidência' (nunca 'passou')", async () => {
       process.env.PROJECT_FILES_ROOT = await fs.mkdtemp(path.join(os.tmpdir(), "d13-"));
       const body = await buildPullRequestBody(mkDb([]) as never, "d13-b", "1.0.1", {});
-      expect(body.match(/não executado\/sem evidência/g)?.length).toBe(3);
+      expect(body.match(/não executado\/sem evidência/g)?.length).toBe(5); // escopo, símbolos, QA, TSK-FULL-TEST, baseline
       expect(body).not.toMatch(/\*\*passou\*\*/);
     });
 
-    it("tudo registrado e limpo ⇒ passou nos três", async () => {
+    it("escopo/símbolos/QA registrados e limpos ⇒ passou nos três; FULL-TEST e baseline SEM evidência continuam não executados", async () => {
       await writeCheckpoint("d13-c", {});
       const body = await buildPullRequestBody(mkDb([{ event_type: "qa.review", summary_human: "QA revisou" }]) as never, "d13-c", "1.0.1", {});
       expect(body.match(/\*\*passou\*\*/g)?.length).toBe(3);
+      expect(body).toMatch(/TSK-FULL-TEST \(e2e\): \*\*não executado/);
+      expect(body).toMatch(/Baseline \/ não-regressão \(P2P\): \*\*não executado/);
+    });
+  });
+  describe("N-6 (AU) — o texto do PR nunca declara 'passou' sem evidência do diff real, do FULL-TEST e da baseline", () => {
+    const prevRoot = process.env.PROJECT_FILES_ROOT;
+    afterEach(() => { if (prevRoot === undefined) delete process.env.PROJECT_FILES_ROOT; else process.env.PROJECT_FILES_ROOT = prevRoot; });
+    const qaOk = [{ event_type: "qa.review", summary_human: "QA revisou" }];
+    const mkDb = (dialogue: Array<{ event_type: string | null; summary_human: string }>, taskStatus: string | null) => ({
+      query: vi.fn(async (sql: string) => /FROM project_dialogue/.test(sql) ? { rows: dialogue }
+        : /FROM project_tasks/.test(sql) ? { rows: taskStatus ? [{ status: taskStatus }] : [] } : { rows: [] }),
+    });
+    const setup = async (id: string, checkpoint: Record<string, unknown>) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "n6-"));
+      process.env.PROJECT_FILES_ROOT = root;
+      await fs.mkdir(path.join(root, ".runner-state", id), { recursive: true });
+      await fs.writeFile(path.join(root, ".runner-state", id, "checkpoint.json"), JSON.stringify({ evolution_violations: {}, ...checkpoint }));
+      const apps = path.join(root, id, "apps");
+      await fs.mkdir(path.join(apps, "src"), { recursive: true });
+      const git = (...a: string[]) => execFileSync("git", ["-C", apps, "-c", "user.email=a@b.c", "-c", "user.name=t", ...a]);
+      execFileSync("git", ["init", "-q", apps]);
+      await fs.writeFile(path.join(apps, "src", "a.ts"), "1");
+      await fs.writeFile(path.join(apps, "package-lock.json"), "{}");
+      git("add", "-A"); git("commit", "-qm", "base");
+      return apps;
+    };
+    const line = (body: string, name: string) => body.split("\n").find((l) => l.includes(name)) ?? "";
+
+    it("🔴 PR #5 da 4.5b: arquivo FORA do files_allowed no diff real ⇒ escopo FALHOU (antes: 'passou', pois o checkpoint não tinha violações)", async () => {
+      const apps = await setup("n6-a", {});
+      await fs.writeFile(path.join(apps, "src", "a.ts"), "2");
+      await fs.mkdir(path.join(apps, "other"), { recursive: true });
+      await fs.writeFile(path.join(apps, "other", "x.ts"), "x");
+      await fs.writeFile(path.join(apps, "package-lock.json"), "{\"changed\":1}"); // lockfile do próprio npm, fora do files_allowed
+      const body = await buildPullRequestBody(mkDb(qaOk, null) as never, "n6-a", "1.0.1", { evolution_scope: ["src/**"] });
+      const l = line(body, "Gate de escopo");
+      expect(l).toMatch(/\*\*FALHOU\*\*/);
+      expect(l).toContain("other/x.ts");
+      expect(l).toContain("package-lock.json");
+      expect(l).not.toMatch(/\*\*passou\*\*/);
+    });
+
+    it("lockfile de OUTRO gerenciador (pnpm-lock.yaml) é excluído da publicação: o escopo passa, mas o texto DIZ que foi excluído", async () => {
+      const apps = await setup("n6-b", {});
+      await fs.writeFile(path.join(apps, "src", "a.ts"), "2");
+      await fs.writeFile(path.join(apps, "pnpm-lock.yaml"), "lockfileVersion: 9");
+      const body = await buildPullRequestBody(mkDb(qaOk, null) as never, "n6-b", "1.0.1", { evolution_scope: ["src/**"] });
+      const l = line(body, "Gate de escopo");
+      expect(l).toMatch(/\*\*passou\*\*/);
+      expect(l).toContain("EXCLUÍDO");
+      expect(l).toContain("pnpm-lock.yaml");
+    });
+
+    it("diff real dentro do escopo ⇒ passou, com a contagem real", async () => {
+      const apps = await setup("n6-c", {});
+      await fs.writeFile(path.join(apps, "src", "a.ts"), "2");
+      const body = await buildPullRequestBody(mkDb(qaOk, null) as never, "n6-c", "1.0.1", { evolution_scope: ["src/**"] });
+      expect(line(body, "Gate de escopo")).toMatch(/\*\*passou\*\*.*diff real \(1 arquivo/);
+    });
+
+    it("TSK-FULL-TEST: CANCELLED ⇒ NOT_RUN explícito; DONE sem registro de execução ⇒ não executado (o aceite fecha como DONE); aprovada ⇒ passou; REPROVADA ⇒ FALHOU", async () => {
+      await setup("n6-d", {});
+      const ft = async (dialogue: Array<{ event_type: string | null; summary_human: string }>, status: string | null) =>
+        line(await buildPullRequestBody(mkDb([...qaOk, ...dialogue], status) as never, "n6-d", "1.0.1", {}), "TSK-FULL-TEST (e2e)");
+      expect(await ft([{ event_type: "step", summary_human: "⚠️ TASK-FULL-TEST NÃO EXECUTADA (NOT_RUN): full-test-server indisponível" }], "CANCELLED")).toMatch(/não executado.*NOT_RUN/);
+      expect(await ft([], "DONE")).toMatch(/\*\*não executado[^*]*\*\*.*sem registro de execução/);
+      expect(await ft([], null)).toMatch(/\*\*não executado/);
+      expect(await ft([{ event_type: "step", summary_human: "✅ TASK-FULL-TEST (Claude Code): aprovada" }], "DONE")).toMatch(/\*\*passou\*\*/);
+      expect(await ft([{ event_type: "step", summary_human: "⚠️ TASK-FULL-TEST (Claude Code): REPROVADA — gate P2P sem medição: baseline NÃO medida — ver QA_REPORT_TSK-FULL-TEST.md" }], "DONE")).toMatch(/\*\*FALHOU\*\*/);
+    });
+
+    it("baseline: no_tests (com exit≠0 avisa que o executor quebrou) e error ⇒ não executado; medida sem regressão ⇒ passou; regressões ⇒ FALHOU", async () => {
+      const bl = async (baseline: Record<string, unknown>) => {
+        await setup("n6-e", { evolution_baseline: baseline });
+        return line(await buildPullRequestBody(mkDb(qaOk, null) as never, "n6-e", "1.0.1", {}), "Baseline");
+      };
+      const noTests = await bl({ status: "no_tests", no_tests: true, exit_code: 1, total: 0 });
+      expect(noTests).toMatch(/\*\*não executado/);
+      expect(noTests).toMatch(/SEM TESTES/);
+      expect(noTests).toMatch(/exit 1/);
+      expect(await bl({ status: "error", error: "npm install falhou (rc=243)" })).toMatch(/\*\*não executado[^*]*\*\*.*NÃO medida.*rc=243/);
+      expect(await bl({ status: "ok", passed: 12, final: { status: "ok", regressions: [] } })).toMatch(/\*\*passou\*\*.*12 teste.*0 regressões/);
+      expect(await bl({ status: "ok", passed: 12, final: { status: "ok", regressions: ["a", "b"] } })).toMatch(/\*\*FALHOU\*\*.*2 regressão/);
+      expect(await bl({ status: "ok", passed: 12 })).toMatch(/\*\*não executado/);
     });
   });
 });

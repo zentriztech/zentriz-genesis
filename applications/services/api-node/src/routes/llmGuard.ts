@@ -13,11 +13,11 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
-import { canAccessProjectRow } from "../lib/projectAccess.js";
+import { canAccessProjectRow, isProjectOwner } from "../lib/projectAccess.js";
 import { authenticateInternal } from "./internalLlm.js";
 import {
   ALERT_STEP_OPTIONS, advisorGate, budgetSummary, getGuardSettings, maybeResumeBudget, preflight, recordCall,
-  resolveBudgetOwner, setGuardSetting, noteCallerRolesMode, advisorStatus, evaluateBudget, type PreflightInput, type RecordInput,
+  resolveBudgetOwner, resumeBudgetPauseByHuman, setGuardSetting, noteCallerRolesMode, advisorStatus, evaluateBudget, type PreflightInput, type RecordInput,
 } from "../services/llmGuard.js";
 
 function getUser(request: FastifyRequest): AuthUser {
@@ -193,6 +193,38 @@ export async function llmGuardUserRoutes(app: FastifyInstance): Promise<void> {
       return reply.send({ ...(await budgetSummary(pool, request.params.id)), resumed });
     },
   );
+
+  // N-8 (AU): retomada humana, idempotente e auditada da pausa por orçamento (sem repetir o PUT do mesmo valor). Confere causa e saldo;
+  // NÃO altera o orçamento, NÃO afrouxa o Guard e NÃO religa a execução (devolve os filhos a reiniciar). Ver `resumeBudgetPauseByHuman`.
+  app.post<{ Params: { id: string } }>("/api/projects/:id/budget/resume", async (request, reply) => {
+    const user = getUser(request);
+    if (user.svc) return reply.status(403).send({ code: "FORBIDDEN", message: "A retomada do orçamento é decisão de uma pessoa, não de um agente." });
+    const owner = await resolveBudgetOwner(pool, request.params.id);
+    if (!owner) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+    if (!canAccessProjectRow(user, { tenant_id: owner.tenantId, created_by: owner.createdBy })) return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+    if (user.role !== "zentriz_admin" && user.role !== "tenant_admin" && !isProjectOwner(user, { created_by: owner.createdBy })) {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Só o administrador, o dono do projeto ou a gestão Zentriz retoma uma pausa por orçamento." });
+    }
+    const r = await resumeBudgetPauseByHuman(pool, request.params.id, { id: user.id, email: user.email });
+    switch (r.kind) {
+      case "not_found": return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      case "no_budget": return reply.status(409).send({ code: "BUDGET_MISSING", ownerProjectId: r.ownerProjectId, message: "O projeto não tem orçamento definido: defina-o (PUT /api/projects/:id/budget) antes de retomar." });
+      case "insufficient":
+        return reply.status(402).send({
+          code: "BUDGET_STILL_INSUFFICIENT", ...r,
+          message: `Sem saldo para retomar: restam US$ ${r.remainingUsd.toFixed(2)} e a próxima atividade exige ao menos US$ ${r.minNextActivityUsd.toFixed(2)}. A pausa continua; aumente o orçamento (PUT /api/projects/${r.ownerProjectId}/budget).`,
+        });
+      case "not_paused":
+        return reply.send({ ok: true, resumed: false, replayed: true, ...r, message: "Não há pausa por orçamento vigente (nada a fazer)." });
+      default:
+        return reply.send({
+          ok: true, resumed: true, ...r,
+          message: r.childrenToRestart.length
+            ? "Pausa liberada e cards alinhados. A execução NÃO foi religada: reinicie cada filho listado em `childrenToRestart` (POST /api/projects/:id/run)."
+            : "Pausa liberada e cards alinhados.",
+        });
+    }
+  });
 
   const requireAdmin = (request: FastifyRequest) => getUser(request)?.role === "zentriz_admin" && !getUser(request)?.svc;
 

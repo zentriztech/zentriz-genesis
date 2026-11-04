@@ -68,4 +68,27 @@ describe("pushProjectFiles — commit em lote carimbado", () => {
     await pushProjectFiles(1, "o", "r", "evolution/v2", root, "p1", { syncDeletes: false });
     expect(messages[0]).toBe("feat: Genesis — push 1 generated files");
   });
+
+  it("N-3 (AU): excludeForeignLockfiles NÃO publica o lockfile de outro gerenciador (pnpm-lock.yaml num projeto npm); sem a flag, publica tudo", async () => {
+    writeFileSync(join(root, "p1", "apps", "package-lock.json"), "{}");
+    writeFileSync(join(root, "p1", "apps", "pnpm-lock.yaml"), "lockfileVersion: 9");
+    const paths: string[] = [];
+    const git = {
+      getRef: vi.fn(async () => ({ data: { object: { sha: "c0" } } })),
+      getCommit: vi.fn(async () => ({ data: { tree: { sha: "t0" } } })),
+      createBlob: vi.fn(async () => ({ data: { sha: "b1" } })),
+      createTree: vi.fn(async (o: { tree: Array<{ path: string }> }) => { paths.push(...o.tree.map((t) => t.path)); return { data: { sha: "t1" } }; }),
+      createCommit: vi.fn(async () => ({ data: { sha: "c1" } })),
+      updateRef: vi.fn(async () => ({})),
+      getTree: vi.fn(async () => ({ data: { tree: [], truncated: false } })),
+    };
+    __setOctokitFactoryForTests(async () => ({ git, repos: {}, pulls: {} }) as never);
+    const r = await pushProjectFiles(1, "o", "r", "evolution/v2", root, "p1", { syncDeletes: false, excludeForeignLockfiles: true });
+    expect(paths.sort()).toEqual(["a.txt", "package-lock.json"]);
+    expect(r.excludedLockfiles).toEqual(["pnpm-lock.yaml"]);
+    expect(r.fileCount).toBe(2);
+    paths.length = 0;
+    await pushProjectFiles(1, "o", "r", "evolution/v2", root, "p1", { syncDeletes: false });
+    expect(paths.sort()).toEqual(["a.txt", "package-lock.json", "pnpm-lock.yaml"]);
+  });
 });

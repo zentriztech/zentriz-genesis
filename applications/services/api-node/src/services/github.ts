@@ -487,8 +487,8 @@ export async function pushProjectFiles(
   branch: string,
   projectFilesRoot: string,
   projectId: string,
-  opts: { syncDeletes?: boolean; messageSuffix?: string } = {},
-): Promise<{ sha: string; fileCount: number; deleted?: number; deletionsSkipped?: string }> {
+  opts: { syncDeletes?: boolean; messageSuffix?: string; excludeForeignLockfiles?: boolean } = {},
+): Promise<{ sha: string; fileCount: number; deleted?: number; deletionsSkipped?: string; excludedLockfiles?: string[] }> {
   const { readdir, stat, readFile } = await import("fs/promises");
   const pathMod = await import("path");
 
@@ -537,7 +537,21 @@ export async function pushProjectFiles(
     } catch { /* arquivo não existe em project/ — segue */ }
   }
 
-  if (allFiles.length === 0) return { sha: "", fileCount: 0 };
+  // N-3 (AU): lockfile de OUTRO gerenciador de pacotes (ex.: `pnpm-lock.yaml` criado por `pnpm install` num projeto npm) é efeito
+  // colateral de build, não parte do produto — não entra no commit/PR. Só em evolução (`excludeForeignLockfiles`); o fluxo de
+  // projeto novo segue publicando tudo que foi gerado.
+  let excludedLockfiles: string[] = [];
+  if (opts.excludeForeignLockfiles) {
+    const { detectForeignLockfiles } = await import("../lib/evolutionScope.js");
+    excludedLockfiles = await detectForeignLockfiles(pathMod.join(projectFilesRoot, projectId, "apps"), allFiles.map((f) => f.relativePath));
+    if (excludedLockfiles.length) {
+      const drop = new Set(excludedLockfiles);
+      for (let i = allFiles.length - 1; i >= 0; i--) if (drop.has(allFiles[i].relativePath)) allFiles.splice(i, 1);
+      console.warn(`[GitHub] push ${projectId}: lockfile(s) estranho(s) NÃO publicado(s): ${excludedLockfiles.join(", ")}`);
+    }
+  }
+
+  if (allFiles.length === 0) return { sha: "", fileCount: 0, excludedLockfiles };
 
   const octokit = await getOctokitForInstallation(installationId);
 
@@ -650,7 +664,7 @@ export async function pushProjectFiles(
     }
   }
 
-  return { sha: currentSha, fileCount: allFiles.length, deleted, deletionsSkipped };
+  return { sha: currentSha, fileCount: allFiles.length, deleted, deletionsSkipped, excludedLockfiles };
 }
 
 export async function createBranchIfNotExists(

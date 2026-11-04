@@ -22,9 +22,11 @@ vi.mock("../middleware/auth.js", () => ({
 
 let project: Record<string, unknown> = { id: PROJ, tenant_id: TENANT, created_by: USER_ID, status: "spec_submitted", extra: { evolution: true } };
 let queries: Array<{ sql: string; params: unknown[] }> = [];
+let failAudit = false;
 vi.mock("../db/client.js", () => ({
   pool: {
     query: async (sql: string, params: unknown[] = []) => {
+      if (failAudit && /evolution_merge_confirmation/.test(String(params[1] ?? ""))) throw new Error("db down");
       queries.push({ sql, params });
       if (/FROM projects WHERE id/.test(sql)) return { rows: [project] };
       if (/UPDATE evolution_plan_jobs/.test(sql)) return { rows: [], rowCount: 1 };
@@ -45,7 +47,8 @@ const planner = {
 };
 vi.mock("../services/evolutionPlanner.js", () => planner);
 vi.mock("../services/evolutionGate.js", () => ({ loadRfcTemplate: () => "# RFC-NNNN — <título>\n\n## Sumário\n", RFC_DIR: "docs/rfc" }));
-const accept = { runEvolutionAcceptFlow: vi.fn(async () => { project = { ...project, extra: { ...(project.extra as object), evolution_push_pending: false } }; return true; }) };
+const gates = { scope: { status: "failed", detail: "1 arquivo(s) no diff FORA do `files_allowed` do RFC (pnpm-lock.yaml)" }, symbols: { status: "passed", detail: "ok" }, qa: { status: "passed", detail: "ok" }, fullTest: { status: "not_run", detail: "NOT_RUN" }, baseline: { status: "not_run", detail: "SEM TESTES" } };
+const accept = { describeFactoryGates: vi.fn(async (..._a: unknown[]) => gates), runEvolutionAcceptFlow: vi.fn(async () => { project = { ...project, extra: { ...(project.extra as object), evolution_push_pending: false } }; return true; }) };
 vi.mock("../services/evolutionAccept.js", () => accept);
 // 🔴 GAP-59: a rota faz DUAS chamadas com papéis diferentes — a sonda (`evaluateOnly`, que só avalia a
 // política) e o merge real (`force`). O mock precisa distinguí-las, senão o teste não consegue afirmar
@@ -76,6 +79,7 @@ beforeEach(async () => {
   merge.tryAutoMergeEvolution.mockClear();
   probeResult = { state: "would_merge" };
   mergeResult = { state: "merged", sha: "MERGESHA" };
+  failAudit = false;
 });
 
 describe("POST /api/projects/:id/evolution-plan", () => {
@@ -223,6 +227,55 @@ describe("POST /api/projects/:id/evolution/merge (M1)", () => {
     expect(merge.tryAutoMergeEvolution).not.toHaveBeenCalledWith(expect.anything(), PROJ, expect.objectContaining({ force: true }));
   });
 
+  it("AU: blocked_no_tests explica em linguagem de usuário o que é baseline/P2P e o que o merge assume (campo `explanation` + mensagem)", async () => {
+    probeResult = { state: "blocked_no_tests", detail: "baseline sem testes" };
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };
+    const r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(400);
+    const b = JSON.parse(r.body);
+    expect(b.explanation).toMatch(/SEM TESTES/);
+    expect(b.explanation).toMatch(/não há baseline/);
+    expect(b.explanation).toMatch(/PASS_TO_PASS/);
+    expect(b.explanation).toMatch(/Nenhuma regressão foi verificada/);
+    expect(b.explanation).toMatch(/registrada com o seu nome/);
+    expect(b.message).toContain(b.explanation);
+  });
+
+  it("AU: o `confirm` fica na trilha (quem, quando, por quê) ANTES do merge forçado — extra + diálogo", async () => {
+    probeResult = { state: "blocked_no_tests", detail: "baseline sem testes" };
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };
+    let trailBeforeMerge = false;
+    merge.tryAutoMergeEvolution.mockImplementationOnce(async () => probeResult).mockImplementationOnce(async () => {
+      trailBeforeMerge = queries.some((q) => /evolution_merge_confirmation/.test(String(q.params[1] ?? "")));
+      return mergeResult;
+    });
+    currentUser = { id: USER_ID, role: "user", tenantId: TENANT, email: "ana@t.test" } as typeof currentUser;
+    const r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: { confirm: "MERGE", reason: "  produto sem suíte; revisei o diff à mão  " } });
+    expect(r.statusCode).toBe(200);
+    expect(trailBeforeMerge).toBe(true);
+    const upd = queries.find((q) => /evolution_merge_confirmation/.test(String(q.params[1] ?? "")));
+    const saved = JSON.parse(String(upd?.params[1])).evolution_merge_confirmation;
+    expect(saved).toMatchObject({ by_user_id: USER_ID, by_email: "ana@t.test", blocked_by: "blocked_no_tests", detail: "baseline sem testes", reason: "produto sem suíte; revisei o diff à mão" });
+    expect(saved.risk).toMatch(/não tem testes/);
+    expect(Date.parse(saved.at)).toBeGreaterThan(0);
+    const dlg = queries.find((q) => /INSERT INTO project_dialogue/.test(q.sql));
+    expect(String(dlg?.params[1])).toMatch(/Merge CONFIRMADO por ana@t\.test.*não tem testes.*produto sem suíte/);
+  });
+
+  it("AU: sem registrar a trilha NÃO mergeia (fail-closed, 503); e merge limpo (would_merge) não grava confirmação", async () => {
+    probeResult = { state: "blocked_regressions", detail: "2 regressão(ões)" };
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };
+    failAudit = true;
+    let r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: { confirm: "MERGE" } });
+    expect(r.statusCode).toBe(503);
+    expect(JSON.parse(r.body).code).toBe("AUDIT_UNAVAILABLE");
+    expect(merge.tryAutoMergeEvolution).not.toHaveBeenCalledWith(expect.anything(), PROJ, expect.objectContaining({ force: true }));
+    failAudit = false; probeResult = { state: "would_merge" }; queries = [];
+    r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(200);
+    expect(queries.some((q) => /evolution_merge_confirmation/.test(String(q.params[1] ?? "")))).toBe(false);
+  });
+
   it("veredito limpo (would_merge) → mergeia sem exigir confirmação", async () => {
     project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };
     const r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
@@ -282,5 +335,15 @@ describe("GET /api/projects/:id/evolution-state (F4)", () => {
     await fs.writeFile(path.join(dir, "checkpoint.json"), "{ parcial");
     r = await app.inject({ method: "GET", url: `/api/projects/${PROJ}/evolution-state` });
     expect(r.statusCode).toBe(200); expect(JSON.parse(r.body).checkpoint).toBe(false);
+  });
+  it("AU: expõe os gates reais da fábrica (`factoryGates`: diff real fora do escopo, FULL-TEST, baseline) e quem confirmou o merge", async () => {
+    const conf = { by_user_id: USER_ID, by_email: "ana@t.test", at: "2026-11-04T12:00:00Z", blocked_by: "blocked_no_tests", reason: "ok" };
+    project = { ...project, extra: { evolution: true, evolution_scope: ["src/**"], evolution_merge_confirmation: conf } };
+    const r = await app.inject({ method: "GET", url: `/api/projects/${PROJ}/evolution-state` });
+    const b = JSON.parse(r.body);
+    expect(b.factoryGates).toMatchObject({ scope: { status: "failed" }, fullTest: { status: "not_run" }, baseline: { status: "not_run" } });
+    expect(b.factoryGates.scope.detail).toContain("pnpm-lock.yaml");
+    expect(accept.describeFactoryGates).toHaveBeenCalledWith(expect.anything(), PROJ, { scope: ["src/**"] });
+    expect(b.merge.confirmation).toEqual(conf);
   });
 });
