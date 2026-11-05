@@ -777,7 +777,9 @@ def _jest_zero_tests_error(parsed: dict, rc) -> str | None:
     quebrada. Devolve a mensagem de erro (⇒ status `error`) ou None quando é um `no_tests` legítimo."""
     if int(parsed.get("numTotalTests") or 0) != 0:
         return None
-    failed_suites = int(parsed.get("numFailedTestSuites") or 0) + int(parsed.get("numRuntimeErrorTestSuites") or 0)
+    # jest já inclui as suítes com erro de execução em `numFailedTestSuites`; somar `numRuntimeErrorTestSuites`
+    # de novo dobrava a contagem ("46 de 23"). `max` cobre também runners que só preenchem um dos dois campos.
+    failed_suites = max(int(parsed.get("numFailedTestSuites") or 0), int(parsed.get("numRuntimeErrorTestSuites") or 0))
     if rc in (0, None) and failed_suites == 0:
         return None
     first = ""

@@ -111,3 +111,16 @@ def test_runner_grava_prompt_com_restricao_de_docker():
     assert "DOCKER PROIBIDO" in runner.FULL_TEST_DOCKER_DENIAL and "docker.sock" in runner.FULL_TEST_DOCKER_DENIAL
     import inspect
     assert "_ft_prompt + FULL_TEST_DOCKER_DENIAL" in inspect.getsource(runner)
+
+
+def test_jest_zero_tests_error_nao_dobra_contagem_de_suites():
+    """4.5d (BF): jest conta suítes com erro de execução em numFailedTestSuites; o rótulo não pode virar '46 de 23'."""
+    import importlib.util, pathlib
+    spec = importlib.util.spec_from_file_location("fts_label", pathlib.Path(__file__).resolve().parents[1] / "full-test-server.py")
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    msg = m._jest_zero_tests_error({"numTotalTests": 0, "numFailedTestSuites": 23, "numRuntimeErrorTestSuites": 23,
+                                    "numTotalTestSuites": 23, "testResults": []}, 1)
+    assert msg is not None and msg.startswith("23 de 23"), msg
+    msg2 = m._jest_zero_tests_error({"numTotalTests": 0, "numFailedTestSuites": 0, "numRuntimeErrorTestSuites": 5,
+                                     "numTotalTestSuites": 5, "testResults": []}, 1)
+    assert msg2 is not None and msg2.startswith("5 de 5"), msg2
