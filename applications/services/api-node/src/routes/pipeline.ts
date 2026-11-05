@@ -579,7 +579,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
       }
 
       const projectRow = await client.query(
-        "SELECT status, product_id, title, created_by FROM projects WHERE id = $1",
+        "SELECT status, product_id, title, created_by, tenant_id FROM projects WHERE id = $1",
         [projectId]
       );
       const project = projectRow.rows[0];
@@ -662,7 +662,9 @@ export async function pipelineRoutes(app: FastifyInstance) {
       request.log.info({ projectId, specPath: specFilePath.slice(0, 120) }, "[Pipeline] Spec encontrada, disparando runner");
 
       // G38: Resolve LLM config do tenant (usa conta própria se configurada)
-      const tenantId = user.tenantId ?? "";
+      // BJ A-N2: o tenant do run é o do PROJETO, não o de quem disparou. `zentriz_admin` (tenant próprio ou nulo)
+      // operando projeto de outro tenant gerava token com o tenant errado e o Guard respondia 404 ao runner.
+      const tenantId = (project.tenant_id as string | null) ?? user.tenantId ?? "";
       const llmConfig = tenantId ? await getTenantLlmConfig(tenantId) : null;
       if (llmConfig) {
         request.log.info({ projectId, provider: llmConfig.provider, model: llmConfig.modelId },
@@ -729,7 +731,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
           sub: user.id,
           email: user.email,
           role: user.role,
-          tenantId: user.tenantId,
+          tenantId: tenantId || null,
           // Token de máquina: isenta os callbacks do runner do gate de suspensão H3 (RFC H1).
           svc: "runner",
           // T1: amarra o token a ESTE projeto — o endpoint interno de llm-config recusa
