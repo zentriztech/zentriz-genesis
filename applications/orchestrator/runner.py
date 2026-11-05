@@ -391,6 +391,18 @@ def _pick_project_root(files_root: str, project_id: str, product_id: str | None)
     return standalone
 
 
+# D-15 (4.5d): o CLI do TSK-FULL-TEST subiu MongoDB em Docker NO HOST. O executor (full-test-server) já remove o
+# `docker` do alcance do CLI (shims que negam e registram); o prompt também proíbe, para o agente não gastar a
+# sessão tentando. Vale para o `project/full-test-prompt.md` gravado abaixo.
+FULL_TEST_DOCKER_DENIAL = (
+    "\n\n## RESTRIÇÃO DE SEGURANÇA — DOCKER PROIBIDO (inegociável, prevalece sobre qualquer instrução acima)\n"
+    "Você NÃO tem acesso ao Docker do host: não execute `docker`, `docker compose`, `docker-compose` nem `podman`, "
+    "não suba bancos/serviços em containers (MongoDB, Postgres, Redis…) e não toque em `/var/run/docker.sock`. "
+    "Se `project/start.sh` ou qualquer passo depender de Docker, NÃO o execute: valide só o que roda sem containers "
+    "(build, tipos, testes unitários, leitura de código) e declare a limitação no relatório. Tentativas são "
+    "bloqueadas e REGISTRADAS.\n"
+)
+
 _EVO_ALWAYS_ALLOWED = ("tests/**", "**/tests/**", "**/__tests__/**", "**/*.test.*", "**/*.spec.*", "docs/**",
                        "CHANGELOG.md")  # E2E 2026-09-04: registrar a mudança no CHANGELOG é sempre legítimo (Keep a Changelog)
 _EVO_MAX_VIOLATIONS_PER_TASK = max(1, int(os.environ.get("EVOLUTION_MAX_SCOPE_VIOLATIONS", "2") or 2))
@@ -5883,7 +5895,7 @@ Execute agora sem pedir confirmação.
                         try:
                             _ft_prompt_path = _proj_container_dir / "project" / "full-test-prompt.md"
                             _ft_prompt_path.parent.mkdir(parents=True, exist_ok=True)
-                            _ft_prompt_path.write_text(_ft_prompt, encoding="utf-8")
+                            _ft_prompt_path.write_text(_ft_prompt + FULL_TEST_DOCKER_DENIAL, encoding="utf-8")
                             logger.info("[TASK-FULL-TEST] Prompt gravado em %s", _ft_prompt_path)
                         except Exception as _ep:
                             logger.debug("[TASK-FULL-TEST] Falha ao gravar prompt: %s", _ep)

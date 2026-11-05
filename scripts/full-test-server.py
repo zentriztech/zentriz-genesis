@@ -831,6 +831,63 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "0").strip().lower() in ("1", "true", "on", "yes")
 
 
+# ── 4.5d D-15 — o executor do TSK-FULL-TEST NÃO tem acesso a Docker ─────────────────────────────────────────
+# Rodada real 4.5d: o CLI do TSK-FULL-TEST subiu MongoDB em Docker NO HOST. Um executor não-confiável com
+# acesso ao socket do Docker equivale a root no host. Defesas (em camadas, nenhuma sozinha é isolamento total):
+# (1) env sem DOCKER_*/COMPOSE_* (nada de DOCKER_HOST apontando para socket/daemon remoto);
+# (2) PATH com um diretório de SHIMS na frente: `docker`/`docker-compose`/`podman` resolvem para um script que
+#     NEGA (rc 126) e REGISTRA a tentativa; (3) o prompt proíbe Docker explicitamente.
+# LIMITE: um caminho absoluto (`/usr/bin/docker`) ou acesso direto ao socket por outro cliente não passam pelos
+# shims; o fechamento definitivo é o usuário do CLI fora do grupo `docker` (ver doc BG).
+_DOCKER_DENIED_BINARIES = ("docker", "docker-compose", "podman")
+_DOCKER_ENV_PREFIXES = ("DOCKER_", "COMPOSE_", "CONTAINER_HOST")
+
+FULL_TEST_DOCKER_DENIAL = (
+    "## RESTRIÇÃO DE SEGURANÇA — DOCKER PROIBIDO (inegociável)\n"
+    "Você NÃO tem acesso ao Docker do host: não execute `docker`, `docker compose`, `docker-compose`, `podman`, "
+    "nem suba bancos/serviços em containers (MongoDB, Postgres, Redis…). Não toque em `/var/run/docker.sock`. "
+    "Qualquer tentativa é bloqueada e REGISTRADA no relatório. Valide apenas o que roda sem containers "
+    "(build, tipos, testes unitários, leitura de código/logs em arquivo). Se a validação exigir Docker, "
+    "declare a limitação no relatório e emita `FULL_TEST_VERDICT: REJECTED` — não contorne.\n"
+)
+
+
+def _deny_docker_env(env: dict, shim_dir) -> dict:
+    """D-15 — devolve `env` sem DOCKER_*/COMPOSE_* e com shims que negam/registram `docker` no PATH.
+    O log de tentativas fica em `<shim_dir>/docker-attempts.log` (ver `_read_docker_attempts`)."""
+    shim_dir = Path(shim_dir)
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    log_file = shim_dir / "docker-attempts.log"
+    for name in _DOCKER_DENIED_BINARIES:
+        shim = shim_dir / name
+        shim.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s %s %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" '{name}' \"$*\" >> '{log_file}'\n"
+            f"echo 'BLOQUEADO: {name} não é permitido ao executor do TSK-FULL-TEST (segurança do host).' >&2\n"
+            "exit 126\n", encoding="utf-8")
+        shim.chmod(0o755)
+    out = {k: v for k, v in env.items() if not k.startswith(_DOCKER_ENV_PREFIXES)}
+    out["PATH"] = f"{shim_dir}:{out.get('PATH', '/usr/local/bin:/usr/bin:/bin')}"
+    return out
+
+
+def _read_docker_attempts(shim_dir) -> list[str]:
+    try:
+        return (Path(shim_dir) / "docker-attempts.log").read_text(encoding="utf-8", errors="replace").splitlines()[:50]
+    except OSError:
+        return []
+
+
+def _build_full_test_wrapper_prompt(apps_path, project_path, prompt: str) -> str:
+    """Prompt final do TSK-FULL-TEST: contexto + prompt + restrição de Docker + contrato de veredito."""
+    return (f"Você está em: {apps_path}\nDiretório de projeto: {project_path}\n\n{prompt}\n\n"
+            f"{FULL_TEST_DOCKER_DENIAL}\n"
+            "## CONTRATO DE VEREDITO (obrigatório)\n"
+            "Como ÚLTIMA linha da sua resposta imprima EXATAMENTE uma destas, sozinha na linha:\n"
+            "FULL_TEST_VERDICT: APPROVED\nFULL_TEST_VERDICT: REJECTED\n"
+            "APPROVED só se todas as fases passaram com evidência real; qualquer bloqueio/falha ⇒ REJECTED.")
+
+
 def _cyborg_build_core(apps_dir: Path, build_env: dict, timeout: int = 300) -> dict:
     """D-2 (4.5c) — install + build + `tsc --noEmit` com exit codes HONESTOS.
 
@@ -869,6 +926,14 @@ def _cyborg_build_core(apps_dir: Path, build_env: dict, timeout: int = 300) -> d
         locks_before = _lockfiles_present(work)
         log.info(f"[cyborg-build] {pm} install em {work} ({out['workdir']})")
         irc, iout = _sh(install_cmd, install_to, True)
+        # D-12 (4.5d) — mesma estratégia do /run-tests: ERESOLVE (peer deps) ⇒ retenta UMA vez com
+        # `--legacy-peer-deps` (só npm) e registra o fallback. Outra causa de falha continua fail-closed.
+        if irc != 0 and pm == "npm" and "ERESOLVE" in iout and "--legacy-peer-deps" not in install_cmd:
+            first_out = iout
+            irc, iout = _sh(install_cmd + " --legacy-peer-deps", install_to, True)
+            out["install_fallback"] = "npm install --legacy-peer-deps (fallback ERESOLVE)"
+            out["install_first_attempt_output"] = first_out[-600:]
+            log.info(f"[cyborg-build] ERESOLVE no install; fallback --legacy-peer-deps rc={irc}")
         out["install_rc"], out["install_output"] = irc, iout[-1500:]
         if irc != 0:
             out.update(build_rc=irc if irc not in (0, -1) else 1,
@@ -888,6 +953,8 @@ def _cyborg_build_core(apps_dir: Path, build_env: dict, timeout: int = 300) -> d
         if brc == 0 and _TOOL_MISSING_RE.search(bout):
             brc, bout = 127, "BUILD NÃO EXECUTOU: ferramenta ausente na saída apesar de rc=0\n" + bout
         out["build_rc"], out["build_output"] = brc, bout[-3500:]
+        if out.get("install_fallback"):
+            out["build_output"] = f"[install: {out['install_fallback']}]\n" + out["build_output"]
         if (work / "tsconfig.json").is_file():
             trc, tout = _sh(["npx", "--no-install", "tsc", "--noEmit"], 180, False)
             if trc != 0 and _TOOL_MISSING_RE.search(tout) and not _re.search(r"error\s+TS\d+", tout):
@@ -1400,6 +1467,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "generated_lockfiles_removed": _removed_locks,
             "install_rc": install_rc,
             "install_output": install_out,
+            "install_fallback": _core.get("install_fallback"),
             "workdir": _core["workdir"],
             "type_check_rc": tc_rc,
             "type_check_output": tc_out,
@@ -1901,13 +1969,8 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
                 f"Execute project/start.sh e confirme que o servidor sobe.\n"
                 f"Login: POST /api/auth/login com application/json, extrair accessToken.\n\n"
                 f"### 3a. LEI DOS LOGS — OBRIGATÓRIA ANTES DE DECLARAR QUALQUER ERRO\n"
-                f"Antes de declarar qualquer endpoint como 'offline' ou 'com erro', SEMPRE ler os logs:\n"
-                f"```bash\n"
-                f"# Ver logs de TODOS os containers do produto\n"
-                f"docker logs <container_name> 2>&1 | tail -30\n"
-                f"# Verificar status real dos containers\n"
-                f"docker ps --format '{{{{.Names}}}}\\t{{{{.Status}}}}\\t{{{{.Ports}}}}' | grep <product_slug>\n"
-                f"```\n"
+                f"Antes de declarar qualquer endpoint como 'offline' ou 'com erro', SEMPRE ler os logs do processo\n"
+                f"(arquivos de log / saída do `start.sh`). Docker NÃO está disponível a você (proibido, ver restrição abaixo).\n"
                 f"Logs revelam: JWT inválido, porta errada, DB indisponível, rota 404, CORS error.\n"
                 f"Nunca assumir que um serviço está offline sem confirmar nos logs.\n\n"
                 f"### 3b. Verificar TODOS os endpoints das libs\n"
@@ -1932,11 +1995,7 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
             )
 
         log.info("TASK-FULL-TEST iniciada: project=%s", project_id)
-        wrapper_prompt = (f"Você está em: {apps_path}\nDiretório de projeto: {project_path}\n\n{prompt}\n\n"
-                          "## CONTRATO DE VEREDITO (obrigatório)\n"
-                          "Como ÚLTIMA linha da sua resposta imprima EXATAMENTE uma destas, sozinha na linha:\n"
-                          "FULL_TEST_VERDICT: APPROVED\nFULL_TEST_VERDICT: REJECTED\n"
-                          "APPROVED só se todas as fases passaram com evidência real; qualquer bloqueio/falha ⇒ REJECTED.")
+        wrapper_prompt = _build_full_test_wrapper_prompt(apps_path, project_path, prompt)
 
         # Lei 8 (Fase 2): SANDBOX por-job — env mínimo, SEM segredos do FTS. Este path
         # (full-test interno) não usa wrappers/token Genesis.
@@ -1964,6 +2023,9 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
                                            "TSK-FULL-TEST — revise Configurações → LLM"
                                            + (f" ({'; '.join(slot_falhas)[:300]})" if slot_falhas else "")})
                 return
+            # D-15 (4.5d): sem Docker para o executor (env sem DOCKER_*, shims que negam e registram).
+            docker_shims = Path(creds_dir) / "docker-shims"
+            subprocess_env = _deny_docker_env(subprocess_env, docker_shims)
             if not slot_label and api_key:
                 subprocess_env["ANTHROPIC_API_KEY"] = api_key
                 subprocess_env["CLAUDE_API_KEY"]     = api_key
@@ -1999,6 +2061,11 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
                                 extra["qa_report_text"] = _qa.read_text(encoding="utf-8", errors="replace")[:20000]
                     except Exception as _ce:
                         log.warning("[full-test] pós-processamento da cópia falhou: %s", _ce)
+                _dk = _read_docker_attempts(docker_shims)
+                if _dk:
+                    log.warning("[full-test] %s: %d tentativa(s) de usar Docker BLOQUEADA(s): %s", project_id[:8], len(_dk), _dk[:3])
+                    extra["docker_attempts_blocked"] = _dk
+                    out_excerpt += "\n\n[SEGURANÇA] tentativas de Docker bloqueadas:\n" + "\n".join(_dk)
                 self._json(200, {"status": "ok", "output": out_excerpt, "llm_slot": slot_label,
                                  "approved": approved, "verdict": verdict_why,
                                  "returncode": result.returncode, **extra})

@@ -319,6 +319,19 @@ def _slot_body_fields(model_id: str = "", for_executor: bool = False) -> dict:
     return out
 
 
+_PROVIDER_LABELS = {"bedrock": "Bedrock", "anthropic": "Anthropic", "foundry": "Foundry", "vertex": "Vertex AI",
+                    "google": "Google", "openai": "OpenAI", "azure_openai": "Azure OpenAI"}
+
+
+def _slot_provider_label() -> str:
+    """D-16 (4.5d) — nome do provedor REAL do slot em uso, para mensagens do diálogo (antes: "Foundry" fixo,
+    mesmo com o slot em Bedrock). Sem slot resolvido no contexto ⇒ "LLM do slot" (nunca inventa provedor)."""
+    prov = str(((_SLOT_LLM.get() or {}).get("llm_config") or {}).get("provider") or "").strip().lower()
+    if not prov:
+        return "LLM do slot"
+    return _PROVIDER_LABELS.get(prov, prov)
+
+
 def _post_dialogue(project_id: str, message: str) -> None:
     _http("POST", f"{API_BASE_URL}/api/projects/{project_id}/dialogue",
           {"from_agent": "cyborg", "to_agent": "system",
@@ -777,13 +790,165 @@ def _audit_cache_key(project_id: str, name: str, model_id: str, prompt: str, ctx
     return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()
 
 
+# ── D-13 (4.5d) — auditoria ESCOPADA AO DELTA para filhos de CARD ─────────────────────────────────────────
+# Rodada real 4.5d: um bugfix de 1 linha recebeu 5 BLOCKER por dívida ANTIGA do produto inteiro e o Cyborg
+# escalou para "conclusão de feature" (trabalho fora do pedido do card). Para filho de CARD a auditoria passa a
+# avaliar o DELTA: arquivos alterados pelo filho (vs a árvore do pai), seus testes e os `files_allowed` do RFC.
+# BLOCKER que aponta SÓ para arquivos fora do delta vira `PRE_EXISTING` (registrado, NÃO bloqueia); BLOCKER no
+# delta, sem localização, de build (build_rc≠0) ou de stack travada continua BLOCKER (fail-closed).
+# Projetos comuns/legado: nada disso roda — comportamento ANTERIOR (prompts e contexto byte-idênticos).
+#   CYBORG_AUDIT_SCOPE = auto (padrão: delta só para filho de card) | delta (força) | full (anterior em tudo)
+import re as _re_scope
+
+PRE_EXISTING = "PRE_EXISTING"
+
+DELTA_SCOPE_INSTRUCTION = (
+    "\n\n---\n## ESCOPO DA AUDITORIA — DELTA DO CARD (obrigatório)\n"
+    "Este projeto é uma EVOLUÇÃO PONTUAL (card). Audite SOMENTE o delta: os arquivos listados em "
+    "`audit_scope.delta_files` (alterados pelo filho em relação à versão anterior), seus testes e os globs de "
+    "`audit_scope.files_allowed` (RFC). Dívida antiga do produto em arquivos/linhas FORA do delta e sem relação "
+    "causal com ele NÃO é BLOCKER: se citar, use severidade MINOR e indique o arquivo. É PROIBIDO exigir "
+    "'conclusão de feature', módulos novos ou refatorações fora do pedido do card. BLOCKER só é válido se: "
+    "(a) aponta para arquivo/linha DENTRO do delta; ou (b) o delta quebrou build/tipos/testes; ou (c) o delta "
+    "criou uma regressão causal em outro arquivo (explique a cadeia causal em `evidence`). Sempre informe o "
+    "caminho do arquivo em `evidence`.\n")
+
+_FILE_TOKEN_RE = _re_scope.compile(
+    r"[\w@.\-\[\]()/]+\.(?:tsx?|jsx?|mjs|cjs|json|py|md|ya?ml|css|scss|prisma|sql|sh|html)\b")
+_TEST_SUFFIX_RE = _re_scope.compile(r"\.(?:spec|test)(?=\.[^.]+$)")
+
+
+def _audit_scope_setting() -> str:
+    v = os.environ.get("CYBORG_AUDIT_SCOPE", "auto").strip().lower()
+    return v if v in ("auto", "delta", "full") else "auto"
+
+
+def _file_stem(rel: str) -> str:
+    name = rel.replace("\\", "/").rsplit("/", 1)[-1]
+    return _TEST_SUFFIX_RE.sub("", name).rsplit(".", 1)[0]
+
+
+def compute_audit_delta(child_apps: Path, parent_apps: Path) -> list[str]:
+    """Arquivos de apps/ novos/alterados/removidos no filho em relação ao pai (caminhos relativos a apps/)."""
+    a, b = snapshot_apps_tree(child_apps), snapshot_apps_tree(parent_apps)
+    return sorted(k for k in set(a) | set(b) if (a.get(k) or (None,))[0] != (b.get(k) or (None,))[0])
+
+
+def resolve_audit_scope(project_id: str, prod_id: str | None) -> dict | None:
+    """Escopo de delta do projeto, ou None ⇒ auditoria COMPLETA (comportamento anterior).
+
+    Delta só quando (CYBORG_AUDIT_SCOPE=delta) ou (auto E `extra.evolution_origin=="card"`) E o pai/árvore do pai
+    são localizáveis. Sem API, sem pai ou sem diretório do pai ⇒ None (a auditoria mais rígida, nunca a mais frouxa)."""
+    setting = _audit_scope_setting()
+    if setting == "full":
+        return None
+    status, text = _http("GET", f"{API_BASE_URL}/api/projects/{project_id}", timeout=15)
+    if status != 200:
+        logger.warning("[Cyborg audit-scope] projeto %s ilegível (HTTP %s) — auditoria COMPLETA", project_id[:8], status)
+        return None
+    try:
+        data = json.loads(text) or {}
+        extra = data.get("extra") or {}
+        if isinstance(extra, str):
+            extra = json.loads(extra)
+    except Exception:
+        return None
+    if not isinstance(extra, dict):
+        return None
+    from orchestrator.change_kind import is_card_child
+    if setting == "auto" and not is_card_child(extra):
+        return None
+    parent_id = str(extra.get("evolution_parent_id") or "").strip()
+    if not parent_id:
+        logger.warning("[Cyborg audit-scope] sem evolution_parent_id — auditoria COMPLETA")
+        return None
+    parent_prod = None
+    pst, ptext = _http("GET", f"{API_BASE_URL}/api/projects/{parent_id}", timeout=15)
+    if pst == 200:
+        try:
+            parent_prod = (json.loads(ptext) or {}).get("productId")
+        except Exception:
+            parent_prod = None
+    parent_apps = _resolve_proj_dir(parent_id, parent_prod) / "apps"
+    child_apps = _resolve_proj_dir(project_id, prod_id) / "apps"
+    if not parent_apps.is_dir() or not child_apps.is_dir():
+        logger.warning("[Cyborg audit-scope] árvore do pai/filho ausente — auditoria COMPLETA")
+        return None
+    raw = extra.get("evolution_scope")
+    allowed = [str(g) for g in raw if g] if isinstance(raw, list) else []
+    return {"mode": "delta", "parent_id": parent_id, "delta_files": compute_audit_delta(child_apps, parent_apps),
+            "files_allowed": allowed}
+
+
+def _finding_in_delta(f: "Finding", scope: dict) -> bool | None:
+    """True = aponta para o delta; False = aponta só para fora; None = sem localização (não dá para provar)."""
+    toks = {t.replace("\\", "/").lstrip("./") for t in _FILE_TOKEN_RE.findall(f"{f.evidence or ''} {f.description or ''}")}
+    if not toks:
+        return None
+    delta = [d.replace("\\", "/") for d in scope.get("delta_files") or []]
+    stems = {_file_stem(d) for d in delta}
+    globs = scope.get("files_allowed") or []
+    rxs = []
+    if globs:
+        from orchestrator.runner import _glob_to_regex
+        rxs = [_glob_to_regex(g) for g in globs]
+    for t in toks:
+        tt = t[5:] if t.startswith("apps/") else t
+        if any(d == tt or d.endswith("/" + tt) or tt.endswith("/" + d) for d in delta):
+            return True
+        if _file_stem(tt) in stems:                       # o teste do arquivo alterado (x.spec.ts ↔ x.ts)
+            return True
+        if rxs and any(rx.match(c) for rx in rxs for c in (tt, f"apps/{tt}")):
+            return True
+    return False
+
+
+def apply_delta_scope(results: dict, scope: dict | None, build_rc: int) -> list[dict]:
+    """Reclassifica BLOCKERs FORA do delta (sem relação causal) como PRE_EXISTING. Devolve o registro.
+
+    Fail-closed: BLOCKER sem arquivo citado, com arquivo no delta, ou de a3 (build) com build_rc≠0 (0/-1 = ok)
+    permanece BLOCKER. Escopo None ⇒ não toca em nada."""
+    if not scope:
+        return []
+    record: list[dict] = []
+    build_broken = build_rc not in (0, -1)
+    for name, ar in results.items():
+        for f in getattr(ar, "findings", []) or []:
+            if f.severity != "BLOCKER":
+                continue
+            if name == "a3_build_runtime" and build_broken:
+                continue
+            if f.area == "stack_violation":
+                continue
+            if _finding_in_delta(f, scope) is False:
+                f.severity = PRE_EXISTING
+                f.description = "[PRÉ-EXISTENTE — fora do delta do card, registrado e não bloqueante] " + (f.description or "")
+                record.append({"analysis": name, "area": f.area, "description": f.description[:300],
+                               "evidence": (f.evidence or "")[:300]})
+    return record
+
+
+
 def run_prior_audit(project_id: str, prod_id: str | None, model_id: str) -> dict[str, AnalysisResult]:
     """Executa 5 análises Bedrock em paralelo (~30s). Gera briefing para o Cyborg V3."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     ctx = _collect_context(project_id, prod_id)
 
+    # D-13 (4.5d): filho de CARD ⇒ auditoria escopada ao delta. Qualquer falha ao resolver ⇒ auditoria completa.
+    try:
+        _audit_scope = resolve_audit_scope(project_id, prod_id)
+    except Exception as _se0:
+        logger.warning("[Cyborg audit-scope] falha ao resolver (%s: %s) — auditoria COMPLETA", type(_se0).__name__, _se0)
+        _audit_scope = None
+    if _audit_scope:
+        ctx["audit_scope"] = {"mode": "delta", "delta_files": _audit_scope["delta_files"][:200],
+                              "files_allowed": _audit_scope["files_allowed"]}
+        logger.info("[Cyborg audit-scope] DELTA: %d arquivo(s) alterados vs pai %s",
+                    len(_audit_scope["delta_files"]), _audit_scope["parent_id"][:8])
+
     _post_dialogue(project_id,
-        f"🔬 Cyborg V3 — auditoria prévia (5 análises Bedrock paralelas, modelo: {model_id})")
+        f"🔬 Cyborg V3 — auditoria prévia (5 análises {_slot_provider_label()} paralelas, modelo: {model_id})"
+        + (f" · escopo: DELTA do card ({len(_audit_scope['delta_files'])} arquivo(s))" if _audit_scope else ""))
 
     analyses = ["a1_coerencia_estrutural", "a2_fidelidade_spec", "a3_build_runtime",
                 "a4_ux_completude", "a5_dominio"]
@@ -793,7 +958,7 @@ def run_prior_audit(project_id: str, prod_id: str | None, model_id: str) -> dict
         import copy as _copy
         t0 = time.time()
         try:
-            prompt = _load_prompt(name)
+            prompt = _load_prompt(name) + (DELTA_SCOPE_INSTRUCTION if _audit_scope else "")
             _ck = _audit_cache_key(project_id, name, model_id, prompt, ctx)
             with _AUDIT_CACHE_LOCK:
                 _hit = _AUDIT_CACHE.get(_ck)
@@ -906,6 +1071,19 @@ def run_prior_audit(project_id: str, prod_id: str | None, model_id: str) -> dict
     except Exception as _se:
         logger.warning(f"[Cyborg V3] guarda de stack travada falhou (ignorado): {_se}")
 
+    # D-13: BLOCKERs fora do delta e sem relação causal ⇒ PRE_EXISTING (registrados, não bloqueiam).
+    _pre_existing: list[dict] = []
+    if _audit_scope:
+        try:
+            _pre_existing = apply_delta_scope(results, _audit_scope, int(ctx.get("build_rc", -1)))
+            if _pre_existing:
+                logger.info("[Cyborg audit-scope] %d BLOCKER(s) pré-existente(s) fora do delta registrados", len(_pre_existing))
+                _post_dialogue(project_id,
+                    f"📎 Cyborg — {len(_pre_existing)} BLOCKER(s) apontam para dívida ANTIGA fora do delta do card: "
+                    "registrados como pré-existentes (não bloqueiam).")
+        except Exception as _se1:
+            logger.warning("[Cyborg audit-scope] reclassificação falhou (%s) — BLOCKERs mantidos", _se1)
+
     # Grava audit.json para o wrapper `zentriz-audit`
     try:
         proj_dir = _resolve_proj_dir(project_id, prod_id)
@@ -923,6 +1101,11 @@ def run_prior_audit(project_id: str, prod_id: str | None, model_id: str) -> dict
         }
         # Validade da auditoria: quantas análises realmente rodaram (análise que não executou NÃO é "0 achados").
         audit_data["validity"] = audit_validity(results)
+        if _audit_scope:
+            audit_data["scope"] = {"mode": "delta", "parent_id": _audit_scope["parent_id"],
+                                   "delta_files": _audit_scope["delta_files"][:200],
+                                   "files_allowed": _audit_scope["files_allowed"]}
+            audit_data["pre_existing"] = _pre_existing
         # Adicionar contexto build
         audit_data["build"] = {
             "rc": ctx.get("build_rc", -1),
@@ -1371,6 +1554,52 @@ _TOOL_MISSING_RE = _re_gate.compile(
     r"cannot find module 'typescript'|npm err! missing script|npx canceled|enoent)", _re_gate.I)
 
 
+# D-14 (4.5d) — falha de AMBIENTE de build (instalação/ERESOLVE/ferramenta ausente/rede): pagar uma rodada de
+# LLM não conserta isso (o Dev não instala dependências). Detectada ⇒ o laço para com `needs_human` e a causa.
+_ENV_FAILURE_RE = _re_gate.compile(
+    r"(ERESOLVE|could not resolve dependency|unable to resolve dependency tree|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|"
+    r"ECONNRESET|EACCES|BUILD NÃO EXECUTOU|install falhou|install terminou sem criar node_modules|"
+    r"command not found|: not found|could not determine executable|npx canceled|cópia gravável falhou)", _re_gate.I)
+
+
+def build_env_failure(build_rc: Any, *texts: str) -> str | None:
+    """Causa de AMBIENTE (trecho legível) se o build falhou por instalação/ferramenta/rede; None caso contrário
+    (build ok, não aplicável rc=-1, ou falha de CÓDIGO como erro de tipos — essa o Dev consegue corrigir)."""
+    try:
+        rc = int(build_rc)
+    except (TypeError, ValueError):
+        rc = 1
+    if rc in (0, -1):
+        return None
+    blob = "\n".join(t for t in texts if t)
+    m = _ENV_FAILURE_RE.search(blob)
+    if not m:
+        return None
+    i = max(0, m.start() - 60)
+    return blob[i:m.end() + 120].strip().replace("\n", " ")[:240]
+
+
+def _audit_build_block(project_id: str, prod_id: str | None) -> tuple[int, str]:
+    """`(rc, output_tail)` do build gravado pela última auditoria em audit.json; `(-1, "")` se ausente."""
+    try:
+        aj = _resolve_proj_dir(project_id, prod_id) / "docs" / "cyborg" / "audit.json"
+        if aj.exists():
+            b = (json.loads(aj.read_text(encoding="utf-8")) or {}).get("build", {}) or {}
+            return int(b.get("rc", -1)), str(b.get("output_tail") or "")
+    except Exception:
+        pass
+    return -1, ""
+
+
+def _audit_delta_active(project_id: str, prod_id: str | None) -> bool:
+    """A última auditoria foi ESCOPADA ao delta (D-13)? Lido de audit.json (`scope.mode == "delta"`)."""
+    try:
+        aj = _resolve_proj_dir(project_id, prod_id) / "docs" / "cyborg" / "audit.json"
+        return bool(aj.exists() and ((json.loads(aj.read_text(encoding="utf-8")) or {}).get("scope") or {}).get("mode") == "delta")
+    except Exception:
+        return False
+
+
 def round_gate_enabled() -> bool:
     return os.environ.get("CYBORG_ROUND_GATE", "on").strip().lower() not in ("0", "off", "false", "no")
 
@@ -1433,6 +1662,7 @@ def summarize_build_check(res: dict | None, *, ts_project: bool) -> dict:
                           "tipos NÃO verificados (falha fechada)"}
     ok = b_rc == 0 and (not ts_project or t_rc == 0)
     return {"ok": ok, "verified": True, "ts_errors": ts_errors,
+            "env_cause": None if ok else build_env_failure(b_rc, b_out, t_out),   # D-14
             "reason": "" if ok else (f"build_rc={b_rc} type_check_rc={t_rc} ts_errors={ts_errors}"
                                      + (f" — {_first_ts_error(t_out + chr(10) + b_out)}" if ts_errors else ""))}
 
@@ -1642,6 +1872,7 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
         except Exception as _ge:
             logger.warning("[Cyborg gate] baseline de build/tipos indisponível (%s: %s)", type(_ge).__name__, _ge)
     rnd = 0
+    _env_recheck = False
     while rnd < _round_cap:
         rnd += 1
         # Coletar findings acionáveis (BLOCKER + MAJOR) de todas as dimensões.
@@ -1653,6 +1884,32 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
         if not findings:
             return {"ok": True, "rounds": rnd - 1, "final_audit": cur_audit, "delivered": True,
                     "scope_violations": _scope_violations}
+
+        # D-14 (4.5d): gate de build do estado ATUAL ANTES de pagar a rodada de LLM. Se a falha é de AMBIENTE
+        # (instalação/ERESOLVE/ferramenta ausente), o Dev não a conserta: não gasta LLM, devolve a causa.
+        _env_cause = None
+        if _env_recheck:
+            try:
+                _fresh = run_build_check(project_id, prod_id)
+                _env_cause = build_env_failure(_fresh.get("build_rc", 1), _fresh.get("build_output", ""),
+                                               _fresh.get("install_output", ""), _fresh.get("type_check_output", ""))
+            except Exception as _ee:
+                logger.warning("[Cyborg env-gate] re-checagem do build falhou (%s: %s)", type(_ee).__name__, _ee)
+            _env_recheck = False
+        else:
+            _a_rc, _a_out = _audit_build_block(project_id, prod_id)
+            _env_cause = build_env_failure(_a_rc, _a_out)
+            if _env_cause is None and _gate_baseline is not None:
+                _env_cause = _gate_baseline.get("env_cause") or (
+                    build_env_failure(1, str(_gate_baseline.get("reason") or ""))
+                    if not _gate_baseline.get("verified", True) else None)
+        if _env_cause:
+            _msg = (f"build do estado atual falha por causa de AMBIENTE (não de código): {_env_cause} — "
+                    "rodada de LLM NÃO paga; corrija a instalação/ambiente do build")
+            logger.warning("[Cyborg env-gate] rodada %d NÃO executada: %s", rnd, _msg)
+            _post_dialogue(project_id, f"⛔ Cyborg — {_msg}")
+            return {"ok": False, "rounds": rnd - 1, "final_audit": cur_audit, "delivered": False,
+                    "scope_violations": _scope_violations, "env_blocked": _env_cause}
 
         # Achado #55: no modo feature, se a auditoria sinaliza DOMÍNIO ERRADO, esta rodada roda em
         # submodo REGENERAÇÃO DE MODELO (reescreve o núcleo do domínio p/ bater com a spec canônica)
@@ -1676,7 +1933,7 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
         else:
             _post_dialogue(project_id,
                 f"🔧 Cyborg — correção autônoma (rodada {rnd}/{_round_cap}): {len(findings)} issue(s) "
-                f"da auditoria enviadas ao Dev via Foundry.")
+                f"da auditoria enviadas ao Dev via {_slot_provider_label()}.")
 
         # Ler os fontes atuais para dar contexto ao Dev.
         ctx = _collect_context(project_id, prod_id)
@@ -2020,6 +2277,8 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
                 _n_rev = _revert_snapshot(_snapshot)
                 _msg = f"rodada {rnd} REVERTIDA pelo gate de integridade ({_n_rev} arquivo(s)): {_g_why}"
                 _gate_reverts.append(_msg); _gate_notes.append(_g_why)
+                if (_g_summ or {}).get("env_cause") or build_env_failure(1, _g_why):
+                    _env_recheck = True   # D-14: a próxima rodada só é paga se o build do estado atual estiver sadio
                 logger.warning("[Cyborg gate] %s", _msg)
                 _post_dialogue(project_id, f"↩️ Cyborg — {_msg}")
                 continue
@@ -2432,6 +2691,17 @@ def _run_cyborg_v3_impl(project_id: str, tenant_id: str | None, prod_id: str | N
                 if _rw.get("final_audit"):
                     audit = _rw["final_audit"]; run.audit = audit
                     total_blk = sum(sum(1 for f in ar.findings if f.severity == "BLOCKER") for ar in audit.values())
+                if _rw.get("env_blocked"):
+                    # D-14: ambiente de build quebrado — nenhuma rodada de LLM foi paga; needs_human com a causa.
+                    run.final_status = "needs_human"
+                    run.reason = (f"ambiente de build quebrado (não é defeito de código): {_rw['env_blocked']}. "
+                                  "Nenhuma rodada de LLM foi paga; corrija a instalação/ambiente e reexecute.")
+                    _post_dialogue(project_id,
+                        f"═══════════════════════════════════════\n"
+                        f"⚠️ Cyborg V3 — needs_human (ambiente de build)\n"
+                        f"═══════════════════════════════════════\n"
+                        f"{run.reason}")
+                    return run
 
             # Decisão de aceite REAVALIÁVEL (helper local): lê o `audit` corrente e devolve as
             # métricas + flags de aceite. Extraída p/ poder ser reexecutada após uma escalação
@@ -2449,6 +2719,11 @@ def _run_cyborg_v3_impl(project_id: str, tenant_id: str | None, prod_id: str | N
             # O gate de build/não-regressão continua inviolável: escalar CURA o defeito real, não
             # afrouxa o gate (#38). Ver [[feedback-cyborg-deve-entregar-nao-parar]].
             _escalation_on = os.environ.get("CYBORG_ESCALATION_ENABLED", "1").strip() != "0"
+            # D-13: filho de card (auditoria no delta) NUNCA escala para "conclusão de feature" — isso seria
+            # trabalho fora do pedido do card. BLOCKER residual no delta ⇒ needs_human.
+            if _escalation_on and _audit_delta_active(project_id, prod_id):
+                _escalation_on = False
+                logger.info("[Cyborg] escalação de feature desativada: auditoria escopada ao delta do card")
             if _escalation_on and not (_ev["ideal"] or _ev["weighted"]) and _ev["blk"] > 0:
                 _post_dialogue(project_id,
                     f"🚀 Cyborg — rework cirúrgico esgotou com {_ev['blk']} BLOCKER(s) de feature. "
@@ -2473,7 +2748,7 @@ def _run_cyborg_v3_impl(project_id: str, tenant_id: str | None, prod_id: str | N
                     f"═══════════════════════════════════════\n"
                     f"✅ Cyborg V3 — aceito por auditoria autônoma\n"
                     f"═══════════════════════════════════════\n"
-                    f"Decisão pelas 5 análises Foundry: {total_blk} BLOCKER residual, "
+                    f"Decisão pelas 5 análises ({_slot_provider_label()}): {total_blk} BLOCKER residual, "
                     f"média {_avg:.1f}/10, build {'OK' if _build_rc==0 else 'FALHOU'}. Projeto aprovado.")
                 return run
             run.final_status = "needs_human"
