@@ -141,7 +141,9 @@ def test_d3_full_test_nao_executada_fica_cancelled_nunca_done(monkeypatch, tmp_p
     updates, steps = [], []
     monkeypatch.setattr(runner, "_update_task", lambda pid, tid, **kw: updates.append((pid, tid, kw)))
     monkeypatch.setattr(runner, "_post_step", lambda msg, rid: steps.append(msg))
-    st = runner._declare_full_test_not_run("p1", "r1", "full-test-server indisponível", "claude --print …", tmp_path)
+    # BK/A-N3: CANCELLED vale para filho de card (legado: ASSIGNED, ver test_bk_correcoes_bj.py)
+    st = runner._declare_full_test_not_run("p1", "r1", "full-test-server indisponível", "claude --print …", tmp_path,
+                                           pipeline_ctx=SimpleNamespace(is_card_child=True, card_id=None))
     assert st == "CANCELLED"
     assert updates == [("p1", "TSK-FULL-TEST", {"status": "CANCELLED"})]
     assert all(u[2]["status"] not in ("DONE", "QA_PASS") for u in updates)

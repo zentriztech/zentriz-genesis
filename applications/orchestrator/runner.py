@@ -716,6 +716,8 @@ def _evo_regressions(baseline: dict | None, final: dict | None) -> list[str]:
 #   EVOLUTION_P2P_REQUIRED_LEGACY = 0 (padrão) | 1          — idem para evolução legada/comum
 #   CONTEXT_CEILING_ENFORCE   = card (padrão) | all | off   — teto de contexto (1,5 MB/3000) bloqueia o Dev
 #   EFFECTIVE_FLAGS_FAIL_CLOSED = card (padrão) | all | off — /effective-flags fora do ar ⇒ projeto failed
+#   EFFECTIVE_FLAGS_UNKNOWN_FAIL_CLOSED = 0 (padrão) | 1 — origem desconhecida (API fora) degrada como antes (BK/A-N3)
+#   FULL_TEST_NOT_RUN_CANCELS = card (padrão) | all | off   — FULL-TEST NOT_RUN ⇒ CANCELLED (legado: ASSIGNED)
 _CARD_CHILD_CACHE: dict[str, bool] = {}
 
 
@@ -1113,8 +1115,11 @@ def _effective_flag(project_id: str | None, name: str, *, fail_closed: bool = Fa
 def _attachments_strict(project_id: str | None = None) -> bool:
     # A-4 (AV): /effective-flags indisponível ⇒ fail-closed só em filho de card; legado/comum degrada para "off"
     # (comportamento anterior) em vez de derrubar o projeto. Override: EFFECTIVE_FLAGS_FAIL_CLOSED=card|all|off.
+    # BK/A-N3: origem DESCONHECIDA (API fora no início) degrada como antes (flag off) — só falha fechado se já se
+    # sabe que é card (cache/pipeline) ou com EFFECTIVE_FLAGS_UNKNOWN_FAIL_CLOSED=1.
+    _unk = os.environ.get("EFFECTIVE_FLAGS_UNKNOWN_FAIL_CLOSED", "0").strip().lower() in ("1", "true", "yes", "on")
     return _effective_flag(project_id, "attachmentsStrict",
-                           fail_closed=_a4_rule_applies("EFFECTIVE_FLAGS_FAIL_CLOSED", project_id, unknown_as=True))
+                           fail_closed=_a4_rule_applies("EFFECTIVE_FLAGS_FAIL_CLOSED", project_id, unknown_as=_unk))
 
 
 #: Allowlist de TEXTO da árvore de spec (ATTACHMENTS_STRICT=on). Sobrescrevível por SPEC_TEXT_EXTENSIONS (CSV com ponto).
@@ -3480,8 +3485,21 @@ def _full_test_failure_reason(exc: BaseException) -> str:
     return f"full-test-server respondeu HTTP {code}: {detail[:300]}"
 
 
+def _write_full_test_verdict(proj_container_dir: "Path | None", **fields) -> None:
+    """BK/W3 — veredicto ESTRUTURADO da FULL-TEST (`docs/qa/full_test_verdict.json`) para o aceite do Cyborg ler."""
+    if not proj_container_dir:
+        return
+    try:
+        f = Path(proj_container_dir) / "docs" / "qa" / "full_test_verdict.json"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({**fields, "at": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False, indent=2),
+                     encoding="utf-8")
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("[TASK-FULL-TEST] veredicto estruturado não gravado: %s", _e)
+
+
 def _declare_full_test_not_run(project_id: str | None, request_id: str, reason: str, host_cmd: str,
-                               proj_container_dir: "Path | None", task_state=None) -> str:
+                               proj_container_dir: "Path | None", task_state=None, pipeline_ctx=None) -> str:
     """D-3 (AQ) — `TSK-FULL-TEST` que NÃO executou nada não pode terminar `DONE`/aprovada.
 
     Antes: só um passo "Execute manualmente…" e a task ficava `ASSIGNED`; o aceite do projeto
@@ -3489,12 +3507,17 @@ def _declare_full_test_not_run(project_id: str | None, request_id: str, reason: 
     então a promovia a `DONE` — o card era entregue com "TSK-FULL-TEST executada" sem execução nenhuma.
     Agora: status `CANCELLED` (terminal, sobrevive ao fechamento do aceite e é excluído da lista de tasks
     "executadas" do card, `cardDelivery.ts`), relatório `NOT_RUN` em disco e passo de aviso explícito.
-    Devolve o status gravado."""
+    BK/A-N3: o status `CANCELLED` vale só para FILHO DE CARD (`FULL_TEST_NOT_RUN_CANCELS=card|all|off`); legado/comum
+    volta ao comportamento anterior (task `ASSIGNED`, relatório NOT_RUN e aviso mantidos). Devolve o status gravado."""
+    _cancel = _a4_rule_applies("FULL_TEST_NOT_RUN_CANCELS", project_id, pipeline_ctx, unknown_as=True)
+    _final_status = FULL_TEST_NOT_RUN_STATUS if _cancel else "ASSIGNED"
     _post_step(
         "⚠️ TASK-FULL-TEST NÃO EXECUTADA (NOT_RUN): " + reason + " — a validação e2e NÃO ocorreu; "
-        "a task fica CANCELLED (não aprovada). Para executar manualmente:\n" + host_cmd,
+        + (f"a task fica {FULL_TEST_NOT_RUN_STATUS} (não aprovada). " if _cancel else "a task segue ASSIGNED (não aprovada). ")
+        + "Para executar manualmente:\n" + host_cmd,
         request_id,
     )
+    _write_full_test_verdict(proj_container_dir, status="NOT_RUN", not_run=True, approved=False, reason=reason[:300])
     if proj_container_dir:
         try:
             rep = Path(proj_container_dir) / "docs" / "qa" / "QA_REPORT_TSK-FULL-TEST.md"
@@ -3508,14 +3531,14 @@ def _declare_full_test_not_run(project_id: str | None, request_id: str, reason: 
             )
         except Exception as _e:
             logger.warning("[TASK-FULL-TEST] relatório NOT_RUN não gravado: %s", _e)
-    _update_task(project_id, "TSK-FULL-TEST", status=FULL_TEST_NOT_RUN_STATUS)
+    _update_task(project_id, "TSK-FULL-TEST", status=_final_status)
     if task_state:
         try:
-            task_state.set_status("TSK-FULL-TEST", FULL_TEST_NOT_RUN_STATUS)
+            task_state.set_status("TSK-FULL-TEST", _final_status)
             task_state.save()
         except Exception as _e:
             logger.warning("[TASK-FULL-TEST] task_state não atualizado: %s", _e)
-    return FULL_TEST_NOT_RUN_STATUS
+    return _final_status
 
 
 _QA_NO_VERDICT_STATUSES = frozenset({"blocked", "fail", "needs_info", "error"})
@@ -6078,6 +6101,15 @@ Execute agora sem pedir confirmação.
                         logger.info("[TASK-FULL-TEST] veredicto=%s (aprovado=%s por %s; regressões=%d; falha medida=%s)",
                                     _ft_final_status, _approved, _approved_why, len(_p2p_regressions), _medida_falhou)
                         _update_task(project_id, "TSK-FULL-TEST", status=_ft_final_status)
+                        _write_full_test_verdict(
+                            _proj_container_dir, status=_ft_final_status, approved=bool(_approved),
+                            medida_falhou=bool(_medida_falhou), regressions=list(_p2p_regressions)[:50],
+                            unmeasured=bool(_p2p_unmeasured),
+                            reason=("; ".join(filter(None, [
+                                None if _approved else _approved_why,
+                                ("gate P2P sem medição: " + _p2p_unmeasured) if _p2p_unmeasured else None,
+                                f"{len(_p2p_regressions)} regressão(ões)" if _p2p_regressions else None,
+                                "suíte falhou na execução real" if _medida_falhou else None])) or "ok")[:300])
                         # Persistir TSK-FULL-TEST no TaskState para sobreviver a restarts do runner
                         if _task_state:
                             _task_state.set_status("TSK-FULL-TEST", _ft_final_status)
@@ -6108,6 +6140,7 @@ Execute agora sem pedir confirmação.
                             (_ft_fail_reason or "full-test-server indisponível ou sem resultado")
                             + f" (FULL_TEST_SERVER_URL={os.environ.get('FULL_TEST_SERVER_URL', '?')})",
                             _host_cmd, _proj_container_dir, _task_state,
+                            pipeline_ctx=pipeline_ctx,
                         )
 
                     # Mover o stepper do portal para "Pronto" — postar agent_working do devops

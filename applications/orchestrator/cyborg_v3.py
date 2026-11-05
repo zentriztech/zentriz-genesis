@@ -403,6 +403,21 @@ def _fetch_type_policy_for_project(project_id: str) -> dict | None:
         return None
 
 
+class CyborgEnvBlocked(RuntimeError):
+    """Ambiente de execução indisponível/proibido (ex.: executor remoto caído). Não é defeito de código:
+    termina em `needs_human` com a causa, sem gastar LLM."""
+
+
+def local_build_fallback_allowed() -> bool:
+    """BK/B-N1 — pode o Cyborg rodar `npm install`+build LOCAL quando o executor não respondeu?
+
+    Sem executor remoto configurado (dev co-locado): sim (comportamento legado). Com executor remoto
+    (`UNTRUSTED_EXECUTOR_URL` ≠ FTS local): NÃO, salvo override explícito `CYBORG_ALLOW_LOCAL_BUILD_FALLBACK=1`."""
+    if not executor_bridge.executor_is_remote():
+        return True
+    return os.environ.get("CYBORG_ALLOW_LOCAL_BUILD_FALLBACK", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _collect_context(project_id: str, prod_id: str | None) -> dict:
     """Coleta artefatos + build output para as análises."""
     proj_dir = _resolve_proj_dir(project_id, prod_id)
@@ -537,13 +552,26 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
             bd = json.loads(text)
             ctx["build_output"] = bd.get("build_output", "")[-4000:]
             ctx["build_rc"] = bd.get("build_rc", -1)
+            ctx["type_check_errors"] = sorted(parse_ts_errors(
+                (bd.get("type_check_output", "") or "") + "\n" + (bd.get("build_output", "") or "")))[:500]
             ctx["type_check_output"] = bd.get("type_check_output", "")[-2000:]
             ctx["type_check_rc"] = bd.get("type_check_rc", -1)
             _build_done = True
     except Exception as e:
         logger.warning(f"[Cyborg V3] Build check (FTS) falhou: {e}")
 
-    if not _build_done and _apps_root.exists() and (_apps_root / "package.json").exists():
+    # BK/B-N1: com executor REMOTO (Host B) configurado e sem resposta 200, NÃO cair em `npm install`+build
+    # LOCAL — este container tem `.env`, token admin e `docker.sock`, e o código gerado é não-confiável.
+    # Falha FECHADO: o contexto leva `executor_blocked` e `run_prior_audit` aborta ANTES de qualquer LLM.
+    if not _build_done and _apps_root.exists() and (_apps_root / "package.json").exists() \
+            and not local_build_fallback_allowed():
+        ctx["executor_blocked"] = (
+            "executor remoto (UNTRUSTED_EXECUTOR_URL) não respondeu 200 em /cyborg-build; o build local no "
+            "container do Cyborg é PROIBIDO com executor remoto configurado (fail-closed). Restabeleça o executor "
+            "(Host B) e reexecute; override explícito: CYBORG_ALLOW_LOCAL_BUILD_FALLBACK=1 (não recomendado)")
+        ctx["build_rc"] = -1
+        logger.error("[Cyborg V3] %s", ctx["executor_blocked"])
+    elif not _build_done and _apps_root.exists() and (_apps_root / "package.json").exists():
         # Fallback local: instala deps e roda type-check (tsc --noEmit) + build.
         import subprocess as _sp
         try:
@@ -557,6 +585,7 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
             _tc = _sp.run(["npx", "--no-install", "tsc", "--noEmit"],
                           cwd=str(_apps_root), capture_output=True, text=True, timeout=300, env=_env)
             ctx["type_check_rc"] = _tc.returncode
+            ctx["type_check_errors"] = sorted(parse_ts_errors(_tc.stdout + "\n" + _tc.stderr))[:500]
             ctx["type_check_output"] = (_tc.stdout + _tc.stderr)[-2000:]
             _bd = _sp.run(["npm", "run", "build", "--if-present"],
                           cwd=str(_apps_root), capture_output=True, text=True, timeout=600, env=_env)
@@ -933,6 +962,8 @@ def run_prior_audit(project_id: str, prod_id: str | None, model_id: str) -> dict
     """Executa 5 análises Bedrock em paralelo (~30s). Gera briefing para o Cyborg V3."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     ctx = _collect_context(project_id, prod_id)
+    if ctx.get("executor_blocked"):   # BK/B-N1: antes de resolver escopo e de qualquer chamada de LLM
+        raise CyborgEnvBlocked(ctx["executor_blocked"])
 
     # D-13 (4.5d): filho de CARD ⇒ auditoria escopada ao delta. Qualquer falha ao resolver ⇒ auditoria completa.
     try:
@@ -1111,6 +1142,7 @@ def run_prior_audit(project_id: str, prod_id: str | None, model_id: str) -> dict
             "rc": ctx.get("build_rc", -1),
             "output_tail": ctx.get("build_output", "")[-1500:],
             "type_check_rc": ctx.get("type_check_rc", -1),
+            "type_check_errors": ctx.get("type_check_errors", []),
         }
         (cyborg_dir / "audit.json").write_text(json.dumps(audit_data, indent=2, ensure_ascii=False),
                                                 encoding="utf-8")
@@ -2559,10 +2591,22 @@ def audit_apps_tree_changes(apps_dir: Path, before: dict[str, tuple], scope: lis
     return pending, fixed
 
 
+def tree_gate_applies(project_id: str) -> bool:
+    """BK/A-N3 — o gate de árvore (remove/restaura lockfile; pode quebrar `npm ci` do deploy em produto novo) vale só
+    para FILHO DE CARD. `CYBORG_TREE_GATE`: `card` (padrão) | `on`/`all` (todo projeto) | `off`. Origem desconhecida
+    (API fora) ⇒ gate LIGADO (mais rígido; o card não escapa por indisponibilidade)."""
+    mode = os.environ.get("CYBORG_TREE_GATE", "card").strip().lower() or "card"
+    if mode in ("0", "off", "false", "no"):
+        return False
+    if mode in ("on", "all", "1", "true", "yes"):
+        return True
+    return cyborg_card_status(project_id) is not False
+
+
 def run_cyborg_v3(project_id: str, tenant_id: str | None, prod_id: str | None) -> CyborgV3Run:
     """Executa o Cyborg V3 e, ao final, audita a ÁRVORE de apps/ contra o escopo do RFC (N-3).
-    `CYBORG_TREE_GATE=off` desliga (volta ao comportamento anterior)."""
-    gate_on = os.environ.get("CYBORG_TREE_GATE", "on").strip().lower() not in ("0", "off", "false", "no")
+    `CYBORG_TREE_GATE`: ver `tree_gate_applies` (padrão: só filho de card)."""
+    gate_on = tree_gate_applies(project_id)
     apps_dir = _resolve_proj_dir(project_id, prod_id) / "apps" if gate_on else None
     before = snapshot_apps_tree(apps_dir) if gate_on else {}
     run, err = None, None
@@ -2596,7 +2640,135 @@ def run_cyborg_v3(project_id: str, tenant_id: str | None, prod_id: str | None) -
     return run
 
 
-def evaluate_audit_acceptance(_audit: dict, _build_rc: int) -> dict:
+def _project_extra(project_id: str) -> tuple[dict | None, dict | None]:
+    """`(projeto, extra)` lidos da API; `(None, None)` se ilegível."""
+    try:
+        st, text = _http("GET", f"{API_BASE_URL}/api/projects/{project_id}", timeout=15)
+        if st != 200:
+            return None, None
+        data = json.loads(text) or {}
+        extra = data.get("extra") or {}
+        if isinstance(extra, str):
+            extra = json.loads(extra)
+        return (data if isinstance(data, dict) else None), (extra if isinstance(extra, dict) else {})
+    except Exception:
+        return None, None
+
+
+def cyborg_card_status(project_id: str) -> bool | None:
+    """True se o projeto é filho de CARD; False se legado/comum; None se não deu para saber (API ilegível)."""
+    _d, extra = _project_extra(project_id)
+    if extra is None:
+        return None
+    from orchestrator.change_kind import is_card_child
+    return is_card_child(extra)
+
+
+def _is_card_run(project_id: str, prod_id: str | None) -> bool:
+    """Esta run do Cyborg é de filho de card? Auditoria delta gravada OU origem `card` confirmada pela API.
+    Desconhecido ⇒ False (legado), exceto quando a auditoria já foi escopada ao delta."""
+    return _audit_delta_active(project_id, prod_id) or cyborg_card_status(project_id) is True
+
+
+def _full_test_verdict(project_id: str, prod_id: str | None) -> dict | None:
+    try:
+        f = _resolve_proj_dir(project_id, prod_id) / "docs" / "qa" / "full_test_verdict.json"
+        return json.loads(f.read_text(encoding="utf-8")) if f.is_file() else None
+    except Exception:
+        return None
+
+
+def _parent_tsc_errors(project_id: str) -> list[str] | None:
+    """Erros de `tsc` do PAI (baseline). Usa o `audit.json` do pai quando ele os registrou; senão mede pelo
+    executor (`/cyborg-build` do pai). `None` ⇒ não medido (quem chama falha fechado)."""
+    _d, extra = _project_extra(project_id)
+    pid = str((extra or {}).get("evolution_parent_id") or "").strip()
+    if not pid:
+        return None
+    pd, _pe = _project_extra(pid)
+    parent_prod = (pd or {}).get("productId")
+    pdir = _resolve_proj_dir(pid, parent_prod)
+    try:
+        aj = json.loads((pdir / "docs" / "cyborg" / "audit.json").read_text(encoding="utf-8"))
+        errs = (aj.get("build") or {}).get("type_check_errors")
+        if isinstance(errs, list) and (aj.get("build") or {}).get("type_check_rc", -1) not in (-1, None):
+            return [str(e) for e in errs]
+    except Exception:
+        pass
+    try:
+        status, text = executor_bridge.dispatch("/cyborg-build", {"project_id": pid, "prod_id": parent_prod or "", "timeout": 300},
+                                                pid, parent_prod, pdir, timeout=360)
+        if status != 200:
+            return None
+        bd = json.loads(text)
+        if bd.get("type_check_rc", -1) in (-1, None):
+            return None
+        return sorted(parse_ts_errors((bd.get("type_check_output", "") or "") + "\n" + (bd.get("build_output", "") or "")))
+    except Exception as e:
+        logger.warning("[Cyborg card-accept] baseline tsc do pai indisponível: %s", e)
+        return None
+
+
+def card_acceptance_inputs(project_id: str, prod_id: str | None) -> dict:
+    """Entradas do aceite de FILHO DE CARD (W3/D-19): erros de tipos NOVOS vs. pai e veredicto da FULL-TEST."""
+    out: dict = {"new_tsc_errors": [], "tsc_baseline_unknown": False, "child_tsc_errors": [],
+                 "full_test_failure": None, "notes": []}
+    try:
+        aj = json.loads((_resolve_proj_dir(project_id, prod_id) / "docs" / "cyborg" / "audit.json").read_text(encoding="utf-8"))
+        b = aj.get("build") or {}
+    except Exception:
+        b = {}
+    child = [str(e) for e in (b.get("type_check_errors") or [])]
+    if not child and b.get("type_check_rc") not in (0, -1, None):
+        child = sorted(parse_ts_errors(str(b.get("output_tail") or "")))   # audit.json antigo: sem lista estruturada
+    out["child_tsc_errors"] = child
+    if child:
+        parent = _parent_tsc_errors(project_id)
+        if parent is None:
+            out["tsc_baseline_unknown"] = True
+        else:
+            out["new_tsc_errors"] = new_ts_errors(child, parent)
+            if not out["new_tsc_errors"]:
+                out["notes"].append(f"{len(child)} erro(s) de tipos pré-existente(s) iguais ao pai (não bloqueiam)")
+    elif b.get("type_check_rc") not in (0, -1, None) and b.get("rc", -1) == 0:
+        out["tsc_baseline_unknown"] = True   # tsc falhou/não rodou sem erros legíveis: não dá para afirmar "sem erros novos"
+    v = _full_test_verdict(project_id, prod_id)
+    if v:
+        if v.get("medida_falhou") or v.get("regressions"):
+            out["full_test_failure"] = str(v.get("reason") or "QA_FAIL")
+        elif v.get("not_run") or v.get("unmeasured"):
+            out["notes"].append("FULL-TEST NÃO executada/sem medição (infraestrutura): " + str(v.get("reason") or "")[:160]
+                                + " — registrado; o merge segue travado por confirmação humana")
+        elif v.get("status") == "QA_FAIL" and not v.get("approved", True):
+            out["full_test_failure"] = str(v.get("reason") or "QA_FAIL")
+    return out
+
+
+_TS_ERR_LINE_RE = _re_gate.compile(
+    r"^\s*(?P<file>[^\s(:][^\s(]*?)(?:\(\d+,\d+\)|:\d+:\d+)\s*:?\s*-?\s*error\s+(?P<code>TS\d+)\s*:\s*(?P<msg>.+?)\s*$")
+_ANSI_RE = _re_gate.compile(r"\x1b\[[0-9;]*m")
+
+
+def parse_ts_errors(text: str) -> set[str]:
+    """Conjunto de erros do `tsc` NORMALIZADOS (`arquivo|TSnnnn|mensagem`, sem linha/coluna) para comparar
+    filho × pai: um erro pré-existente que apenas mudou de linha continua sendo o MESMO erro."""
+    out: set[str] = set()
+    for ln in _ANSI_RE.sub("", text or "").splitlines():
+        m = _TS_ERR_LINE_RE.match(ln)
+        if m:
+            f = m.group("file").replace("\\", "/").lstrip("./")
+            out.add(f"{f}|{m.group('code')}|{m.group('msg')[:200]}")
+        elif _TS_ERR_RE.search(ln):   # formato inesperado: a linha inteira, sem posições, vale como chave
+            out.add(_re_gate.sub(r"\d+", "#", ln.strip())[:240])
+    return out
+
+
+def new_ts_errors(child: "list[str] | set[str]", parent: "list[str] | set[str]") -> list[str]:
+    """Erros de tipos do filho que NÃO existem no pai (erros pré-existentes iguais não contam)."""
+    return sorted(set(child) - set(parent))
+
+
+def evaluate_audit_acceptance(_audit: dict, _build_rc: int, card: dict | None = None) -> dict:
     """Decisão de aceite por auditoria (achados #21/#38) com FALHA FECHADA para análises que não rodaram.
 
     Só análises VÁLIDAS (`analysis_is_valid`) entram na média e na contagem de BLOCKER; uma análise que
@@ -2623,12 +2795,52 @@ def evaluate_audit_acceptance(_audit: dict, _build_rc: int) -> dict:
     _accept_ideal = (_sufficient and _blk == 0 and _avg >= _min_avg and not _build_failed)
     _accept_weighted = (_sufficient and _build_rc == 0 and _avg >= _strong_avg
                         and _blk <= _max_resid and _build_blk == 0)
+    # BK/W3/D-19 — FILHO DE CARD (`card` ≠ None): o aceite não é mais permissivo com build que não rodou nem
+    # cego a `tsc`. `card = {"new_tsc_errors": [...], "tsc_baseline_unknown": bool, "full_test_failure": str|None,
+    # "notes": [...]}`. Legado (`card=None`): comportamento anterior byte a byte.
+    _card_blockers: list[str] = []
+    if card is not None:
+        if _build_rc != 0:
+            _build_failed = True
+            _card_blockers.append("build não passou" if _build_rc != -1 else "build NÃO rodou (build_rc=-1)")
+        if card.get("new_tsc_errors"):
+            _n = card["new_tsc_errors"]
+            _card_blockers.append(f"{len(_n)} erro(s) de tipos (tsc) NOVO(S) em relação ao pai: " + "; ".join(_n[:3]))
+        if card.get("tsc_baseline_unknown"):
+            _card_blockers.append("erros de tipos (tsc) do filho sem baseline do pai medida (falha fechada): "
+                                  + "; ".join(card.get("child_tsc_errors", [])[:3]))
+        if card.get("full_test_failure"):
+            _card_blockers.append("FULL-TEST reprovada por falha do código: " + str(card["full_test_failure"])[:200])
+        if _card_blockers:
+            _accept_ideal = _accept_weighted = False
+        else:
+            _accept_ideal = _accept_ideal and _build_rc == 0
     return {"blk": _blk, "avg": _avg, "build_rc": _build_rc, "build_blk": _build_blk,
             "build_failed": _build_failed, "ideal": _accept_ideal, "weighted": _accept_weighted,
-            "insufficient": not _sufficient, "validity": _val}
+            "insufficient": not _sufficient, "validity": _val, "card_blockers": _card_blockers,
+            "card_notes": list((card or {}).get("notes") or [])}
 
 
 def _run_cyborg_v3_impl(project_id: str, tenant_id: str | None, prod_id: str | None) -> CyborgV3Run:
+    """BK/B-N1: ambiente de execução proibido/indisponível (executor remoto caído) ⇒ `needs_human` com a causa,
+    sem LLM e sem build local. O restante do fluxo está em `_run_cyborg_v3_core`."""
+    try:
+        return _run_cyborg_v3_core(project_id, tenant_id, prod_id)
+    except CyborgEnvBlocked as e:
+        run = CyborgV3Run(project_id=project_id, tenant_id=tenant_id, prod_id=prod_id,
+                          started_at=time.time(), model_id="")
+        run.final_status = "needs_human"
+        run.reason = (f"ambiente de execução indisponível (não é defeito de código): {e}. "
+                      "Nenhuma rodada de LLM foi paga e nenhum build local foi executado.")
+        _post_dialogue(project_id,
+            f"═══════════════════════════════════════\n"
+            f"⚠️ Cyborg V3 — needs_human (ambiente de execução)\n"
+            f"═══════════════════════════════════════\n"
+            f"{run.reason}")
+        return run
+
+
+def _run_cyborg_v3_core(project_id: str, tenant_id: str | None, prod_id: str | None) -> CyborgV3Run:
     # ⚖️ LEI 2026-09-10 — o Cyborg passa a nascer do SLOT do tenant (provider + modelo +
     # credencial), como a Bancada e a Fábrica. Antes ele era o único plano 100% env: modelo literal
     # da Zentriz invocado com a identidade do container. Falha alto: sem slot, não há run.
@@ -2673,7 +2885,14 @@ def _run_cyborg_v3_impl(project_id: str, tenant_id: str | None, prod_id: str | N
 
     # Fase 2: Spawn Claude Code (sessão única longa)
     _post_dialogue(project_id, f"🛠️ Cyborg V3 trabalhando no produto (pode levar 20-40 min).")
-    result = spawn_engineer(project_id, tenant_id, prod_id, audit_summary, model_id)
+    if _is_card_run(project_id, prod_id):
+        # BK/A-N1: filho de CARD NÃO usa a ponte /cyborg-engineer (briefing genérico, sem delta/files_allowed/
+        # Non-goals, e `DELIVERED` aceito pela última linha de texto). Só a auditoria ESCOPADA ao delta decide.
+        result = {"ok": False, "card_child_no_engineer": True,
+                  "error": "filho de card: ponte /cyborg-engineer não é usada (auditoria escopada ao delta)"}
+        logger.info("[Cyborg] filho de card — ponte do engenheiro ignorada; caminho de auditoria escopada ao delta")
+    else:
+        result = spawn_engineer(project_id, tenant_id, prod_id, audit_summary, model_id)
 
     if not result.get("ok"):
         # VEREDITO POR AUDITORIA (fallback autônomo): quando o engineer-bridge (Claude Code CLI
@@ -2707,7 +2926,9 @@ def _run_cyborg_v3_impl(project_id: str, tenant_id: str | None, prod_id: str | N
             # métricas + flags de aceite. Extraída p/ poder ser reexecutada após uma escalação
             # de conclusão de feature (achado #50). Mantém INTACTOS os gates duros (#21/#38).
             def _evaluate(_audit: dict) -> dict:
-                return evaluate_audit_acceptance(_audit, _cur_build_rc(project_id, prod_id))
+                return evaluate_audit_acceptance(
+                    _audit, _cur_build_rc(project_id, prod_id),
+                    card=card_acceptance_inputs(project_id, prod_id) if _is_card_run(project_id, prod_id) else None)
 
             _ev = _evaluate(audit)
 
@@ -2743,7 +2964,8 @@ def _run_cyborg_v3_impl(project_id: str, tenant_id: str | None, prod_id: str | N
                 run.final_status = "delivered"
                 run.reason = (f"aceito por auditoria: {total_blk} BLOCKER, média {_avg:.1f}/10, "
                               f"build_rc={_build_rc} ({'ideal' if _accept_ideal else 'ponderado'}), "
-                              f"análises válidas {_ev['validity']['valid']}/{_ev['validity']['total']}")
+                              f"análises válidas {_ev['validity']['valid']}/{_ev['validity']['total']}"
+                              + (" · " + " | ".join(_ev["card_notes"]) if _ev.get("card_notes") else ""))
                 _post_dialogue(project_id,
                     f"═══════════════════════════════════════\n"
                     f"✅ Cyborg V3 — aceito por auditoria autônoma\n"
@@ -2753,6 +2975,8 @@ def _run_cyborg_v3_impl(project_id: str, tenant_id: str | None, prod_id: str | N
                 return run
             run.final_status = "needs_human"
             _build_note = " — BUILD FALHOU (gate inviolável #38)" if _build_failed else ""
+            if _ev.get("card_blockers"):
+                _build_note += " — FILHO DE CARD: " + " | ".join(_ev["card_blockers"])
             _vl = _ev["validity"]
             _insuf_note = ""
             if _ev["insufficient"]:
