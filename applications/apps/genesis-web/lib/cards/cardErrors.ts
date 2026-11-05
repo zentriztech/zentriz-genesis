@@ -75,6 +75,10 @@ export function errorDetail(err: ApiError): string {
       const who = [b.blockingCardCode, b.blockingPrNumber ? `PR #${String(b.blockingPrNumber)}` : null].filter(Boolean).join(" · ");
       return `${who ? `Bloqueio: ${who}. ` : ""}${typeof b.action === "string" ? b.action : ""}`.trim();
     }
+    case "CARD_PREVIOUS_IN_PROGRESS": {
+      const who = [b.blockingCardCode, typeof b.blockingChildStatus === "string" ? `execução “${b.blockingChildStatus}”` : null].filter(Boolean).join(" · ");
+      return `${who ? `Bloqueio: ${who}. ` : ""}${typeof b.action === "string" ? b.action : ""}`.trim();
+    }
     case "CARD_ALREADY_DELIVERABLE":
       return typeof b.action === "string" ? b.action : "";
     case "MATERIALIZATION_FAILED":

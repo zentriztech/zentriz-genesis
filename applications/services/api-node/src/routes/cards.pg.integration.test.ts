@@ -282,7 +282,7 @@ describePg("Fase 2 / 2.6 — API de cards (Postgres real)", () => {
     // v2 ainda não aceita ⇒ 1 filho vivo por serviço; o card B continua ready
     const inflight = await post(s, `/api/cards/${B.id}/promote`);
     expect(inflight.statusCode).toBe(409);
-    expect(inflight.json().code).toBe("EVOLUTION_IN_FLIGHT");
+    expect(inflight.json().code).toBe("CARD_PREVIOUS_IN_PROGRESS");
     expect((await stateOf(B.id)).card_state).toBe("ready");
     // v2 aceita ⇒ o HEAD mudou ⇒ base de B vencida
     await pool.query("UPDATE projects SET status = 'accepted' WHERE id = $1", [pa.json().childProjectId]);

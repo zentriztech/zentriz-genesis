@@ -18,7 +18,7 @@ import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { resolveLineageRoot, resolveLineageHead } from "./lineage.js";
 import { runEvolveWithClaim, type EvolveLog, type EvolveResult } from "./evolveClaim.js";
 import { transitionCard, isSupersededChild, PR_CLOSED_UNMERGED_REASON, type CardState, type CardTransitionResult } from "./cardState.js";
-import { loadCard, specHashOf, type CardRow, type CardReadySnapshot } from "./cardService.js";
+import { loadCard, specHashOf, registeredBaseStale, type CardRow, type CardReadySnapshot } from "./cardService.js";
 import { PRE_FACTORY_CHILD_STATUSES } from "./cardsBackfill.js";
 import { verifyChildPrMerged, type DeliveryDeps } from "./cardDelivery.js";
 import { ticketCode } from "./tickets.js";
@@ -80,6 +80,47 @@ export async function previousCardUnmergedBlock(pool: Pool, headId: string, self
   };
 }
 
+/** Status do filho que contam como "ainda em andamento" na linhagem (mesmo critério de `liveChildOf` do claim do /evolve). */
+const LIVE_CHILD_EXCLUDED = ["accepted", "archived", "failed"];
+
+const IN_PROGRESS_SQL = `SELECT t.id, t.number, t.card_state, p.id AS child_id, p.status AS child_status, p.version_number
+       FROM tickets t JOIN projects p ON p.id = t.child_project_id
+      WHERE t.id <> $2 AND t.card_state IN ('promoted', 'in_factory', 'blocked') AND p.status <> ALL($3::text[])`;
+
+type InProgressRow = { id: string; number: number; card_state: string; child_id: string; child_status: string; version_number: number };
+
+function inProgressResult(prev: InProgressRow): EvolveResult {
+  const code = ticketCode(prev.number);
+  return {
+    status: 409,
+    body: {
+      code: "CARD_PREVIOUS_IN_PROGRESS",
+      message: `Outro card da linhagem (${code}) ainda está em andamento: a versão v${prev.version_number} dele está em '${prev.child_status}'. Só se promove um card novo quando o anterior chega a um estado final.`,
+      blockingCardId: prev.id, blockingCardCode: code, blockingCardState: prev.card_state,
+      blockingProjectId: prev.child_id, blockingChildStatus: prev.child_status, blockingChildVersion: prev.version_number,
+      action: `Aguarde o ${code} terminar, retome a execução dele (corrija o bloqueio e religue o filho) ou recuse-o com POST /api/cards/${prev.id}/reject e promova de novo. Esta chamada é segura de repetir.`,
+      rejectBlockingCard: `POST /api/cards/${prev.id}/reject`,
+    },
+  };
+}
+
+/**
+ * Rodada 4.5d (BF): promover um card com OUTRO card da linhagem ainda em andamento (filho `blocked_cyborg`, `running`, …) devolvia o 409
+ * genérico `EVOLUTION_IN_FLIGHT` do /evolve legado, sem dizer qual card segurava a linhagem. Agora, quando o filho vivo da base pertence a
+ * um card (`promoted|in_factory|blocked`), a resposta é `CARD_PREVIOUS_IN_PROGRESS` com o card bloqueante, o estado do filho e a ação.
+ * Filho vivo que NÃO é de card (evolução legada) mantém `EVOLUTION_IN_FLIGHT`. `null` = nada a bloquear.
+ */
+export async function previousCardInProgressBlock(pool: Pick<Pool, "query">, headId: string, selfTicketId: string): Promise<EvolveResult | null> {
+  const prev = (await pool.query(`${IN_PROGRESS_SQL} AND p.parent_project_id = $1 ORDER BY p.created_at DESC LIMIT 1`, [headId, selfTicketId, LIVE_CHILD_EXCLUDED])).rows[0] as InProgressRow | undefined;
+  return prev ? inProgressResult(prev) : null;
+}
+
+/** Mesma tradução para a corrida: o claim devolveu `EVOLUTION_IN_FLIGHT` com o `childProjectId` do filho vivo. */
+async function inProgressFromChild(pool: Pick<Pool, "query">, childId: string, selfTicketId: string): Promise<EvolveResult | null> {
+  const prev = (await pool.query(`${IN_PROGRESS_SQL} AND p.id = $1 LIMIT 1`, [childId, selfTicketId, LIVE_CHILD_EXCLUDED])).rows[0] as InProgressRow | undefined;
+  return prev ? inProgressResult(prev) : null;
+}
+
 export const REVALIDATE_HINT = (cardId: string) => `POST /api/cards/${cardId}/revalidate`;
 
 export async function promoteCard(pool: Pool, card: CardRow, user: AuthUser, log: EvolveLog, deps: DeliveryDeps = {}): Promise<EvolveResult> {
@@ -139,14 +180,19 @@ export async function promoteCard(pool: Pool, card: CardRow, user: AuthUser, log
   const rootId = String(extra.card_target_root_id ?? "") || (await resolveLineageRoot(pool, ready.base_head_project_id))?.id || "";
   const head = rootId ? await resolveLineageHead(pool, rootId) : null;
   const baseHash = head && head.id === ready.base_head_project_id ? await specHashOf(pool, head.id) : null;
-  if (!head || head.id !== ready.base_head_project_id || (ready.base_spec_hash && baseHash !== ready.base_spec_hash)) {
+  // D-17: além do carimbo, a base registrada do rascunho (`card_base`) tem de ser o HEAD corrente (defesa em profundidade).
+  const regStale = registeredBaseStale(extra, head?.id ?? null);
+  if (!head || head.id !== ready.base_head_project_id || regStale || (ready.base_spec_hash && baseHash !== ready.base_spec_hash)) {
     await backToRefining(pool, card, "base_stale");
-    return staleResult(card.id, ready.base_head_project_id, head?.id ?? null);
+    return staleResult(card.id, regStale ?? ready.base_head_project_id, head?.id ?? null);
   }
 
   // A base precisa estar ENTREGUE (ou ser dispensada): o card continua `ready` (nada é revertido); basta mergear o PR anterior e repetir.
   const blocked = await previousCardUnmergedBlock(pool, head.id, card.id, deps);
   if (blocked) return blocked;
+  // Outro card da linhagem em andamento (ex.: filho `blocked_cyborg`): resposta específica de card, não o 409 genérico do /evolve.
+  const inProgress = await previousCardInProgressBlock(pool, head.id, card.id);
+  if (inProgress) return inProgress;
 
   const r = await runEvolveWithClaim(pool, {
     parentId: ready.base_head_project_id, user, ticketId: card.id, evolutionRequest: "", workMode: "copy", idempotencyKey: null, log,
@@ -162,6 +208,11 @@ export async function promoteCard(pool: Pool, card: CardRow, user: AuthUser, log
     // Detectado DENTRO do lock (HEAD mudou entre a checagem e o claim): mesma resposta, mesma volta a `refining`.
     await backToRefining(pool, card, "base_stale");
     return staleResult(card.id, String(r.body.expectedHead ?? ready.base_head_project_id), (r.body.currentHead as string | undefined) ?? null);
+  }
+  if (r.status === 409 && r.body.code === "EVOLUTION_IN_FLIGHT" && typeof r.body.childProjectId === "string") {
+    // Corrida: o filho vivo apareceu entre a checagem e o claim.
+    const translated = await inProgressFromChild(pool, r.body.childProjectId, card.id);
+    if (translated) return translated;
   }
   return enrich(pool, card.id, r);
 }

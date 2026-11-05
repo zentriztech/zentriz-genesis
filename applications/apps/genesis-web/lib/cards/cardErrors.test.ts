@@ -44,6 +44,13 @@ describe("errorDetail — frase extra montada do corpo", () => {
     expect(errorDetail(err(500, "MATERIALIZATION_FAILED", "x", { reason: "CODE_BASE_FETCH_FAILED" }))).toMatch(/nada foi copiado do disco/);
     expect(errorDetail(err(500, "MATERIALIZATION_FAILED", "x", {}))).toBe("");
   });
+  it("outro card em andamento (4.5d): cita o card bloqueante, o estado do filho e a ação (retomar ou recusar)", () => {
+    const d = errorDetail(err(409, "CARD_PREVIOUS_IN_PROGRESS", "x", { blockingCardCode: "TK-0008", blockingChildStatus: "blocked_cyborg", action: "Aguarde o TK-0008 terminar ou recuse-o." }));
+    expect(d).toContain("TK-0008 · execução “blocked_cyborg”");
+    expect(d).toContain("recuse-o");
+    expect(errorDetail(err(409, "CARD_PREVIOUS_IN_PROGRESS", "x", {}))).toBe("");
+    expect(tableMessage("CARD_PREVIOUS_IN_PROGRESS")).toMatch(/ainda está em andamento/);
+  });
   it("recusa na fábrica: entrega real (CARD_ALREADY_DELIVERABLE) traz a ação; rótulos do motivo em PT-BR", () => {
     expect(errorDetail(err(409, "CARD_ALREADY_DELIVERABLE", "x", { action: "Não recuse." }))).toBe("Não recuse.");
     expect(errorDetail(err(409, "CARD_ALREADY_DELIVERABLE", "x", {}))).toBe("");
