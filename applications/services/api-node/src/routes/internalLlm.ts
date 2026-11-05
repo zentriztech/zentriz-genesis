@@ -238,7 +238,8 @@ export async function internalLlmRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/admin/zentriz-llm-config", async (request, reply) => {
     const auth = authenticateInternal(request);
     // Config global só por zentriz_admin ou token interno estático (payload null = server-to-server).
-    if (!auth.ok || (auth.payload && auth.payload.role !== "zentriz_admin")) {
+    // BJ W5: token de MÁQUINA (`svc`) de run de zentriz_admin também não altera a config global de LLM.
+    if (!auth.ok || (auth.payload && (auth.payload.svc || auth.payload.role !== "zentriz_admin"))) {
       return reply.status(401).send({ code: "UNAUTHORIZED" });
     }
     const body = request.body as Record<string, unknown>;

@@ -130,6 +130,18 @@ describePg("BJ A-N2 / W5 — token de run amarrado ao projeto (Postgres real)", 
     expect(own.statusCode).toBe(403);
   });
 
+  it("W5: o token de run de um zentriz_admin NÃO altera a config global de LLM (zentriz-llm-config)", async () => {
+    const A = await mkTenant("a5");
+    const B = await mkTenant("b5");
+    const { token } = await runAs(A, B);
+    const body = { provider: "openai", model_id: "gpt-4o", credentials: { api_key: "sk-x" } };
+    const denied = await app.inject({ method: "POST", url: "/api/admin/zentriz-llm-config", headers: bearer(token), payload: body });
+    expect(denied.statusCode).toBe(401);
+    const human = signToken({ sub: "h2", email: "h@x.test", role: "zentriz_admin", tenantId: null }, "1h");
+    const ok = await app.inject({ method: "POST", url: "/api/admin/zentriz-llm-config", headers: bearer(human), payload: body });
+    expect(ok.statusCode).toBe(200);
+  });
+
   it("W5: caminhos legítimos seguem cunhando (token estático e zentriz_admin humano sem svc), com token escopado ao projeto", async () => {
     const B = await mkTenant("b4");
     const viaStatic = await cyborg(STATIC, B.parentId);
