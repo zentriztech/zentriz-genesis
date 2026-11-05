@@ -166,7 +166,9 @@ export async function internalLlmRoutes(app: FastifyInstance): Promise<void> {
       // tenant_admin de OUTRO tenant (escalada cross-tenant) além de renovar o próprio token
       // indefinidamente (bypass do TTL 6h). Portanto: aceita SÓ token estático (payload null)
       // ou zentriz_admin; rejeita svc:"runner"/tenant_admin com 403.
-      if (auth.payload && auth.payload.role !== "zentriz_admin") {
+      // BJ W5: o token de run de um `zentriz_admin` é `svc:"runner"` COM role zentriz_admin — checar só a role o deixava
+      // cunhar tokens de qualquer projeto/tenant. Qualquer token de máquina (`svc`) fica de fora, seja qual for a role.
+      if (auth.payload && (auth.payload.svc || auth.payload.role !== "zentriz_admin")) {
         request.log.warn(
           { svc: auth.payload.svc, role: auth.payload.role, projectId: auth.payload.projectId },
           "[internal-llm] tentativa de cunhar cyborg-token por caller não-confiável (negado)",
