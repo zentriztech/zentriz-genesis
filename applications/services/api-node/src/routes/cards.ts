@@ -454,6 +454,12 @@ export async function cardRoutes(app: FastifyInstance) {
       }
       case "budget": return reply.status(r.status).send(r.body);
       case "no_head": return reply.status(409).send({ code: "NO_ACCEPTED_HEAD", message: "A linhagem do card não tem versão aceita para evoluir." });
+      case "base_stale":
+        return reply.status(409).send({
+          code: "CARD_BASE_STALE", expectedHead: r.expectedHead, currentHead: r.currentHead, state: card.card_state,
+          message: "A versão-base sobre a qual o card foi escrito não é mais a versão corrente (foi recusada ou superada). Revalide o card antes de validar.",
+          revalidate: `POST /api/cards/${card.id}/revalidate`,
+        });
       case "draft_unreadable": return reply.status(409).send({ code: "CARD_DRAFT_UNREADABLE", message: "O rascunho do card não tem spec legível no disco." });
       case "conversion_pending":
         return reply.status(409).send({

@@ -334,12 +334,23 @@ export async function deleteCard(pool: Pool, ticketId: string): Promise<CardDele
   return { kind: "deleted" };
 }
 
+/**
+ * D-17 (rodada 4.5d): a base REGISTRADA do card (`extra.card_base`, gravada na criação e a cada rebase) já não é o HEAD válido da linhagem
+ * (o filho que ela era foi recusado/arquivado por `card_rejected`, ou foi superado). Devolve a base antiga ou `null` se está em dia/ausente.
+ */
+export function registeredBaseStale(extra: Record<string, unknown> | null | undefined, headId: string | null): string | null {
+  const reg = ((extra?.card_base ?? null) as { head_project_id?: string } | null)?.head_project_id;
+  return reg && headId && reg !== headId ? reg : null;
+}
+
 // ── Validar ("ready") ─────────────────────────────────────────────────────────────────────────
 export type CardReadyResult =
   | { kind: "ready"; replayed: boolean; gate: Extract<CardKindGateResult, { ok: true }> | null }
   | { kind: "gate_failed"; gate: Extract<CardKindGateResult, { ok: false }> }
   | { kind: "budget"; status: number; body: Json }
   | { kind: "no_head" }
+  /** D-17: a base registrada do card (`card_base`) já não é o HEAD corrente (recusa/supersessão): é preciso revalidar antes de validar. */
+  | { kind: "base_stale"; expectedHead: string; currentHead: string }
   | { kind: "draft_unreadable" }
   /** Y-07: há conversão de anexo (pdf/doc/docx → .md) ainda em andamento. */
   | { kind: "conversion_pending"; open: Array<{ id: string; filename: string; state: string }> }
@@ -420,6 +431,10 @@ export async function markCardReady(pool: Pool, card: CardRow, user: AuthUser): 
   const rootId = String(draft.extra.card_target_root_id ?? "");
   const head = rootId ? await resolveLineageHead(pool, rootId) : null;
   if (!head) return { kind: "no_head" };
+  // D-17 (rodada 4.5d): "Validar" NÃO pode carimbar silenciosamente o HEAD de agora quando o card foi escrito (RFC, base-spec) sobre outra
+  // base — ex.: o v7 sobre o qual o card nasceu foi recusado e o HEAD voltou a v6. Exige `revalidate` (que rebaseia e reconfere os globs).
+  const staleFrom = registeredBaseStale(draft.extra, head.id);
+  if (staleFrom) return { kind: "base_stale", expectedHead: staleFrom, currentHead: head.id };
   const denied = await budgetPreflight(pool, head.id, card.tenant_id, head.version_number);
   if (denied) return { kind: "budget", status: denied.status, body: denied.body };
 
@@ -605,6 +620,8 @@ export async function revalidateCard(pool: Pool, card: CardRow, user: AuthUser):
     if (rebase) {
       patch.evolution_parent_id = head.id;
       patch.card_base = { head_project_id: head.id, head_version: head.version_number };
+      // D-17: o ticket aponta para a versão-base do card; acompanha o rebase (antes ficava preso ao v7 recusado).
+      await pool.query("UPDATE tickets SET project_id = $2, updated_at = now() WHERE id = $1 AND card_state IS NOT NULL", [card.id, head.id]);
     }
     // Orçamento compartilhado com o dono da versão corrente: acompanha a base quando ela é movida.
     if (rebase) {

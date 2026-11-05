@@ -57,6 +57,13 @@ Promover é `POST /api/cards/:id/promote` (`routes/cards.ts:503`). Pré-condiç�
 - **Ação segura.** `POST /api/cards/:id/revalidate`. Resultado `ok` (rebaseia), `stale` (precisa de revisão humana: razão `NEEDS_HUMAN_REVIEW` e, sem clone, bloqueador `GLOBS_UNVERIFIED`) ou `conflict` (não rebaseia; o RFC precisa ser ajustado). Depois, `POST /api/cards/:id/ready` (Validar) e promover de novo. O portal mostra isso como "Revalidar" (`CardActionsBar`).
 - **NÃO fazer.** Não tentar promover de novo sem revalidar (devolve o mesmo 409); não "forçar" a base editando o carimbo `extra.card_ready` no banco; não confirmar globs sem conferir o código (AB-07 segue como decisão aberta do Jean, §13).
 
+#### D-17 (rodada 4.5d): base registrada do card já não é o HEAD (v7 recusado)
+
+- **Cenário.** O card A nasce sobre o HEAD vivo v7 (`extra.card_base` = v7); o card dono do v7 é **recusado** (`POST /api/cards/:id/reject` ⇒ v7 arquivado com `card_rejected`, o HEAD volta a v6). Antes, "Validar" carimbava v6 em silêncio e o filho nascia de v6 sem aviso, embora o RFC e a spec-base do card tivessem sido escritos sobre o v7 que deixou de existir.
+- **Agora.** `POST /api/cards/:id/ready` responde `409 CARD_BASE_STALE {expectedHead: v7, currentHead: v6, revalidate}` e nada é carimbado; `POST /api/cards/:id/promote` também confere `card_base` (além do carimbo `card_ready`) e volta o card a `refining` com o mesmo 409. (`cardService.ts` `registeredBaseStale`, `markCardReady`; `cardPromote.ts` `promoteCard`.)
+- **Ação segura.** `POST /api/cards/:id/revalidate` (rebaseia `card_base`, `evolution_parent_id`, o dono do orçamento e o `tickets.project_id` para o HEAD corrente), conferir os motivos/globs, `POST /api/cards/:id/ready` e promover. Teste: `cards.d17.pg.integration.test.ts`.
+- **NÃO fazer.** Não editar `extra.card_base`/`card_ready` no banco; não promover pelo `/evolve` legado.
+
 ### 2.3 `CARD_DRAFT_CHANGED` (422, passo `card_spec`)
 
 - **Como detectar.** O filho vai a `failed` com `extra.materialization.error.code='CARD_DRAFT_CHANGED'`; o card vai a `blocked` com `blocked_reason='materialization_failed:CARD_DRAFT_CHANGED'` (`evolveClaim.ts:862`). Resposta 422 da promoção.
@@ -83,6 +90,7 @@ Promover é `POST /api/cards/:id/promote` (`routes/cards.ts:503`). Pré-condiç�
 | `CARD_PATH_COLLIDES_WITH_BASE` | O rascunho tem arquivo (ou número de RFC/ADR) que já existe no HEAD. Renomeie/renumere no rascunho. |
 | `CARD_ATTACHMENT_CONVERSION_PENDING` | Conversão pdf/doc/docx → `.md` ainda em andamento (na validação). Aguarde e valide de novo. |
 | `PARENT_SUPERSEDED` | A versão-base foi substituída. Revalide (§2.2). |
+| `CARD_PREVIOUS_IN_PROGRESS` (4.5d) | Outro card da linhagem tem o filho **vivo** (`blocked_cyborg`, `running`, `draft`, …) e segura a base. Antes saía o `EVOLUTION_IN_FLIGHT` genérico do /evolve. O corpo traz `blockingCardId/blockingCardCode/blockingCardState`, `blockingProjectId`, `blockingChildStatus/Version`, `action` e `rejectBlockingCard` (`POST /api/cards/:id/reject`). O card promovido segue `ready`; nada é criado; a chamada é segura de repetir. Ver §4.6. Filho vivo que **não** é de card (evolução legada) continua `EVOLUTION_IN_FLIGHT`. |
 | `CARD_PREVIOUS_UNMERGED` (4.5c) | A base é o filho de um card anterior ainda `promoted|in_factory|blocked` cujo PR **não foi mergeado**. O corpo traz `blockingCardCode`, `blockingPrNumber/Url`, `mergeProof` e `action`. Mergeie o PR (ou recuse o card anterior e descarte o filho) e promova de novo. Ver §2.7. |
 | `MATERIALIZATION_FAILED` (500) | Erro transitório (git, rede, disco); o lease é liberado. **Repita a promoção**: ela continua de onde parou. Com `reason:"CODE_BASE_FETCH_FAILED"` (4.5c): o repositório da linhagem existe e o fetch falhou; **nada foi copiado do disco** (§2.7). |
 | `HEAD_SPEC_UNREADABLE` / `CODE_BASE_UNAVAILABLE` (422) | Falha terminal: filho `failed` e card `blocked` (`materialization_failed:<CODE>`). Resolver a causa (volume, repositório) e `/resume` → `ready` → promover. |
@@ -193,6 +201,18 @@ Origem: rodada 4.5c (TK-0006/TK-0007) e correção `EVOLUIR-PROJETO-BD-saida-car
   3. Para refazer o trabalho, abra um **novo** card (o recusado é definitivo; `rejected` não reabre).
   Se o card pendurado só está `blocked` por `pr_closed_unmerged` e o PR foi **reaberto e mergeado**, nada a recusar: a entrega por `deliverAcceptedCards` leva `blocked → in_factory → delivered` sozinha. `POST /api/cards/:id/resume` com o PR ainda fechado devolve o card a `in_factory`, e o reconciliador o bloqueia de novo na passada seguinte (a jornada/`syncCardWithChild` não reabre card `blocked` por este motivo).
 - **NÃO fazer.** Não fazer `UPDATE tickets/projects` à mão para "destravar"; não recusar um card cujo PR já foi mergeado; não arquivar o filho pelo projeto para contornar `CARD_CHILD_ACTIVE` sem parar a execução; não promover o card seguinte por `/evolve` legado para contornar `CARD_PREVIOUS_UNMERGED` (o legado nem promove ticket-card: `USE_CARD_PROMOTE`).
+
+### 4.6 Card em `blocked_cyborg` (filho do card anterior) segurando a linhagem — retomar o filho × recusar o card
+
+Origem: rodada 4.5d (BF). O filho do TK-0008 ficou `blocked_cyborg` (build do gate não executou); promover o TK-0009 devolvia `409 EVOLUTION_IN_FLIGHT`. Agora devolve `409 CARD_PREVIOUS_IN_PROGRESS` citando o card bloqueante.
+
+- **Como detectar.** `POST /api/cards/:id/promote` ⇒ `409 {code:"CARD_PREVIOUS_IN_PROGRESS", blockingCardCode:"TK-0008", blockingCardState, blockingChildStatus:"blocked_cyborg", blockingProjectId, action, rejectBlockingCard}`. O portal mostra o texto de `lib/cards/cardErrors.ts` mais o card, o estado da execução e a ação.
+- **Decisão (humana).**
+  1. **Retomar o filho** quando a causa é corrigível (ex.: ERESOLVE do `npm install`, config de testes do produto): corrija o bloqueio, religue/retome a execução do filho (Cyborg/`resume` do card) e deixe-a terminar (aceite + merge do PR, ou `CARD_PREVIOUS_UNMERGED` até o merge). Depois promova o card seguinte.
+  2. **Recusar o card bloqueante** quando o trabalho não vale a pena ou será refeito: `POST /api/cards/<id do bloqueante>/reject` (BD). O filho `blocked_cyborg` é arquivado com `card_rejected` (200) e a linhagem é liberada; se o filho recusado era o HEAD aceito, a versão que ele superou volta a ser a base ⇒ o card seguinte pode responder `CARD_BASE_STALE` (§2.2/D-17): `revalidate`, `ready`, promover.
+  3. Filho **em execução** ativa ⇒ `CARD_CHILD_ACTIVE` na recusa: pare/descarte a execução antes.
+- **NÃO fazer.** Não apagar o projeto filho à mão (`DELETE /api/projects/:id`) para contornar; não promover o card seguinte pelo `/evolve` legado (`USE_CARD_PROMOTE`); não recusar card cujo PR já foi mergeado (`CARD_ALREADY_DELIVERABLE`).
+- **Teste.** `cards.d17.pg.integration.test.ts` (`CARD_PREVIOUS_IN_PROGRESS`).
 
 ## 5. Reconciliador (`EVOLVE_RECONCILER`)
 
@@ -477,7 +497,7 @@ Todo erro de card leva `userMessage` PT-BR da tabela única `services/cardErrors
 | 404 | `NOT_FOUND` (inclui `Recurso indisponível` com flag desligada, outro tenant, id inexistente) | Sem acesso ou flag off | §6 |
 | 409 (estado) | `CARD_INVALID_TRANSITION`, `CARD_DIVERGED`, `CARD_NOT_EDITABLE`, `CARD_NOT_DELETABLE`, `CARD_CHILD_NOT_IN_FACTORY`, `CARD_DELIVERY_IS_AUTOMATIC`, `TICKET_IMMUTABLE`, `NOT_PROMOTED`, `USE_CARD_PROMOTE`, `USE_CARD_DELETE`, `USE_CARDS`, `CARD_OPERATION_UNSUPPORTED`, `PRODUCT_ARCHIVED`, `NO_ACCEPTED_HEAD`, `CARD_ALREADY_DELIVERABLE`, `CARD_MERGE_UNVERIFIED`, `CARD_CHILD_ACTIVE`, `CARD_CHILD_CHANGED` (recusa, §4.5) | Operação fora do estado ou fora do modelo de cards | A mensagem diz a rota correta |
 | 409 (spec/gate) | `CARD_SPEC_LOCKED`, `CARD_SPEC_CHANGED`, `CARD_PATH_COLLIDES_WITH_BASE`, `CARD_ATTACHMENT_CONVERSION_PENDING`, `CARD_DRAFT_UNREADABLE`, `GLOBS_UNVERIFIED`, `EVOLUTION_RFC_REQUIRED`, `EVOLUTION_RFC_INVALID`, `CARD_KIND_MISMATCH`, `CARD_KIND_REQUIREMENT`, `ATTACHMENTS_UNAVAILABLE` | Validação/spec/anexo | §2.4, §2.5 |
-| 409 (promoção) | `CARD_NOT_READY`, `CARD_BASE_STALE`, `CARD_PREVIOUS_UNMERGED`, `EVOLUTION_IN_FLIGHT`, `EVOLUTION_BUSY`, `MATERIALIZATION_IN_PROGRESS`, `PARENT_SUPERSEDED`, `TICKET_ALREADY_PROMOTED` | Corrida, base vencida, serviço ocupado | §2 |
+| 409 (promoção) | `CARD_NOT_READY`, `CARD_BASE_STALE`, `CARD_PREVIOUS_UNMERGED`, `CARD_PREVIOUS_IN_PROGRESS`, `EVOLUTION_IN_FLIGHT`, `EVOLUTION_BUSY`, `MATERIALIZATION_IN_PROGRESS`, `PARENT_SUPERSEDED`, `TICKET_ALREADY_PROMOTED` | Corrida, base vencida, serviço ocupado | §2 |
 | 410 | `GONE` | Arquivo do anexo não está mais no disco | Reenviar o anexo |
 | 422 | `CARD_DRAFT_CHANGED`, `HEAD_SPEC_UNREADABLE`, `CODE_BASE_UNAVAILABLE`, `CARD_PATH_COLLIDES_WITH_BASE` (passo `card_spec`), `ATTACHMENT_UNREADABLE` (passo `ticket`) | **Falha terminal** da materialização: filho `failed`, card `blocked` | §2.3 / §3.2 |
 | 500 | `MATERIALIZATION_FAILED`, `INTERNAL`, `CARDS_BACKFILL_FAILED` | Erro transitório; a repetição retoma | Repetir; ver log |
