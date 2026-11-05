@@ -21,6 +21,8 @@ Complementa o [runbook operacional](CARDS-BANCADA-RUNBOOK.md) (o que fazer quand
 | Por que cada pré-condição existe | §7 |
 | O que ainda não está provado | §8, §9 |
 | **Condições de promoção** (ZFactory, cliente, produção, ordem do deploy, medições antes das migrations) | **§10** |
+| **Condições para promover o CÓDIGO com cards desligados** (lista A do BJ) | **§10.6** |
+| **Condições para LIGAR `CARDS_BANCADA` na ZFactory** (lista B do BJ) | **§10.7** |
 
 ## 1. Ordem do rollout
 
@@ -83,7 +85,7 @@ Cada critério tem **como verificar** (somente leitura) e a **fonte**. Se qualqu
 | C8 | **Conta da Zentriz ⇒ `byoc_exempt`**; conta de cliente ⇒ **não** isenta (o cliente paga a própria fatura) | `SELECT id, name, byoc_exempt FROM tenants WHERE id = '$TENANT';`. ZFactory: `true`. Cliente: `false`, com slot com credencial própria (`hasOwnCredentials`, `services/tenantLlmConfig.ts:128-135`). Só `zentriz_admin` escreve `byoc_exempt` (`routes/tenants.ts`, `PATCH /api/tenants/:id`) | `services/tenantLlmConfig.ts:30,125-135` |
 | C8b | **Executor (`full-test-server`) × slot do tenant** — a credencial vem **do slot**. Slot Bedrock **com chaves** ⇒ o executor roda na conta do tenant. Slot Bedrock **sem chaves** só roda se o tenant é `byoc_exempt` (C8): aí o executor usa a identidade do host (instance role/IMDS = **conta da Zentriz**), e a resposta/log registram `executando na conta da Zentriz (tenant byoc_exempt)`. Tenant **não** isento e sem chaves ⇒ o executor recusa (502 do `TSK-FULL-TEST`, motivo "habilite byoc_exempt ou cadastre chaves no slot"). Defina **um** dos dois caminhos por tenant antes de ligar | `GET $API/api/internal/project-llm-config/$PROJECT` (token interno) traz `byoc_exempt`; `SELECT byoc_exempt FROM tenants WHERE id = '$TENANT';`; no log do FTS: `rg "byoc_exempt\|conta da Zentriz" ` na linha do slot. Ligar a isenção é do `zentriz_admin` (`PATCH /api/tenants/:id`), nunca do tenant | T1 (`EVOLUIR-PROJETO-AZ-executor-slot-byoc-exempt.md`); runbook §11.4 |
 | C9 | **Reconciliador contado em `shadow`**: nenhum achado `claim_expired_*`, `evolution_publish_incomplete` ou `card_published_without_pr`; legados (`ticket_promoted_without_child`, `child_ticket_mismatch`, `evolution_in_flight_stuck`) explicados | Consulta §10.7 do runbook e `GET $API/api/admin/evolve-reconciler/findings?open=true`. Na 4.5 havia 2 `warning` legados (`evolution_in_flight_stuck`), nenhum crítico | AP §1 item 5; runbook §5 |
-| C10 | **Orçamento do projeto-dono definido** (D-E10: o card usa o orçamento do dono). Sem orçamento ⇒ `402 BUDGET_MISSING` na criação do card | `GET $API/api/projects/$ROOT/budget` devolve `budgetUsd` > 0, gasto e previsão. Definir: `PUT $API/api/projects/$ROOT/budget {budgetUsd, alertStepPct}` | AP §1 desvio 3; runbook §8 item 6 |
+| C10 | **Orçamento do projeto-dono definido** (D-E10: o card usa o orçamento do dono). Sem orçamento, o card **nasce** com `budget_usd=0` (201; o teste em `evolveClaim.ts:114-122` é `IS NOT NULL`) e **só para no refino/`/ready`** com `402 BUDGET_PAUSED` — não é recusado na criação (BJ §6 #4; `llmGuard.ts:479-484`). A promoção é negada (`evolveClaim.ts:290`); nada executa, mas o card fica visível em `draft`/`refining` | `GET $API/api/projects/$ROOT/budget` devolve `budgetUsd` > 0, gasto e previsão. Definir: `PUT $API/api/projects/$ROOT/budget {budgetUsd, alertStepPct}` | AP §1 desvio 3; runbook §8 item 6 |
 | C11 | **`card_budget_pct` definido** (política `cost_policies`; `calibrated=false` quando gravado pelo tenant) e **Guard conferido**: kill switch `off`, tetos globais, e o teto por card (`budgetUsd × pct`) **cabe** em um card real (a 4.5 usou 34 % de US$ 30 = US$ 10,20; os cards custaram US$ 4,92 a 8,37) | `GET $API/api/cost-policies` (política do tenant e a global; o tenant nunca fica acima da global, `TENANT_POLICY_EXCEEDS_GLOBAL`); `GET $API/api/admin/llm-guard/settings` | AP §1 desvio 3, §4.1; AO M3; runbook §3.1, A9 |
 | C12 | **Servidor de testes e baseline medindo para este produto**: uma execução de `/run-tests` na linha de base devolve resultado **com testes** (não `Connection refused`, não `status="error"`, não `status="no_tests"`) | Depois do primeiro card promovido (§4.2), `GET $API/api/projects/<filho>/evolution-state` → `baseline.status` **igual a `ok`**. `error`, `no_tests` e baseline ausente **reprovam** (após o N-4, `no_tests` não é "sem problema": é P2P desligado em silêncio; foi o que aconteceu na 4.5b). Antes de ligar: P3 verde. Atenção: a suíte do **produto** pode ter testes já falhando (na 4.5, 12 em SPEC-02, AP D-5); registre o número como linha de base | AP D-4, D-5; AQ §4 (`runner.py:638-660`, `:699`) |
 | C13 | **QA devolvendo envelope válido** (não `refusal`, não vazio) e `TSK-FULL-TEST` não marcado como feito sem executar | Com um card de teste (§3 passo 6): as chamadas `QA:validate_task` do ledger do filho têm `output_tokens > 0` e a task `TSK-FULL-TEST` termina `DONE` com relatório de execução, ou `CANCELLED` com `QA_REPORT_TSK-FULL-TEST.md` "Veredito: NOT_RUN". Qualquer QA com `output_tokens = 0` ⇒ pare | AQ §2, §3 (`runtime.py:421,2968`; `runner.py:3363,3404,4844`) |
@@ -191,7 +193,7 @@ Também ao desligar: a tela volta ao diálogo antigo "Evoluir projeto"; os detec
 
 ### 5.4 Rollback de código (imagem)
 
-Voltar a imagem anterior da API é o plano; **não há migration de volta** (as colunas novas são nulas/opcionais e nenhum leitor legado as consulta). **Assunção A5 do runbook:** a imagem antiga contra o esquema 162 **não foi testada**. Ordem de deploy e de rollback: **api primeiro, agents depois** (a rota `advisor-gate` só existe na API nova; com agents novo e API antiga o Advisor é negado, fail-closed; com API nova e agents antigo ninguém chama o gate e a política gravada não vale). Tag de rollback `rollback-<svc>:pre-<feature>` no host antes do recreate; conferir o digest; nada de rebuildar `api`/`agents` com run ou promoção em voo (runbook §7).
+Voltar a imagem anterior da API é o plano; **não há migration de volta** (as colunas novas são nulas/opcionais e nenhum leitor legado as consulta). **Assunção A5 do runbook:** a imagem antiga contra o esquema 162 **não foi testada**. **Ordem de deploy:** api → agents → runner → cyborg → web (a rota `advisor-gate` só existe na API nova; com agents novo e API antiga o Advisor é negado, fail-closed; com API nova e agents antigo ninguém chama o gate e a política gravada não vale). **Ordem de rollback (única, BJ §6):** a **inversa** do deploy — web → cyborg → runner → agents → **api por último**. A frase anterior ("api primeiro, agents depois") valia só para o deploy e foi lida como ordem de rollback. Tag de rollback `rollback-<svc>:pre-<feature>` no host antes do recreate; conferir o digest; nada de rebuildar `api`/`agents` com run ou promoção em voo (runbook §7).
 
 Migrations **141–162** são aditivas (expand). Atenção às duas que tocam o caminho quente: a **148** troca o CHECK `projects_status_check` e a **162** cria `idx_llm_ledger_project` com `CREATE INDEX` simples (não `CONCURRENTLY`), que bloqueia escritas no ledger durante a construção (AO, "Assunções e riscos aceitos"). Rode o deploy em janela quieta.
 
@@ -232,6 +234,8 @@ Outras lições, menores, com tratamento já descrito: o planner não gravava a 
 D-5 (a suíte do produto base tinha 12 testes já falhando; é do produto gerado, não do Genesis); D-11 (divergência RFC×código não é detectada se o QA estiver inoperante: depende de L1 estar de fato corrigido); R-1 (o `dev` do repositório alvo da 4.5 ficou contaminado pelo PR #1 e **não foi limpo** nesta documentação: recomendação da AP é reverter 5 arquivos para `5e58abf`, decisão do Jean).
 
 ### 7.3 Execução 4.5b — incorporada (relatório AS)
+
+> **Nota (BL):** este subtítulo foi escrito antes do §7.4 e o contradiz no tom ("incorporada" × "o relatório existe agora"). Vale o §7.4: o relatório da 4.5b existe, o TK-0004 chegou a `delivered` com baseline **não medida** e `pnpm-lock.yaml` fora do RFC. A tabela abaixo é o estado das correções após a 4.5b; as rodadas seguintes (4.5c a 4.5e) estão no BJ §3.
 
 O relatório [`EVOLUIR-PROJETO-AS-execucao-real-4-5b.md`](../analysis/EVOLUIR-PROJETO-AS-execucao-real-4-5b.md) existe e foi incorporado à §7.1 (coluna "Verificado em execução real?"). Resultado em uma linha: o card TK-0004 (Correção) chegou a `delivered` por US$ 3,617 (PR #5 mergeado), mas **a baseline não foi medida** (`no_tests`), o PR levou um `pnpm-lock.yaml` fora do RFC e o merge exigiu `confirm:"MERGE"`. n=1; **sem paridade declarada**.
 
@@ -308,16 +312,16 @@ Fonte: parecer final [AV](../analysis/EVOLUIR-PROJETO-AV-parecer-final-programa.
 
 | # | Condição | Estado |
 |---|---|---|
-| Z1 | A-1: `_is_qa_pass` decide pelo `status` normalizado (summary nunca promove a PASS), com os 3 casos de teste | Aberto (orchestrator, evo/s1) |
+| Z1 | A-1: `_is_qa_pass` decide pelo `status` normalizado (summary nunca promove a PASS), com os 3 casos de teste | **Feito** (`runner.py:3524-3560`; teste `test_av_a1_a4_correcoes.py:17-40`; reverificado no BJ) |
 | Z2 | A-2: chave de dedupe por ocorrência + detector `card_child_stalled`, com teste que falha sem a correção | **Feito** (AY) |
-| Z3 | N-7 decidido pelo Jean (como o executor do FULL-TEST obtém credencial sem violar a LEI dos slots) **ou** `NOT_RUN` aceito por escrito (§1.1) | Aberto (decisão do Jean) |
-| Z4 | Defaults globais de A-4 decididos (manter, ou mover para flag por tenant): `EVOLUTION_P2P_REQUIRED=1`, `CYBORG_TREE_GATE=on`, `CONTEXT_MAX_*`, QA sem veredito ⇒ `BLOCKED` | Aberto (decisão do Jean) |
-| Z5 | Rebuild/recreate **local** de `api` → `agents` → `runner` com AT/AU/AY, FTS reiniciado com `FTS_BIND` correto (P3), digests conferidos | Aberto |
-| Z6 | **Gate F4 repetido**: 3 execuções reais (Evolução, Correção, Recurso novo) em produto com suíte executável, todos os binários em PASS **medidos pelo sistema** (baseline `ok`, P2P sem regressão, F2P, 0 violações no diff real, FULL-TEST executado e PASS, sem `confirm:"MERGE"` nem intervenção manual, custo ≤ teto), com pelo menos uma rodada de correção do Cyborg. Relatório pré-registrado, sem declarar paridade | Aberto |
-| Z7 | Caos do runner C8, C9, C10, C11, C13 escritos e executados (A-3) e regressão do legado com a flag desligada (M-7) | Aberto (orchestrator) |
-| Z8 | FTS com bind restrito e firewall versionados (A-6): `FTS_BIND`, `scripts/dev/fts-firewall.sh --check` verde | **Feito no código/scripts** (AY); aplicar no host |
-| Z9 | B-2 **aceito explicitamente pelo Jean** como risco temporário da onda 1 (conteúdo só da Zentriz) **ou** executor isolado (AX) | Aberto (decisão do Jean) |
-| Z10 | Divergências de documentação do AV §5 corrigidas (consulta P2, C12, §7.1/§7.3/§8, passo 9/L3) | **Feito** (este documento) |
+| Z3 | N-7 decidido pelo Jean (como o executor do FULL-TEST obtém credencial sem violar a LEI dos slots) **ou** `NOT_RUN` aceito por escrito (§1.1) | Aberto (decisão do Jean; BJ J6). A 5ª rodada (TK-0010) executou a FULL-TEST de verdade e foi **reprovada** (0 de 10 em PASS) |
+| Z4 | Defaults globais de A-4 decididos (manter, ou mover para flag por tenant): `EVOLUTION_P2P_REQUIRED=1`, `CYBORG_TREE_GATE=on`, `CONTEXT_MAX_*`, QA sem veredito ⇒ `BLOCKED` | **Parcial / aberto (decisão do Jean).** BJ: P2P legado, QA e teto de contexto já valem só para filho de card; continuam globais `CYBORG_TREE_GATE`, FULL-TEST não executada ⇒ `CANCELLED` (`runner.py:6106`), teto horário `auto` e o fail-closed de flags 5xx (A-N3). Valores em §10.6 |
+| Z5 | Rebuild/recreate **local** de `api` → `agents` → `runner` com AT/AU/AY, FTS reiniciado com `FTS_BIND` correto (P3), digests conferidos | **Feito no dev** (5 rodadas reais); **produção não** — o deploy em produção segue §10.3/§10.4 |
+| Z6 | **Gate F4 repetido**: 3 execuções reais (Evolução, Correção, Recurso novo) em produto com suíte executável, todos os binários em PASS **medidos pelo sistema** (baseline `ok`, P2P sem regressão, F2P, 0 violações no diff real, FULL-TEST executado e PASS, sem `confirm:"MERGE"` nem intervenção manual, custo ≤ teto), com pelo menos uma rodada de correção do Cyborg. Relatório pré-registrado, sem declarar paridade | **Não atendido** (BJ §3: 0 de 10 execuções com todos os binários em PASS; n=1 no código atual, TK-0010; todas no mesmo produto/tenant `e2e`, em dev) |
+| Z7 | Caos do runner C8, C9, C10, C11, C13 escritos e executados (A-3) e regressão do legado com a flag desligada (M-7) | **Parcial.** C8–C13 escritos (`test_av_a3_runner_chaos.py:128-309`), mas contra API falsa em memória: nenhum processo é morto e nada roda contra Postgres. Suíte de regressão do legado ponta a ponta e cenário dourado (0.5) **não existem** (risco aceito R3 em §10.7) |
+| Z8 | FTS com bind restrito e firewall versionados (A-6): `FTS_BIND`, `scripts/dev/fts-firewall.sh --check` verde | **Feito no código/scripts** (AY); aplicar no host. BJ M-N3: a guarda B-2 (`FTS_HOST_ROLE=production` exige `FTS_ISOLATED_EXECUTOR=1`) vive em `start-fts.sh`; o unit systemd chama o Python direto e **não** a executa |
+| Z9 | B-2 **aceito explicitamente pelo Jean** como risco temporário da onda 1 (conteúdo só da Zentriz) **ou** executor isolado (AX) | Aberto (decisão do Jean). **Agravado** pelo B-N1 do BJ: se o Host B falha, o Cyborg faz o build no container `cyborg` (com `docker.sock` e token admin); só o fail-closed W1 (§10.7) fecha |
+| Z10 | Divergências de documentação do AV §5 corrigidas (consulta P2, C12, §7.1/§7.3/§8, passo 9/L3) | **Feito**; as divergências novas do BJ §6 (C10, push/CI, Z1, §7.3×§7.4, ordem de rollback) foram corrigidas na tarefa BL |
 
 ### 10.2 Antes de qualquer tenant de CLIENTE (onda 2), além de 10.1
 
@@ -336,7 +340,7 @@ Fonte: parecer final [AV](../analysis/EVOLUIR-PROJETO-AV-parecer-final-programa.
 
 ### 10.3 Antes de promover o código a produção (mesmo com a flag desligada em todos os tenants)
 
-1. **Push** de `dev` (183 commits à frente de `origin/dev` na data do AV; confira o número atual com `git rev-list --count origin/dev..dev`) e **CI `ci-evolution` verde no GitHub** (M-8). Só então "verde em CI" vale. Push só com o OK do Jean.
+1. **Push e CI: já feitos** (BJ §6). O código em produção, `bce3f50`, **já está no GitHub** (`git branch -r --contains bce3f50` ⇒ `origin/dev`); o que resta é o push do que veio depois (confira com `git rev-list --count origin/dev..dev`; era 2 na redação da BL) e **CI `ci-evolution` verde no GitHub** sobre o commit a promover (M-8). Continua valendo que a árvore `/opt/zentriz-genesis` e `origin/main` estão em `09653d5` e o compose é BUILD-based. Push só com o OK do Jean.
 2. Decisão sobre os comportamentos globais de A-4. Se o código for como está: **antes** do recreate, confirmar o FTS ativo e acessível em `3.220.66.113` (`ss -ltn | grep 7878` e `curl $FULL_TEST_SERVER_URL/health` no container do runner) **ou** `EVOLUTION_P2P_REQUIRED=0` no runner de produção; conferir o efeito de `CONTEXT_MAX_*` nos maiores projetos.
 3. Medições somente leitura em produção (§10.5): `llm_call_ledger` (migration 162) e `project_dialogue` (migration 147).
 4. `NODE_ENV=production` e `GENESIS_API_TOKEN` na API (M-13); chaves `AKIA` removidas do unit do FTS de produção; firewall/SG da 7878 conferidos (A-6); `FTS_HOST_ROLE=production` só com executor isolado (`start-fts.sh` recusa o contrário).
@@ -366,6 +370,75 @@ Regras de decisão (**assunções**, a calibrar com a medida; não há medida de
 - **147**: se `project_dialogue` passar de algumas centenas de MB (ordem de grandeza em que uma varredura com regex se aproxima dos 300 s), **não deixe a 147 rodar no boot**. Aplique-a à parte, em janela, com `statement_timeout` maior, antes do recreate (o conteúdo é idempotente; registre a versão em `schema_migrations` **pelo executor**, não à mão), porque estourar o `statement_timeout` derruba o boot da API em laço.
 - **162**: quanto maior o ledger, mais tempo de INSERT bloqueado. Rode o deploy em janela sem runs. **Não** troque por `CONCURRENTLY` dentro da migration (o executor roda sem transação, mas um índice criado e interrompido fica `INVALID` e o `IF NOT EXISTS` o mascara). Alternativa segura se o ledger for grande: criar o índice **antes** do deploy, à mão e em janela, com `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_llm_ledger_project ON llm_call_ledger (project_id);` e conferir `SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_llm_ledger_project'::regclass;` = `t`; a migration, então, vira no-op.
 - Registre as duas medidas no ticket do rollout junto da decisão.
+
+### 10.6 Condições para promover o CÓDIGO com cards desligados
+
+Fonte: parecer final [BJ](../analysis/EVOLUIR-PROJETO-BJ-parecer-final-atualizado.md) §9 (A), veredito **PRONTO COM CONDIÇÕES** (2026-11-05). Vale para `CARDS_BANCADA` desligada em **todos** os tenants. Os itens 1, 2, 5 e 6 são condição; os demais são higiene obrigatória do roteiro. Cada item continua em modo DO-CONFIRM (verificar no dia).
+
+**Decisões do Jean**
+
+1. OK explícito para o deploy (§10.4), em janela quieta (0 runs, nenhuma promoção em `materializing`).
+2. Valores no `.env` de **produção**, definidos **antes** do recreate (A-N3). Recomendação do BJ:
+
+| Variável / ajuste | Valor recomendado | Por quê |
+|---|---|---|
+| `CYBORG_TREE_GATE` | `off` até ser condicionado a card | `on` apaga/restaura lockfile também em greenfield/legado (`cyborg_v3.py:2528-2548,2565`) e o `npm ci` do deploy pode quebrar |
+| `tenant_max_usd_per_hour` (Guard) | valor **explícito** por tenant, conhecendo o pico atual — não `auto` | `auto` = 50 % do global (`llmGuard.ts:61-63,446-458`) nega tenant legado acima da metade e a checagem é `gasto >= teto` (sem estimativa nem chamadas em voo) |
+| `EFFECTIVE_FLAGS_FAIL_CLOSED` | `off` na promoção; `card` depois | API inalcançável na partida faz o `_is_card_child` devolver `None` e um run legado ir a `failed` ("Spec ilegível") — janela do próprio recreate da API (`runner.py:744-762,1113-1117,6209-6216`) |
+| FULL-TEST não executada ⇒ `CANCELLED` (`runner.py:6106`) | aceitar como melhoria **ou** pedir condicionamento a card | não há env para desligar |
+
+3. Confirmar se o FTS co-locado parado em produção é intencional (R-9: deploys S3/backend dos produtos ficam sem listener).
+4. Infra pré-existente, de severidade alta e independente do código: restringir o SSH 22 hoje aberto a `0.0.0.0/0`; `chmod 600` no PEM (hoje 644); apagar as ~25 cópias `.env.bak*`; rotina de backup do banco.
+
+**Trabalho do agente (condição)**
+
+5. **A-N2 corrigido** na tarefa BL (token de run com o tenant e o `projectId` do **projeto**; `routes/pipeline.ts`, teste `runnerTokenTenant.pg.integration.test.ts`). Antes dele a contorna operacional era não disparar `/run` como `zentriz_admin` em projeto de outro tenant.
+6. **Teste de rollback** (BL-6): subir `rollback-api:pre-evo-20261103` contra um Postgres restaurado do **dump novo** com as 12 migrations (141–162) e bater em `/health` e nas rotas legadas. Obrigatório: produção roda `bce3f50` e o diff é de ~165 commits.
+7. **Dump novo no dia** (BL-7); tags `rollback-<svc>:pre-bancada-AAAAMMDD` de cada serviço; digest conferido em cada serviço; reconciliador em `shadow` por ≥ 3 passadas.
+8. Documentos atualizados (esta tarefa: C10, push/CI, Z1, §7.3×§7.4, ordem única de rollback, 409×402).
+
+**Risco aceito (registrar)**
+
+9. A 147 é irreversível (só redige segredos); os índices únicos de boot (`ensureEvolutionUniqueness`) ficam após o rollback (corrida no `/evolve` antigo vira 500, L-N2); `bce3f50` não tem `redactSecrets` (o vazamento de token em `extra` volta no rollback).
+10. Sem suíte de regressão do legado ponta a ponta (M-7): coberto pelas envs do item 2, pelo rollback testado e por 24 h de observação.
+11. Fallback local do Cyborg (B-N1) para projetos legados é pré-existente; a correção W1 (§10.7) é pequena e vale aplicar já nesta promoção.
+
+**Ordem de deploy:** §10.4. **Ordem de rollback (única):** a inversa — web → cyborg → runner → agents → api por último (§5.4).
+
+### 10.7 Condições para LIGAR `CARDS_BANCADA` na ZFactory
+
+Fonte: BJ §9 (B), veredito **NÃO PRONTO**. Passa a **PRONTO COM CONDIÇÕES** quando W1–W5 estiverem feitos e testados, J1 decidido (a variante (ii) só com as regras escritas), J2–J5 resolvidos e o código promovido pela §10.6. Para tenant de **cliente** valem, além disso, K1 a K10 (§10.2) — nenhum vira risco aceito.
+
+**Decisões do Jean**
+
+| # | Decisão |
+|---|---|
+| J1 | **Gate F4**: (i) repetir as 3 execuções (Evolução, Correção, Recurso novo) em produto com suíte executável e baseline `ok`; **ou** (ii) decisão escrita que redefina a onda 1 como **homologação em produção**, com regras duras: um card por vez; `confirm:"MERGE"` só depois de medição independente registrada no ticket; critério de saída da onda 1 = os binários do plano, não "delivered" |
+| J2 | Aceite escrito do risco D-19: FULL-TEST reprovada por **infraestrutura** de teste chega a PR, com o merge travado em `confirm:"MERGE"` |
+| J3 | Orçamento do produto de fumaça (`PUT` na raiz, acima do gasto histórico + margem) e `card_budget_pct` |
+| J4 | Produto de fumaça com serviço único **e suíte executável** (C12; candidatos no BE §1.4, nenhum medido). Sem isso, D-11 repete e todo merge vira `confirm` |
+| J5 | Abertura temporária de SSH ao Host B (BL-3); verificação da permissão de PR do app 3609618 (BL-4) |
+| J6 | Pendências do plano: D-E9, D-E3, AB-07, M5/A10 e Z3 (N-7 / `NOT_RUN`) |
+
+**Trabalho do agente (condição; cada item com teste que falha sem a correção)**
+
+| # | Item | Estado |
+|---|---|---|
+| W1 | **B-N1**: sem fallback local de build quando `executor_is_remote()` (fail-closed: `needs_human` "executor indisponível") — `cyborg_v3.py:528-560` | frente evo/x1 |
+| W2 | **A-N1**: filho de card não chama `spawn_engineer` (vai direto à auditoria e rodadas com gates), ou rodada real que prove a ponte com o Host B | frente evo/x1 |
+| W3 | **A-N4/D-19**: em filho de card `build_rc=-1` não aceita; erro de `tsc` **novo** em relação ao pai não aceita | frente evo/x1 |
+| W4 | FTS do Host B atualizado para `dev` (BE §4.2 R1) e canário R2; conferir que não há `/opt/zentriz-genesis/.env` no Host B (M-N2) e que o Docker está ausente/inacessível lá (M-N1) | operação |
+| W5 | **M-N4**: `!payload.svc` em `cyborg-token` e `zentriz-llm-config` | **Feito na BL** (`internalLlm.ts`; testes em `runnerTokenTenant.pg.integration.test.ts`) |
+| W6 | Depois de W1–W5: uma rodada real no dev com o executor remoto simulado, **ou** o primeiro card da ZFactory tratado como rodada 4.5f, com relatório pela régua do plano (sem trocar os critérios) | pendente |
+
+**Riscos aceitos (registrar com dono e prazo)**
+
+- R1. Conteúdo de card só da Zentriz executado no Host B, com egress aberto e sem limpeza entre jobs (R-12 do BE, M-N2): aceitável na onda 1; **bloqueante** para clientes.
+- R2. A-5 estrutural (vários tenants somando até o teto global) e M-2 (estimativa pausa a linhagem): aceitáveis com um tenant e um card por vez.
+- R3. Caos do runner provado só com API falsa (critério 4) e `spec_origin` incompleto (critério 2).
+- R4. FULL-TEST fora do ledger (M-N5): acompanhar pelo gasto do slot.
+
+**Rollback depois de ligar:** com cards criados o rollback de imagem **não** é seguro sem antes arquivar os `card_draft` (L-N1): a imagem antiga não tem `notHiddenProjectSql` (~30 leitores) nem as guardas Y-05.
 
 ## 11. Referências
 

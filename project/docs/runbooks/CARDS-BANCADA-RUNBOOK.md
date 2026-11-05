@@ -284,7 +284,8 @@ Job de **plataforma** (não por tenant), com lock de sessão no Postgres (`RECON
 - **Nunca ponha `;` dentro de literal ou `DO $$` em migration** (o separador ingênuo quebra o comando).
 - **Timeouts por comando:** `lock_timeout` 5 s (`MIGRATION_LOCK_TIMEOUT_MS`) e `statement_timeout` 300 s (`MIGRATION_STATEMENT_TIMEOUT_MS`). Um `ALTER TABLE` atrás de transação longa **falha rápido** e a API **não sobe** (comportamento desejado: não enfileirar leituras). Veja `pg_stat_activity` e repita o deploy.
 - **148** troca o CHECK `projects_status_check` (acrescenta `materializing` e `card_draft`) e cria `projects_card_draft_shape_check`; **161** cria `cost_policies` (sem política, nada muda); **162** cria `idx_llm_ledger_project` com `CREATE INDEX` simples (bloqueia INSERT em `llm_call_ledger`, isto é, toda chamada de LLM, enquanto constrói) e a **147** varre `project_dialogue` inteira com regex (limite de 300 s por comando): **meça o tamanho das duas tabelas antes** (ROLLOUT §10.5). Índices únicos parciais de unicidade de filho nascem **no boot em TypeScript** depois da pré-checagem (`evolutionUniqueness`); se houver duplicata antiga, o índice não é criado e o reconciliador acusa `uniqueness_index_missing` (crítico).
-- **Rollback de imagem.** Como as colunas novas são nulas/opcionais e nenhum leitor legado as consulta (suíte `cardsOff.regression`), voltar para a imagem anterior da API é o plano; **não** há migration de volta. [Assunção A5: não foi testada uma imagem antiga contra o esquema 162; o critério "nenhum leitor legado quebra" é o do plano, item 2.1.]
+- **Ordem de rollback (única).** A **inversa** do deploy: web → cyborg → runner → agents → **api por último** (a mais antiga das imagens só volta quando nada mais depende da API nova). Ordem do deploy: api → agents → runner → cyborg → web. Não use "api primeiro" no rollback.
+- **Rollback de imagem.** Como as colunas novas são nulas/opcionais e nenhum leitor legado as consulta (suíte `cardsOff.regression`), voltar para a imagem anterior da API é o plano; **não** há migration de volta. [Assunção A5: não foi testada uma imagem antiga contra o esquema 162; o critério "nenhum leitor legado quebra" é o do plano, item 2.1. O teste é **obrigatório antes do deploy** (ROLLOUT §10.6, item 6). Com cards já criados o rollback exige arquivar antes os `card_draft` (BJ L-N1).]
 
 ## 8. Pré-condições para ligar em tenant real
 
@@ -295,7 +296,7 @@ Todas as condições abaixo devem ser **verificadas** antes de ligar `CARDS_BANC
 3. **`EVOLVE_RECONCILER=on`** (depois da passada `shadow`, §5). É o único caminho que percebe merge feito direto no GitHub (N7); `EVOLUTION_MERGE_WATCH` sozinho não basta.
 4. **`EVOLUTION_AUTO_MERGE` e `EVOLUTION_AUTO_REDEPLOY` desligados** (evita merge/redeploy de versão superada; N3).
 5. **Anexos:** `ATTACHMENTS_STRICT` ligada para o tenant (sem ela, anexo em card ⇒ `409 ATTACHMENTS_UNAVAILABLE`); `ATTACHMENT_CONVERSION` ligada se pdf/doc/docx devem virar `.md` (exige `ATTACHMENTS_STRICT`). Limites padrão: 10 arquivos, 20 MiB no total, 10 MiB por arquivo (`ATTACHMENT_MAX_*`, migration 143; calibrado=falso).
-6. **Orçamento explícito** na versão corrente do serviço (D-E10: o card usa o orçamento do dono). Sem `budget_usd` ⇒ `402 BUDGET_MISSING` na criação.
+6. **Orçamento explícito** na versão corrente do serviço (D-E10: o card usa o orçamento do dono). Sem `budget_usd` o card **nasce** com `budget_usd=0` (201) e só para no refino/`/ready` com `402 BUDGET_PAUSED` (`evolveClaim.ts:114-122`; `llmGuard.ts:479-484`); `BUDGET_MISSING` vem do `budget/resume` (409), não da criação.
 7. **Produto fabricado ao menos uma vez e `accepted`** (D-E2). Sem versão aceita ⇒ `409 NO_ACCEPTED_HEAD`.
 8. **Ambiente de homologação limpo ou Q7 em `shadow`:** sem evoluções legadas antigas que gerem ruído (a N2 já restringe o detector a filho de card, mas confirme o `shadow`).
 9. **Disco:** `PROJECT_FILES_ROOT` e `UPLOAD_DIR` montados na API (senão `on` rebaixa para `shadow`).
@@ -491,7 +492,7 @@ Todo erro de card leva `userMessage` PT-BR da tabela única `services/cardErrors
 | HTTP | Código | Quando | Ação |
 |---|---|---|---|
 | 400 | `BAD_REQUEST`, `INVALID_ID`, `SERVICE_REQUIRED`, `ATTACHMENT_INVALID`, `ATTACHMENT_TOO_LARGE`, `ATTACHMENT_TOO_MANY`, `ATTACHMENT_UNREADABLE`, `CARD_PATH_OUT_OF_SCOPE` | Entrada inválida (id não canônico, tipo/limite de anexo, caminho fora do escopo do card) | Corrigir a entrada |
-| 402 | `BUDGET_MISSING`, `BUDGET_PAUSED`, `BUDGET_INSUFFICIENT`, `BUDGET_FREE_BELOW_MIN`, `CARD_BUDGET_BLOCKED`, `KILL_SWITCH`, `GLOBAL_HOURLY_CAP`, `GLOBAL_DAILY_CAP`, `REPEAT_PAYLOAD`, `PROJECT_NOT_FOUND`, `GUARD_ERROR`, `TENANT_LLM_BUDGET_EXCEEDED` | Guard soberano | §3.1; nunca vira `failed` |
+| 402 (e 409 `BUDGET_MISSING` em `POST /api/projects/:id/budget/resume` de projeto sem orçamento, `routes/llmGuard.ts:226`) | `BUDGET_MISSING`, `BUDGET_PAUSED`, `BUDGET_INSUFFICIENT`, `BUDGET_FREE_BELOW_MIN`, `CARD_BUDGET_BLOCKED`, `KILL_SWITCH`, `GLOBAL_HOURLY_CAP`, `GLOBAL_DAILY_CAP`, `REPEAT_PAYLOAD`, `PROJECT_NOT_FOUND`, `GUARD_ERROR`, `TENANT_LLM_BUDGET_EXCEEDED` | Guard soberano | §3.1; nunca vira `failed` |
 | 402 | `BUDGET_STILL_INSUFFICIENT` (`POST /api/projects/:id/budget/resume`, AU) | A retomada humana foi pedida mas o saldo não comporta a próxima atividade; a pausa continua | Aumentar o orçamento (`PUT /budget`) e repetir; §3.1 |
 | 403 | `FORBIDDEN` (token de serviço), `CARD_ACTION_NOT_ALLOWED`, `MANAGEMENT_ACCOUNT_READONLY_CREATE`, `MANAGEMENT_ACCOUNT`, `ADMIN_ONLY_KEY` | Papel insuficiente | §9 |
 | 404 | `NOT_FOUND` (inclui `Recurso indisponível` com flag desligada, outro tenant, id inexistente) | Sem acesso ou flag off | §6 |
@@ -551,6 +552,15 @@ O `TSK-FULL-TEST` (e `/cyborg-build`, `/cyborg-engineer`) roda o `claude` no hos
 | Bedrock com chave **parcial** (só metade do par, ou só session token) | qualquer | Recusado: é slot mal configurado, não isenção |
 
 Como a flag chega: `tenants.byoc_exempt` → `GET /api/internal/project-llm-config/:id` (campo `byoc_exempt`, estrito `true`) → `runner_server` (`GENESIS_LLM_BYOC_EXEMPT=1` no env do run, sempre reescrito) → corpo do `/run-full-test` e do `/cyborg-engineer` → `_cli_env_from_slot(..., byoc_exempt=)`. A probe real do slot continua obrigatória antes da sessão longa. Só `zentriz_admin` liga a isenção (`PATCH /api/tenants/:id`); ela é decisão explícita e auditável, não um default. Detalhe e evidência: [`EVOLUIR-PROJETO-AZ`](../analysis/EVOLUIR-PROJETO-AZ-executor-slot-byoc-exempt.md).
+
+### 11.5 Filho de card e a ponte do engenheiro; token admin no FTS do dev (D-18)
+
+Decisão do BJ (§5): **não** colocar `GENESIS_API_TOKEN` no processo do servidor de testes (FTS) do dev.
+
+- No dev o FTS é co-locado e **não** tem `GENESIS_API_TOKEN`; por isso `_mint_scoped_token` falha (`full-test-server.py:223-230`) e a ponte `/cyborg-engineer` responde 502 (D-18). É ambiental, não defeito de produção.
+- Dar o token admin ao FTS "para fechar o D-18" só colocaria o token `zentriz_admin` no processo que executa código não confiável. **Não fazer.** O FTS do dev não deve receber o token admin; quem cunha o token de projeto é o control plane (`/api/internal/cyborg-token`, `executor_bridge.py:174-188`), que agora também recusa qualquer token com `svc` (W5, BL).
+- O **filho de card não usa a ponte do engenheiro**: a frente evo/x1 (A-N1/W2) desvia `spawn_engineer` para o caminho de auditoria e rodadas com gates. Até ela ser integrada, trate qualquer `DELIVERED` vindo do engenheiro num card como não verificado (o aceite pelo texto da última linha, `cyborg_v3.py:2788-2799`, não é prova).
+- Em produção (`UNTRUSTED_EXECUTOR_URL` remoto) a ponte funciona e nunca foi exercitada em card (A-N1): não a use para card antes da W2.
 
 ## 12. Decisões e assunções
 
