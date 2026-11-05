@@ -18,6 +18,8 @@ export function CardActionsBar({ card, runner, planBusy = false }: { card: CardD
   const { busy, run } = runner;
   const a = card.actions;
   const go = (key: "reject" | "delete") => { setConfirm(null); void run(key); };
+  // Card já na fábrica (promovido, em execução ou bloqueado): recusar ARQUIVA a execução (filho) e não mexe no PR do GitHub.
+  const inFactory = card.state === "promoted" || card.state === "in_factory" || card.state === "blocked";
   return (
     <>
       <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
@@ -26,23 +28,30 @@ export function CardActionsBar({ card, runner, planBusy = false }: { card: CardD
         {a.reopen && <Button size="small" variant="outlined" disabled={!!busy} onClick={() => void run("reopen")}>{busy === "reopen" ? "Reabrindo…" : "Reabrir para edição"}</Button>}
         {a.revalidate && card.state !== "ready" && <Button size="small" variant="outlined" disabled={!!busy} onClick={() => void run("revalidate")}>{busy === "revalidate" ? "Revalidando…" : "Revalidar"}</Button>}
         {a.resume && <Button size="small" variant="outlined" disabled={!!busy} onClick={() => void run("resume")}>{busy === "resume" ? "Retomando…" : "Retomar"}</Button>}
-        {a.reject && <Button size="small" color="error" variant="outlined" disabled={!!busy} onClick={() => setConfirm("reject")}>Rejeitar</Button>}
+        {a.reject && <Button size="small" color="error" variant="outlined" disabled={!!busy} onClick={() => setConfirm("reject")}>{inFactory ? "Recusar card" : "Rejeitar"}</Button>}
         {a.delete && <Button size="small" color="error" disabled={!!busy} onClick={() => setConfirm("delete")}>Excluir</Button>}
       </Stack>
       {a.ready && planBusy && <Typography id="validate-wait-plan" variant="caption" component="p" role="status" sx={{ mt: 0.75 }}>Aguarde o arquiteto terminar de escrever o RFC para validar o card.</Typography>}
       {runner.notice && <Alert severity="success" sx={{ mt: 1 }} role="status" onClose={runner.dismiss}>{runner.notice}</Alert>}
       {runner.error && runner.error.code !== "CARD_BASE_STALE" && <Alert severity="error" sx={{ mt: 1 }} role="alert" onClose={runner.dismiss}>{runner.error.message}</Alert>}
       <Dialog open={confirm !== null} onClose={() => setConfirm(null)} aria-labelledby="card-confirm-title">
-        <DialogTitle id="card-confirm-title">{confirm === "delete" ? "Excluir card?" : "Rejeitar card?"}</DialogTitle>
+        <DialogTitle id="card-confirm-title">{confirm === "delete" ? "Excluir card?" : inFactory ? "Recusar card?" : "Rejeitar card?"}</DialogTitle>
         <DialogContent>
           <DialogContentText>
             {confirm === "delete" ? "O rascunho do card e a especificação dele serão removidos. Esta ação não pode ser desfeita." : "O card será encerrado como rejeitado e não poderá ser promovido."}
           </DialogContentText>
+          {confirm === "reject" && inFactory && (
+            <Alert severity="warning" sx={{ mt: 1.5 }} role="note">
+              A execução (versão filha) deste card será <strong>arquivada</strong> e o card não poderá mais ser entregue. O pull request no GitHub
+              não é alterado: feche-o ou descarte-o por lá. Se o PR já foi integrado, a recusa é negada, porque a entrega é real.
+              Esta ação não pode ser desfeita.
+            </Alert>
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setConfirm(null)}>Cancelar</Button>
           <Button color="error" variant="contained" disabled={!!busy} onClick={() => go(confirm === "delete" ? "delete" : "reject")}>
-            {confirm === "delete" ? "Excluir" : "Rejeitar"}
+            {confirm === "delete" ? "Excluir" : inFactory ? "Recusar e arquivar execução" : "Rejeitar"}
           </Button>
         </DialogActions>
       </Dialog>

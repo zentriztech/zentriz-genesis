@@ -99,7 +99,7 @@
       "promote": false,
       "revalidate": false,
       "reopen": false,
-      "reject": false,
+      "reject": true,
       "resume": false,
       "delete": false
     }

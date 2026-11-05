@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { apiErrorFrom, detailOf, journeyOf, makeDetail, specApiErrorFrom } from "@/lib/cards/cardFixtures";
 import { body, specBody } from "@/lib/cards/contractFixtures";
+import { ApiError } from "@/lib/api";
 import { resetCardsCapabilitiesCache } from "@/lib/cards/useCardsEnabled";
 import type { BaseSpec, CardAttachmentsResponse, CardDetail, CardJourney } from "@/lib/cards/types";
 
@@ -130,6 +131,50 @@ describe("CardDetailView — situação do card (jornada do servidor)", () => {
     expect(await screen.findByTestId("journey-headline")).toHaveTextContent("Em execução na fábrica");
     expect(screen.getByTestId("journey-blockers")).toHaveTextContent("A execução do card ainda não foi aceita.");
     expect(screen.queryByRole("button", { name: /Promover/ })).not.toBeInTheDocument();
+  });
+
+  it("na fábrica: 'Recusar card' abre confirmação com aviso de que a execução será arquivada e só então chama a API de recusa", async () => {
+    const card = detailOf("in_factory");
+    expect(card.actions.reject).toBe(true);   // resposta REAL do servidor (fixture regenerada por contract:gen)
+    route(card, journeyOf("in_factory"));
+    post.mockResolvedValueOnce({ ok: true, replayed: false, card: { ...card, state: "rejected" } });
+    const user = userEvent.setup();
+    render_();
+    await user.click(await screen.findByRole("button", { name: "Recusar card" }));
+    const dlg = await screen.findByRole("dialog", { name: "Recusar card?" });
+    expect(within(dlg).getByRole("note")).toHaveTextContent(/será arquivada[\s\S]*não poderá mais ser entregue[\s\S]*pull request no GitHub[\s\S]*não é alterado/);
+    expect(post).not.toHaveBeenCalled();                                  // abrir a confirmação não recusa nada
+    await user.click(within(dlg).getByRole("button", { name: "Cancelar" }));
+    expect(post).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await user.click(await screen.findByRole("button", { name: "Recusar card" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Recusar e arquivar execução" }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith(`/api/cards/${card.id}/reject`, {}));
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("promovido: a mesma ação aparece; PR já integrado ⇒ o servidor nega (CARD_ALREADY_DELIVERABLE) e a mensagem PT-BR explica que é entrega real", async () => {
+    const card = detailOf("promoted");
+    route(card, journeyOf("promoted"));
+    post.mockRejectedValueOnce(new ApiError("x", 409, "CARD_ALREADY_DELIVERABLE", { code: "CARD_ALREADY_DELIVERABLE", userMessage: "O código deste card já foi integrado (PR mergeado): é uma entrega real e não pode ser recusada. O sistema vai marcá-lo como entregue.", action: "Não recuse. O card será marcado como entregue pelo sistema." }));
+    const user = userEvent.setup();
+    render_();
+    await user.click(await screen.findByRole("button", { name: "Recusar card" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Recusar e arquivar execução" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/entrega real e não pode ser recusada[\s\S]*Não recuse/);
+  });
+
+  it("rascunho: continua 'Rejeitar' (sem aviso de arquivamento); sem a ação, nenhum botão de recusa", async () => {
+    route(makeDetail({ actions: { ...detailOf("draft").actions, reject: true } }), journeyOf("draft-no-rfc"));
+    const user = userEvent.setup();
+    const { unmount } = render_();
+    await user.click(await screen.findByRole("button", { name: "Rejeitar" }));
+    expect(within(await screen.findByRole("dialog")).queryByRole("note")).not.toBeInTheDocument();
+    unmount();
+    route(makeDetail({ actions: { ...detailOf("draft").actions, reject: false } }), journeyOf("draft-no-rfc"));
+    render_();
+    await screen.findByRole("heading", { name: /TK-0001/ });
+    expect(screen.queryByRole("button", { name: /Recusar card|Rejeitar/ })).not.toBeInTheDocument();
   });
 
   it("bloqueado por orçamento: motivo legível, 'Retomar o card' e o 402 do servidor se ainda não há saldo", async () => {

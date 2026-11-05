@@ -28,7 +28,8 @@ import { UNIQUENESS_INDEXES, getUniquenessCounters } from "./evolutionUniqueness
 import { isSesConfigured, sendEmail } from "./emailSender.js";
 import { readRuntimeNumber } from "./runtimeTunables.js";
 import { resolveReconcilerMode, flagEnabled } from "./featureFlags.js";
-import { findCardStatusDivergences, transitionCard } from "./cardState.js";
+import { findCardStatusDivergences, transitionCard, PR_CLOSED_UNMERGED_REASON } from "./cardState.js";
+import { verifyChildPrMerged, type DeliveryDeps } from "./cardDelivery.js";
 
 export type ReconcilerMode = "off" | "shadow" | "on";
 export function reconcilerMode(env: NodeJS.ProcessEnv = process.env): ReconcilerMode {
@@ -62,7 +63,7 @@ export type FindingKind =
   | "claim_expired_no_effects" | "claim_expired_with_effects" | "ticket_promoted_without_child"
   | "child_ticket_mismatch" | "evolution_in_flight_stuck" | "uniqueness_index_missing" | "reconciler_disk_unverifiable"
   | "card_status_divergence" | "evolution_publish_incomplete" | "card_published_without_pr"
-  | "card_child_stalled";
+  | "card_child_stalled" | "card_pr_closed_unmerged";
 
 export interface Finding {
   kind: FindingKind;
@@ -94,6 +95,7 @@ const ALL_KINDS: FindingKind[] = [
   "claim_expired_no_effects", "claim_expired_with_effects", "ticket_promoted_without_child",
   "child_ticket_mismatch", "evolution_in_flight_stuck", "uniqueness_index_missing", "reconciler_disk_unverifiable",
   "card_status_divergence", "evolution_publish_incomplete", "card_published_without_pr", "card_child_stalled",
+  "card_pr_closed_unmerged",
 ];
 
 type Json = Record<string, unknown>;
@@ -412,6 +414,41 @@ async function detectCardChildStalled(db: Pool, p: ReconcilerParams): Promise<Fi
   }));
 }
 
+/**
+ * Card `in_factory` cujo filho está `accepted` mas o PR foi FECHADO SEM MERGE no GitHub: a entrega nunca virá sozinha e a fábrica não tem mais
+ * o que fazer — o card ficava "pendurado" para sempre (TK-0006/TK-0007, rodada 4.5c). A prova é a MESMA da entrega (`verifyChildPrMerged`:
+ * `evolution_merged_at` do Genesis ou consulta ao PR, cliente injetável por `deps.getPullRequest`); PR aberto, consulta falha ou push pendente
+ * NÃO são achado (fail-closed: na dúvida não bloqueia). Em `on` o card vai a `blocked` (`reason = pr_closed_unmerged`, ator `reconciler`,
+ * aresta já permitida) e o achado notifica; em `shadow` só registra. O achado fica aberto enquanto o card seguir `blocked` por este motivo e some
+ * quando o humano o recusa (`rejected`), o PR é reaberto/mergeado (entrega) ou o card sai de cena.
+ */
+async function detectCardPrClosedUnmerged(db: Pool, mode: ReconcilerMode, deps: DeliveryDeps): Promise<Finding[]> {
+  const r = await db.query(
+    `SELECT t.id::text AS id, t.card_state, c.id::text AS child, c.extra->>'evolution_pr_number' AS pr
+       FROM tickets t JOIN projects c ON c.id = t.child_project_id
+      WHERE (t.card_state = 'in_factory' OR (t.card_state = 'blocked' AND t.blocked_reason = $1))
+        AND c.status = 'accepted'
+        AND COALESCE(c.extra->>'evolution_pr_number', '') <> '' AND COALESCE(c.extra->>'evolution_merged_at', '') = ''
+      ORDER BY t.updated_at LIMIT 200`, [PR_CLOSED_UNMERGED_REASON]);
+  const out: Finding[] = [];
+  for (const x of r.rows) {
+    const proof = await verifyChildPrMerged(db, String(x.child), deps);
+    if (proof.merged || proof.detail !== "pr_not_merged" || proof.prState !== "closed") continue;
+    const f: Finding = {
+      kind: "card_pr_closed_unmerged", entityHash: hashId(String(x.id)), projectHash: hashId(String(x.child)), ticketHash: hashId(String(x.id)),
+      severity: "critical",
+      detail: { card_state: String(x.card_state), pr_number: Number(x.pr), pr_state: "closed", rule: "accepted_child_pr_closed_without_merge_card_blocked_human_must_reject_or_reopen_pr" },
+    };
+    if (mode !== "on") { f.action = "shadow_would_block"; out.push(f); continue; }
+    if (String(x.card_state) === "in_factory") {
+      const t = await transitionCard(db, { ticketId: String(x.id), to: "blocked", actorKind: "reconciler", reason: PR_CLOSED_UNMERGED_REASON });
+      if (t.kind === "applied") f.action = "blocked_pr_closed_unmerged";
+    }
+    out.push(f);
+  }
+  return out;
+}
+
 async function detectMissingIndexes(db: Pool | PoolClient): Promise<Finding[]> {
   const r = await db.query("SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ANY($1::text[])",
     [UNIQUENESS_INDEXES.map((i) => i.name)]);
@@ -489,7 +526,7 @@ function logFinding(f: Finding, mode: string): void {
  * Uma passada. `off` retorna sem tocar no banco. Só uma instância roda por vez (advisory lock de SESSÃO em cliente
  * dedicado; quem não obtém o lock devolve `skipped: "locked"`). Nunca lança.
  */
-export async function runReconcilerPass(pool: Pool, env: NodeJS.ProcessEnv = process.env): Promise<ReconcilerResult> {
+export async function runReconcilerPass(pool: Pool, env: NodeJS.ProcessEnv = process.env, deps: DeliveryDeps = {}): Promise<ReconcilerResult> {
   // M-03: o modo vem de `genesis_runtime_config` (tenant explícito > global) com o env só como default de plataforma.
   const configured = await resolveReconcilerMode(pool, env).catch(() => reconcilerMode(env));
   if (configured === "off") return empty(configured, "off");
@@ -561,8 +598,11 @@ export async function runReconcilerPass(pool: Pool, env: NodeJS.ProcessEnv = pro
       res.cardsSynced = await syncCardsWithChildren(pool);
       // Fase 4 (4.3): card cujo filho já está `accepted` (merge feito no GitHub, aceite sem o gancho) é entregue pela mesma transição idempotente.
       const { deliverAcceptedCards } = await import("./cardDelivery.js");
-      res.cardsDelivered = await deliverAcceptedCards(pool);
+      res.cardsDelivered = await deliverAcceptedCards(pool, { getPullRequest: deps.getPullRequest });
     }
+
+    // PR do filho aceito fechado SEM merge ⇒ card `blocked` (`pr_closed_unmerged`) e achado; roda DEPOIS da entrega (PR mergeado nunca bloqueia).
+    await run(["card_pr_closed_unmerged"], async () => { findings.push(...await detectCardPrClosedUnmerged(pool, mode, deps)); });
 
     // A-2 (AV): depois da sincronização — só resta o card que continua "na fábrica" com o filho morto/parado.
     await run(["card_child_stalled"], async () => { findings.push(...await detectCardChildStalled(pool, p)); });

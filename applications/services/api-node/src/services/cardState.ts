@@ -25,9 +25,12 @@
  *   • `in_factory → delivered`: o filho está `accepted`. Se o filho tem repositório GitHub (`project_github_repos`), a prova de PR mergeado
  *     é PARAMETRIZADA por `args.mergeCheck` (a verificação real do merge é da Fase 4, tarefa 4.3); sem `mergeCheck` a entrega com
  *     repositório é recusada (`merge_unverified`) — nunca se declara entregue sem prova;
- *   • `blocked → rejected`: um filho ainda vivo é ARQUIVADO (CAS no status lido, marca em `extra.card_rejected` e `child_project_id`
+ *   • `blocked|promoted|in_factory → rejected` (saída humana do card pendurado): um filho ainda vivo é ARQUIVADO (CAS no status lido, marca em `extra.card_rejected` e `child_project_id`
  *     no evento) para não prender `EVOLUTION_IN_FLIGHT`; se o filho está em execução (`materializing`, `running`, …) a recusa é negada
- *     (`child_active`) — pare/descarte o filho antes.
+ *     (`child_active`) — pare/descarte o filho antes. Filho ACEITO só é recusado com `args.rejectProof` (PR provadamente NÃO mergeado);
+ *     PR mergeado ⇒ `child_deliverable`, prova inconclusiva ⇒ `merge_unverified`. Filho aceito-superado ganha só a marca `card_rejected`
+ *     (sem mudar de status) para a supersessão não o reviver. Filho aceito recusado DESFAZ a supersessão do pai (`restoreSupersededPredecessor`):
+ *     o pai volta a `accepted` e reassume o HEAD da linhagem (herança, `CARD_PREVIOUS_UNMERGED` e claim passam a ver a última versão válida).
  * Aresta `ready → blocked` (H §6, `CARD_BUDGET_BLOCKED`): DECISÃO mantida da 2.6 — NÃO existe. Orçamento negado devolve 402 e o card
  * segue `ready` (nada a retomar, nada a bloquear); H §4.1 vale sobre H §6.
  *
@@ -44,6 +47,9 @@ export const CARD_STATES = ["draft", "refining", "ready", "promoted", "in_factor
 export type CardState = (typeof CARD_STATES)[number];
 export type CardActorKind = "user" | "system" | "reconciler" | "guard" | "backfill";
 export type LegacyTicketStatus = "open" | "promoted" | "delivered" | "rejected";
+
+/** `blocked_reason` do card cujo filho aceito teve o PR FECHADO sem merge (reconciliador). Só um humano sai daí (recusar, ou reabrir o PR e retomar). */
+export const PR_CLOSED_UNMERGED_REASON = "pr_closed_unmerged";
 
 /** Versão do contrato do card gravada em `tickets.card_contract_version` quando o ticket entra na máquina. */
 export const CARD_CONTRACT_VERSION = 1;
@@ -90,7 +96,7 @@ export const CARD_TRANSITIONS: readonly CardTransitionDef[] = [
   { from: ["blocked"], to: "in_factory", actors: ["user", "system"], note: "retomada: filho voltou à fábrica" },
   { from: ["promoted", "in_factory", "blocked"], to: "ready", actors: ["system"], note: "filho descartado (reopenTicketsOfChild)" },
   { from: ["in_factory"], to: "delivered", actors: ["system"], note: "filho accepted + PR mergeado (4.3)" },
-  { from: ["draft", "refining", "ready", "blocked"], to: "rejected", actors: ["user"], note: "recusa humana" },
+  { from: ["draft", "refining", "ready", "blocked", "promoted", "in_factory"], to: "rejected", actors: ["user"], note: "recusa humana (promoted|in_factory: saída humana do card pendurado — filho arquivado, entrega real nunca é recusada)" },
 ];
 
 export function isValidCardTransition(from: string, to: string, actor: CardActorKind): boolean {
@@ -163,12 +169,14 @@ const DEAD_CHILD_STATUSES = ["failed", "archived"] as const;
  */
 export function isSupersededChild(status: unknown, extra: unknown): boolean {
   if (String(status) !== "archived" || !extra || typeof extra !== "object") return false;
-  const s = (extra as Record<string, unknown>).superseded_by;
+  const x = extra as Record<string, unknown>;
+  if (x.card_rejected !== undefined && x.card_rejected !== null) return false; // card recusado: a supersessão não vale mais
+  const s = x.superseded_by;
   return typeof s === "string" && s !== "";
 }
-/** Fragmento SQL equivalente (alias da tabela `projects`): aceito OU arquivado por supersessão. */
+/** Fragmento SQL equivalente (alias da tabela `projects`): aceito OU arquivado por supersessão (e não recusado com o card). */
 export const acceptedLikeChildSql = (alias: string): string =>
-  `(${alias}.status = 'accepted' OR (${alias}.status = 'archived' AND COALESCE(${alias}.extra->>'superseded_by', '') <> ''))`;
+  `(${alias}.status = 'accepted' OR (${alias}.status = 'archived' AND COALESCE(${alias}.extra->>'superseded_by', '') <> '' AND ${alias}.extra->'card_rejected' IS NULL))`;
 
 /**
  * B1: o filho "precisa de merge"? Decidido pela LINHAGEM, não pela linha do filho em `project_github_repos` (que só nasce DEPOIS de um push
@@ -207,10 +215,17 @@ export interface CardTransitionArgs {
    * transação e o id do filho; `true` = mergeado. Ausente + repositório ⇒ `precondition_failed: merge_unverified`.
    */
   mergeCheck?: (q: { query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }> }, childProjectId: string) => Promise<boolean>;
+  /**
+   * `promoted|in_factory|blocked → rejected` com filho ACEITO (ou aceito-superado): prova colhida FORA do lock sobre o PR do filho `childProjectId`
+   * (rede nunca dentro da transação). `verified: true` + `merged: true` ⇒ `child_deliverable` (entrega real nunca é recusada);
+   * `verified: false` (GitHub inconclusivo) ou ausente ⇒ `merge_unverified` (fail-closed); `verified: true` + `merged: false` ⇒ recusa segue.
+   */
+  rejectProof?: { childProjectId: string; verified: boolean; merged: boolean; detail?: string };
 }
 
 export type CardPreconditionCode =
-  | "child_not_found" | "child_wrong_scope" | "child_dead" | "child_not_accepted" | "merge_unverified" | "child_active" | "child_changed";
+  | "child_not_found" | "child_wrong_scope" | "child_dead" | "child_not_accepted" | "merge_unverified" | "child_active" | "child_changed"
+  | "child_deliverable";
 
 export type CardTransitionResult =
   | { kind: "applied"; from: CardState; to: CardState; status: LegacyTicketStatus }
@@ -294,6 +309,17 @@ export async function transitionCard(db: CardDb, args: CardTransitionArgs): Prom
       // Não deveria ocorrer sob FOR UPDATE; se ocorrer, não escrevemos evento e deixamos o chamador tentar de novo.
       return { kind: "invalid", from, to, allowed: allowedCardTargets(from, actorKind) } as const;
     }
+    if (pre.markChild) {
+      // Filho aceito e já arquivado por SUPERSESSÃO: não muda de status (o sucessor o substituiu), só ganha a marca da recusa — sem ela
+      // a supersessão o reviveria como "aceito" na entrega/sync. CAS: precisa continuar arquivado-superado e sem marca.
+      const mk = await q.query(
+        `UPDATE projects SET updated_at = now(),
+                extra = COALESCE(extra, '{}'::jsonb) || jsonb_build_object('card_rejected', jsonb_build_object('ticket_id', $2::text, 'previous_status', 'archived', 'superseded', true))
+          WHERE id = $1 AND status = 'archived' AND COALESCE(extra->>'superseded_by', '') <> '' AND extra->'card_rejected' IS NULL RETURNING id`,
+        [pre.markChild.id, ticketId],
+      );
+      if ((mk.rowCount ?? mk.rows.length) === 0) throw new TxAbort({ kind: "precondition_failed", code: "child_changed" } as CardTransitionResult);
+    }
     if (pre.archiveChild) {
       // `blocked → rejected` com filho vivo e parado: arquiva (CAS no status lido). Se mudou no meio, desfaz TUDO (ticket incluído).
       const ar = await q.query(
@@ -303,6 +329,11 @@ export async function transitionCard(db: CardDb, args: CardTransitionArgs): Prom
         [pre.archiveChild.id, ticketId, pre.archiveChild.status],
       );
       if ((ar.rowCount ?? ar.rows.length) === 0) throw new TxAbort({ kind: "precondition_failed", code: "child_changed" } as CardTransitionResult);
+      if (pre.archiveChild.status === "accepted") {
+        // Linhagem: o filho aceito recusado deixa de ser a versão corrente — a versão que ele SUPERSEDEU volta a ser a base (HEAD).
+        const ok = await restoreSupersededPredecessor(q, pre.archiveChild.id, ticketId);
+        if (!ok) throw new TxAbort({ kind: "precondition_failed", code: "child_changed" } as CardTransitionResult);
+      }
     }
     await recordCardEvent(q, {
       ticketId, from, to, actorKind, actorId: args.actorId, reason,
@@ -313,7 +344,36 @@ export async function transitionCard(db: CardDb, args: CardTransitionArgs): Prom
   });
 }
 
-type ChildPre = { fail?: CardPreconditionCode; archiveChild?: { id: string; status: string } };
+/**
+ * Linhagem após a recusa (regra mínima e segura): recusar o card cujo filho `X` (aceito) tinha SUPERSEDIDO o pai `P` desfaz a supersessão de `P`
+ * — `P` volta a `accepted` sem `superseded_by` (guarda `extra.superseded_reverted` para auditoria) e reassume o HEAD da linhagem, de modo que
+ * `resolveLineageHead`, a herança do próximo filho, `CARD_PREVIOUS_UNMERGED` e o claim (que exige base `accepted`) enxergam `P` sem regra especial.
+ * Se `P` também foi recusado (marca `card_rejected`, filho aceito-superado de um card recusado antes), a busca continua no pai de `P`
+ * (até 8 elos). Sem predecessor supersedido (X era a 1ª versão aceita) não há o que reviver ⇒ `true`. `false` ⇒ CAS perdido (mudou no meio).
+ * Só roda para filho que estava `accepted` (nunca superado): um filho aceito-superado recusado ganha só a marca e a supersessão do sucessor segue valendo.
+ */
+async function restoreSupersededPredecessor(q: Db, rejectedChildId: string, ticketId: string): Promise<boolean> {
+  let cursor = rejectedChildId;
+  for (let i = 0; i < 8; i++) {
+    const p = (await q.query(
+      `SELECT id, extra FROM projects WHERE status = 'archived' AND extra->>'superseded_by' = $1 ORDER BY created_at DESC LIMIT 1`, [cursor],
+    )).rows[0];
+    if (!p) return true;
+    const px = (p.extra ?? {}) as Record<string, unknown>;
+    if (px.card_rejected !== undefined && px.card_rejected !== null) { cursor = String(p.id); continue; }
+    const up = await q.query(
+      `UPDATE projects SET status = 'accepted', updated_at = now(),
+              extra = ((COALESCE(extra, '{}'::jsonb) - 'superseded_by' - 'superseded_at' - 'superseded_version')
+                       || jsonb_build_object('superseded_reverted', jsonb_build_object('ticket_id', $2::text, 'rejected_child', $3::text, 'at', now()::text)))
+        WHERE id = $1 AND status = 'archived' AND extra->>'superseded_by' = $3 RETURNING id`,
+      [p.id, ticketId, cursor],
+    );
+    return (up.rowCount ?? up.rows.length) > 0;
+  }
+  return true;
+}
+
+type ChildPre = { fail?: CardPreconditionCode; archiveChild?: { id: string; status: string }; markChild?: { id: string } };
 
 /** Pré-condições do filho por aresta (S-09). Só leitura; quem escreve (arquivar o filho) é `transitionCard`, depois do CAS do ticket. */
 async function childPrecondition(q: Db, cur: Row, from: CardState, to: CardState, args: CardTransitionArgs): Promise<ChildPre> {
@@ -346,11 +406,20 @@ async function childPrecondition(q: Db, cur: Row, from: CardState, to: CardState
     if (needsMerge && !(args.mergeCheck && (await args.mergeCheck(q, childId!)))) return { fail: "merge_unverified" };
     return {};
   }
-  if (from === "blocked" && to === "rejected" && cur.child_project_id) {
-    const c = await loadChild(String(cur.child_project_id));
-    if (!c || dead.includes(String(c.status))) return {};
+  if (to === "rejected" && (from === "blocked" || from === "promoted" || from === "in_factory") && cur.child_project_id) {
+    const childId = String(cur.child_project_id);
+    const c = await loadChild(childId);
+    if (!c) return {};
+    // Filho aceito (ou aceito-superado): a recusa só vale com PROVA de que o PR NÃO foi mergeado (entrega real nunca é recusada).
+    if (String(c.status) === "accepted" || isSupersededChild(c.status, c.extra)) {
+      const pr = args.rejectProof;
+      if (!pr || pr.childProjectId !== childId || !pr.verified) return { fail: "merge_unverified" };
+      if (pr.merged) return { fail: "child_deliverable" };
+      return String(c.status) === "accepted" ? { archiveChild: { id: childId, status: String(c.status) } } : { markChild: { id: childId } };
+    }
+    if (dead.includes(String(c.status))) return {};
     if ((ACTIVE_CHILD_STATUSES as readonly string[]).includes(String(c.status))) return { fail: "child_active" };
-    return { archiveChild: { id: String(cur.child_project_id), status: String(c.status) } };
+    return { archiveChild: { id: childId, status: String(c.status) } };
   }
   return {};
 }

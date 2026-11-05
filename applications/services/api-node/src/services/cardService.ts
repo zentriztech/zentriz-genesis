@@ -32,6 +32,7 @@ import {
   allocTicketNumber, materializeTicketIntoSpecTree, ticketCode, ticketUploadDir, TICKET_CHANGE_KINDS,
   type TicketRow, type TicketChangeKind,
 } from "./tickets.js";
+import { rejectCardByUser, rejectFailureOf } from "./cardReject.js";
 import { attachmentsStrictEnabled, classifyAttachment } from "./ticketAttachments.js";
 import { computeCurrentSpecHash } from "./specValidation.js";
 import { cardAttachmentsSnapshot } from "./cardAttachments.js";
@@ -796,10 +797,15 @@ export async function legacyPatchCard(pool: Pool, card: CardRow, b: { title?: st
     row = r.card;
   }
   if (b.status === "rejected") {
-    const t = await transitionCard(pool, { ticketId: card.id, to: "rejected", actorKind: "user", actorId: user.id, reason: "manual_patch" });
+    const fromFactory = card.card_state === "promoted" || card.card_state === "in_factory";
+    // Mesma regra de papel de `POST /api/cards/:id/reject` (Y-06): a saída de `promoted|in_factory` é de quem opera o card (autor ou admin do tenant).
+    if (fromFactory && (user.svc || !(user.role === "tenant_admin" || user.role === "zentriz_admin" || (user.id && card.created_by === user.id)))) {
+      return { kind: "error", status: 403, body: { code: "CARD_ACTION_NOT_ALLOWED", message: "Rejeitar um card promovido exige ser o autor dele ou administrador do tenant." } };
+    }
+    const t = await rejectCardByUser(pool, card.id, user, { reason: fromFactory ? undefined : "manual_patch" });
     if (t.kind === "invalid") return { kind: "error", status: 409, body: { code: "TICKET_INVALID_TRANSITION", from: t.from, to: t.to, allowed: t.allowed, message: `${code}: transição ${t.from} → ${t.to} não é permitida.` } };
-    if (t.kind === "diverged") return { kind: "error", status: 409, body: { code: "CARD_DIVERGED", cardState: t.cardState, status: t.status, message: `${code}: o status legado diverge do estado do card.` } };
-    if (t.kind !== "applied" && t.kind !== "noop") return { kind: "error", status: 404, body: { code: "NOT_FOUND", message: "Pedido não encontrado" } };
+    const fail = rejectFailureOf(card, t);
+    if (fail) return { kind: "error", status: fail.status, body: fail.body };
     row = (await loadCard(pool, card.id)) ?? row;
   } else if (b.status === "open") {
     const cur = (await loadCard(pool, card.id)) ?? row;

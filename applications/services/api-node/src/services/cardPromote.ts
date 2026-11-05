@@ -17,7 +17,7 @@ import type { AuthUser } from "../middleware/auth.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { resolveLineageRoot, resolveLineageHead } from "./lineage.js";
 import { runEvolveWithClaim, type EvolveLog, type EvolveResult } from "./evolveClaim.js";
-import { transitionCard, isSupersededChild, type CardState, type CardTransitionResult } from "./cardState.js";
+import { transitionCard, isSupersededChild, PR_CLOSED_UNMERGED_REASON, type CardState, type CardTransitionResult } from "./cardState.js";
 import { loadCard, specHashOf, type CardRow, type CardReadySnapshot } from "./cardService.js";
 import { PRE_FACTORY_CHILD_STATUSES } from "./cardsBackfill.js";
 import { verifyChildPrMerged, type DeliveryDeps } from "./cardDelivery.js";
@@ -209,6 +209,8 @@ export async function syncCardWithChild(pool: Pool, ticketId: string): Promise<C
   if (!t || !t.child_status) return null;
   // A1: filho arquivado por supersessão foi ACEITO — não bloqueia o card; a entrega (merge do PR) o leva a `delivered`.
   if (isSupersededChild(t.child_status, t.child_extra)) return null;
+  // PR do filho aceito fechado sem merge: o card fica `blocked` até um humano decidir (recusar, ou reabrir o PR e retomar) — a sync não o reabre.
+  if (t.card_state === "blocked" && t.blocked_reason === PR_CLOSED_UNMERGED_REASON) return null;
   if (DEAD_CHILD.has(t.child_status)) {
     if (t.card_state === "promoted" || t.card_state === "in_factory") {
       return transitionCard(pool, { ticketId, to: "blocked", actorKind: "system", reason: `child_${t.child_status}`, dedupeKey: `child_${t.child_status}:${t.child_project_id ?? "none"}` });

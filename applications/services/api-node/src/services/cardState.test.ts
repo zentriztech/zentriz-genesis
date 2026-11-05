@@ -28,6 +28,8 @@ const EXPECTED: Record<string, CardActorKind[]> = {
   "refining>rejected": ["user"],
   "ready>rejected": ["user"],
   "blocked>rejected": ["user"],
+  "promoted>rejected": ["user"],   // saída humana do card pendurado (rodada 4.5c/BD)
+  "in_factory>rejected": ["user"],
 };
 
 describe("cardState — tabela de transições (H §4.1)", () => {
