@@ -348,8 +348,8 @@ sudo docker exec zentriz-genesis-postgres-1 psql -U genesis -d zentriz_genesis -
 # rotas novas (token de zentriz_admin em $ADM, obtido por login no portal; NUNCA logar o valor):
 curl -s -H "Authorization: Bearer $ADM" https://genesis.zentriz.com.br/api/admin/runtime-config/resolved | jq 'has("rolloutFlags")'      # esperado: true
 curl -s -H "Authorization: Bearer $ADM" https://genesis.zentriz.com.br/api/admin/llm-guard/settings | jq '{advisor: .advisor, tenant_max: (.settings|has("tenant_max_usd_per_hour"))}'   # advisor.divergent=false
-# com a flag desligada, as rotas de card devem dar 404:
-curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $ADM" "https://genesis.zentriz.com.br/api/products/cae20ef3-decf-429f-ae80-cc6af913b91b/cards/capabilities"   # esperado: 404
+# com a flag desligada: capabilities responde SEMPRE 200 com {"cardsBancada":false}; a LISTA de cards (GET .../cards) dá 404:
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $ADM" "https://genesis.zentriz.com.br/api/products/cae20ef3-decf-429f-ae80-cc6af913b91b/cards"   # esperado: 404 (flag desligada)
 
 # --- 2) AGENTS (depois da API: advisor-gate só existe na API nova) ---
 sudo docker compose up -d --no-build --no-deps --force-recreate agents
