@@ -15,6 +15,7 @@ Contexto de desenho: [RFC-0009](../rfc/RFC-0009-EVOLUCAO-POR-TICKET.md) e [guia 
 | A promoção falhou ou travou | §2 |
 | O card está `blocked` | §3 |
 | O card não sai de `Na fábrica`, sem PR ou sem merge | §4 |
+| Card **pendurado em `promoted`/`in_factory`** (PR fechado sem merge, filho quebrado): recusar e seguir | §4.5 |
 | Ligar, observar ou desligar o reconciliador | §5 |
 | Desligar `CARDS_BANCADA` de um tenant (rollback) | §6 |
 | Fazer deploy (ordem, migrations 141–162) | §7 |
@@ -111,6 +112,7 @@ Origem: relatório `EVOLUIR-PROJETO-BA-execucoes-reais-4-5c.md`; correções em 
 | `budget:<CÓDIGO_DO_GUARD>` | Guard de custo parou o filho (`stopped_by='budget'`) | 3.1 |
 | `child_failed` | Filho da Fábrica terminou em `failed` | 3.2 |
 | `child_archived` | Filho foi arquivado sem ser por supersessão | 3.3 |
+| `pr_closed_unmerged` | Reconciliador: filho `accepted` com PR **fechado sem merge** | 4.5 |
 | `materialization_failed:<CODE>` | Falha terminal na promoção | 2.3 / 3.2 |
 | `backfill:child_*` | Backfill ao ligar a flag (filho ausente/morto) | 6 |
 
@@ -167,8 +169,30 @@ Primeiro passo de diagnóstico: consulta §10.6 (estado de publicação do filho
 
 - **Aberto.** O card segue `in_factory` (`pr_not_merged`): é espera humana legítima. Merge manual pelo botão **"Mergear agora"** (`POST /api/projects/:id/evolution/merge`; dono ou `tenant_admin`; `zentriz_admin` não). Travas de política (MAJOR, compatibilidade implícita, sem testes, regressões) exigem `confirm:"MERGE"` (AU: a resposta `400 CONFIRM_REQUIRED` traz `explanation` em linguagem de usuário — p.ex. `blocked_no_tests` = produto sem testes executáveis ⇒ **sem baseline, sem PASS_TO_PASS, nenhuma regressão verificada**; o corpo aceita `reason` opcional e a confirmação é gravada **antes** do merge em `extra.evolution_merge_confirmation` + diálogo do projeto — quem, quando, risco assumido e motivo, consulta em §10.14; se a trilha não puder ser gravada o merge **não** acontece: `503 AUDIT_UNAVAILABLE`); "sem evidência de testes" e "instalação revogada" não são contornáveis.
 - **Merge feito direto no GitHub.** O Genesis só percebe com `EVOLVE_RECONCILER=on` (`deliverAcceptedCards`, a cada passada, ≤ 100 candidatos); `EVOLUTION_MERGE_WATCH=on` ajuda mas **não** é o pré-requisito (N7). Em `shadow`/`off` o card fica `in_factory`.
+- **Fechado sem merge (filho `accepted`, não superado).** O card não tem como ser entregue: ver §4.5 (o reconciliador o leva a `blocked` com `pr_closed_unmerged` e a saída é recusar o card).
 - **Fechado sem merge e superado.** Se a versão sucessora (cadeia `superseded_by`, até 5 elos) está mergeada e sem pendência, o card entrega por `successor_merged` (N8); senão `pr_closed_successor_not_merged` (pendente).
 - **NÃO fazer.** Não mergear o PR antigo (v2) depois de a v3 ser a versão corrente com auto-merge ligado (N3: o worker agora só **observa** superados, mas mantenha `EVOLUTION_AUTO_MERGE` e `EVOLUTION_AUTO_REDEPLOY` desligados no rollout); não fechar PRs "para limpar".
+
+### 4.5 Card pendurado em `promoted`/`in_factory` (PR fechado sem merge ou filho quebrado)
+
+Origem: rodada 4.5c (TK-0006/TK-0007) e correção `EVOLUIR-PROJETO-BD-saida-card-in-factory.md`. Antes, `PATCH /api/tickets/:id {status:"rejected"}` num card `promoted|in_factory` dava `409 TICKET_INVALID_TRANSITION` e o card ficava para sempre na fábrica, bloqueando a linhagem (`CARD_PREVIOUS_UNMERGED`).
+
+- **Como detectar.**
+  1. Achado `card_pr_closed_unmerged` (crítico, e-mail de operações em `on`): `GET /api/admin/evolve-reconciler/findings?kind=card_pr_closed_unmerged&open=true`. Em `on` o próprio reconciliador já levou o card a `blocked` com `blocked_reason='pr_closed_unmerged'` (ator `reconciler`); em `shadow` só registra (`action: shadow_would_block`) e o card segue `in_factory`. A prova é a mesma da entrega (`verifyChildPrMerged`): filho `accepted` com `evolution_pr_number`, sem `evolution_merged_at`, e o GitHub responde PR `closed` e `merged=false`. PR aberto, consulta ao GitHub falha ou publicação pendente **não** geram achado (fail-closed: na dúvida não bloqueia).
+  2. Sem reconciliador, ou filho quebrado/aceito sem PR utilizável: o card aparece em §10.1/§10.6 como `in_factory` com filho `accepted` e `pr_not_merged`, ou `promoted` com filho `failed`/`stopped` há muito tempo.
+- **Ação segura (recusar).** Confirme antes (somente leitura) que o PR realmente não será integrado (aberto por engano? reabra-o e pronto: o card entrega sozinho, ver abaixo). Então, como autor, `tenant_admin` ou `zentriz_admin`: portal, botão **"Recusar card"** (confirmação explícita com o aviso de arquivamento), ou `POST /api/cards/:id/reject`, ou `PATCH /api/tickets/:id {"status":"rejected"}`. O motivo auditado em `ticket_card_events` é `manual_reject_in_factory` (§10.3). Repetir a chamada é seguro (200, sem evento novo).
+- **O que acontece com o filho e com o PR.**
+  - O filho vivo e **parado** (inclusive `accepted`) é **arquivado** por CAS na mesma transação do card, com a marca `extra.card_rejected` (`ticket_id`, `previous_status`). Se o filho mudar de estado no meio, **tudo** é desfeito e a resposta é `409 CARD_CHILD_CHANGED` (repita).
+  - Filho **em execução** (`materializing`, `running`, `queued`, `dev_qa`…) ⇒ `409 CARD_CHILD_ACTIVE`: pare ou descarte a execução antes de recusar.
+  - Filho `accepted` com PR **mergeado** ⇒ `409 CARD_ALREADY_DELIVERABLE`: é entrega real, **não recuse**; o reconciliador (`on`) ou o merge do portal marca o card `delivered`. Se a consulta ao GitHub for inconclusiva (instalação revogada, GitHub fora) ⇒ `409 CARD_MERGE_UNVERIFIED`: restabeleça o acesso e repita (a recusa nunca arrisca recusar uma entrega).
+  - Card já `delivered` não recusa (`409`). Corrida entre recusa e entrega: o `FOR UPDATE` do card serializa; só uma vence.
+  - O **PR no GitHub não é tocado** (nem fechado, nem comentado): feche-o ou descarte a branch `evolution/vN` manualmente.
+- **Como seguir (linhagem).** Se o filho recusado tinha SUPERSEDIDO a versão anterior `P`, a supersessão é **desfeita**: `P` volta a `accepted` (sem `superseded_by`; registro em `extra.superseded_reverted`) e reassume o HEAD. Se o filho recusado tinha sido superado por um filho ainda válido (cenário v7 de A sob v8 de B), ele só ganha a marca `card_rejected` (a supersessão do sucessor segue valendo) e a base só recua quando o sucessor também for recusado; a regra encadeia (recusar B e A devolve a base a v6). Depois:
+  1. Cards `ready` criados antes da recusa estão validados sobre a base antiga ⇒ a promoção responde `409 CARD_BASE_STALE` (o card volta a `refining`): `POST /api/cards/:id/revalidate` e `POST /api/cards/:id/ready`, depois promova.
+  2. Se a nova base ainda é filho de **outro** card não mergeado, a promoção responde `409 CARD_PREVIOUS_UNMERGED` citando esse card: mergeie o PR dele ou recuse-o também (ordem livre).
+  3. Para refazer o trabalho, abra um **novo** card (o recusado é definitivo; `rejected` não reabre).
+  Se o card pendurado só está `blocked` por `pr_closed_unmerged` e o PR foi **reaberto e mergeado**, nada a recusar: a entrega por `deliverAcceptedCards` leva `blocked → in_factory → delivered` sozinha. `POST /api/cards/:id/resume` com o PR ainda fechado devolve o card a `in_factory`, e o reconciliador o bloqueia de novo na passada seguinte (a jornada/`syncCardWithChild` não reabre card `blocked` por este motivo).
+- **NÃO fazer.** Não fazer `UPDATE tickets/projects` à mão para "destravar"; não recusar um card cujo PR já foi mergeado; não arquivar o filho pelo projeto para contornar `CARD_CHILD_ACTIVE` sem parar a execução; não promover o card seguinte por `/evolve` legado para contornar `CARD_PREVIOUS_UNMERGED` (o legado nem promove ticket-card: `USE_CARD_PROMOTE`).
 
 ## 5. Reconciliador (`EVOLVE_RECONCILER`)
 
@@ -269,7 +293,7 @@ Implementação em `routes/cards.ts:55-105`. A conta de gestão (`zentriz_admin`
 |---|---|---|---|---|---|
 | Criar, editar texto, anexar, refinar, validar (`/ready`) | Sim | Sim (o acesso ao card é por tenant; essas ações não exigem autoria, `denyMutation`) | Sim | **Não** (`MANAGEMENT_ACCOUNT_READONLY_CREATE`) | Não |
 | **Promover** | Sim (só o próprio) | Não | Sim | **Não** | Não |
-| Rejeitar, retomar, revalidar, reabrir, excluir (`draft`) | Sim (só o próprio) | Não (`CARD_ACTION_NOT_ALLOWED`) | Sim | Sim | Não |
+| Rejeitar (inclusive `promoted`/`in_factory`, §4.5), retomar, revalidar, reabrir, excluir (`draft`) | Sim (só o próprio) | Não (`CARD_ACTION_NOT_ALLOWED`) | Sim | Sim | Não |
 | Republicar PR / Mergear agora (projeto filho) | Dono do projeto | Não | Sim | **Não** (`MANAGEMENT_ACCOUNT`) | Não |
 | Ligar/desligar `CARDS_BANCADA`, `EVOLVE_RECONCILER`, ver achados | Não | Não | Não (`ADMIN_ONLY_KEY`) | Sim | Não |
 | Políticas de custo (`cost_policies`) | Não | Não | Só `advisor_pct` e `card_budget_pct` do próprio tenant, `calibrated=false`, nunca acima da política global | Qualquer; único que marca `calibrated` | Não |
@@ -451,7 +475,7 @@ Todo erro de card leva `userMessage` PT-BR da tabela única `services/cardErrors
 | 402 | `BUDGET_STILL_INSUFFICIENT` (`POST /api/projects/:id/budget/resume`, AU) | A retomada humana foi pedida mas o saldo não comporta a próxima atividade; a pausa continua | Aumentar o orçamento (`PUT /budget`) e repetir; §3.1 |
 | 403 | `FORBIDDEN` (token de serviço), `CARD_ACTION_NOT_ALLOWED`, `MANAGEMENT_ACCOUNT_READONLY_CREATE`, `MANAGEMENT_ACCOUNT`, `ADMIN_ONLY_KEY` | Papel insuficiente | §9 |
 | 404 | `NOT_FOUND` (inclui `Recurso indisponível` com flag desligada, outro tenant, id inexistente) | Sem acesso ou flag off | §6 |
-| 409 (estado) | `CARD_INVALID_TRANSITION`, `CARD_DIVERGED`, `CARD_NOT_EDITABLE`, `CARD_NOT_DELETABLE`, `CARD_CHILD_NOT_IN_FACTORY`, `CARD_DELIVERY_IS_AUTOMATIC`, `TICKET_IMMUTABLE`, `NOT_PROMOTED`, `USE_CARD_PROMOTE`, `USE_CARD_DELETE`, `USE_CARDS`, `CARD_OPERATION_UNSUPPORTED`, `PRODUCT_ARCHIVED`, `NO_ACCEPTED_HEAD` | Operação fora do estado ou fora do modelo de cards | A mensagem diz a rota correta |
+| 409 (estado) | `CARD_INVALID_TRANSITION`, `CARD_DIVERGED`, `CARD_NOT_EDITABLE`, `CARD_NOT_DELETABLE`, `CARD_CHILD_NOT_IN_FACTORY`, `CARD_DELIVERY_IS_AUTOMATIC`, `TICKET_IMMUTABLE`, `NOT_PROMOTED`, `USE_CARD_PROMOTE`, `USE_CARD_DELETE`, `USE_CARDS`, `CARD_OPERATION_UNSUPPORTED`, `PRODUCT_ARCHIVED`, `NO_ACCEPTED_HEAD`, `CARD_ALREADY_DELIVERABLE`, `CARD_MERGE_UNVERIFIED`, `CARD_CHILD_ACTIVE`, `CARD_CHILD_CHANGED` (recusa, §4.5) | Operação fora do estado ou fora do modelo de cards | A mensagem diz a rota correta |
 | 409 (spec/gate) | `CARD_SPEC_LOCKED`, `CARD_SPEC_CHANGED`, `CARD_PATH_COLLIDES_WITH_BASE`, `CARD_ATTACHMENT_CONVERSION_PENDING`, `CARD_DRAFT_UNREADABLE`, `GLOBS_UNVERIFIED`, `EVOLUTION_RFC_REQUIRED`, `EVOLUTION_RFC_INVALID`, `CARD_KIND_MISMATCH`, `CARD_KIND_REQUIREMENT`, `ATTACHMENTS_UNAVAILABLE` | Validação/spec/anexo | §2.4, §2.5 |
 | 409 (promoção) | `CARD_NOT_READY`, `CARD_BASE_STALE`, `CARD_PREVIOUS_UNMERGED`, `EVOLUTION_IN_FLIGHT`, `EVOLUTION_BUSY`, `MATERIALIZATION_IN_PROGRESS`, `PARENT_SUPERSEDED`, `TICKET_ALREADY_PROMOTED` | Corrida, base vencida, serviço ocupado | §2 |
 | 410 | `GONE` | Arquivo do anexo não está mais no disco | Reenviar o anexo |

@@ -40,7 +40,7 @@ export type MergeProof =
   /** N8: PR do filho superado foi FECHADO sem merge, mas a versão sucessora (snapshot completo de `apps/`) está mergeada. */
   | { required: true; merged: true; source: "successor_merged" }
   | { required: true; merged: true; source: "genesis_merge" | "github" }
-  | { required: true; merged: false; source: "unverified"; detail: string };
+  | { required: true; merged: false; source: "unverified"; detail: string; /** Estado do PR no GitHub quando a consulta funcionou (`open` | `closed`). */ prState?: string };
 
 /**
  * O PR do filho está mergeado? Decisão de "sem repositório" pela LINHAGEM (B1): a linha do filho em `project_github_repos` só nasce DEPOIS de
@@ -87,7 +87,9 @@ export async function verifyChildPrMerged(pool: Pick<Pool, "query">, childId: st
     if (await successorMerged(pool, extra, lookup, Number(row.installation_id), { owner, repo }, 0)) return { required: true, merged: true, source: "successor_merged" };
     return { required: true, merged: false, source: "unverified", detail: "pr_closed_successor_not_merged" };
   }
-  return { required: true, merged: false, source: "unverified", detail: pr.ok ? "pr_not_merged" : "pr_lookup_failed" };
+  return pr.ok
+    ? { required: true, merged: false, source: "unverified", detail: "pr_not_merged", ...(typeof pr.state === "string" ? { prState: pr.state } : {}) }
+    : { required: true, merged: false, source: "unverified", detail: "pr_lookup_failed" };
 }
 
 /** A versão sucessora (`superseded_by`, até 5 elos) já foi mergeada? Merge do Genesis registrado ou PR do sucessor mergeado no GitHub. */

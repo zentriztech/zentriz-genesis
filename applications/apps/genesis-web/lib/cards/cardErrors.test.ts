@@ -44,6 +44,14 @@ describe("errorDetail — frase extra montada do corpo", () => {
     expect(errorDetail(err(500, "MATERIALIZATION_FAILED", "x", { reason: "CODE_BASE_FETCH_FAILED" }))).toMatch(/nada foi copiado do disco/);
     expect(errorDetail(err(500, "MATERIALIZATION_FAILED", "x", {}))).toBe("");
   });
+  it("recusa na fábrica: entrega real (CARD_ALREADY_DELIVERABLE) traz a ação; rótulos do motivo em PT-BR", () => {
+    expect(errorDetail(err(409, "CARD_ALREADY_DELIVERABLE", "x", { action: "Não recuse." }))).toBe("Não recuse.");
+    expect(errorDetail(err(409, "CARD_ALREADY_DELIVERABLE", "x", {}))).toBe("");
+    expect(tableMessage("CARD_ALREADY_DELIVERABLE")).toMatch(/entrega real/);
+    expect(tableMessage("CARD_MERGE_UNVERIFIED")).toMatch(/não foi possível confirmar/i);
+    expect(eventReasonLabel("manual_reject_in_factory")).toBe("recusado na fábrica (execução arquivada)");
+    expect(blockedReasonLabel("pr_closed_unmerged")).toMatch(/PR da execução foi fechado sem integração/);
+  });
   it("Retry-After só aparece quando o servidor manda", () => {
     expect(errorDetail(err(409, "EVOLUTION_BUSY", "x", {}, 2))).toBe("Tente de novo em 2 s.");
     expect(errorDetail(err(409, "EVOLUTION_BUSY"))).toBe("");

@@ -20,6 +20,7 @@ const EDGES: Record<string, CardActorKind[]> = {
   "in_factory>blocked": ["system", "guard", "reconciler"], "blocked>in_factory": ["user", "system"], "promoted>ready": ["system"],
   "in_factory>ready": ["system"], "blocked>ready": ["system"], "in_factory>delivered": ["system"], "draft>rejected": ["user"],
   "refining>rejected": ["user"], "ready>rejected": ["user"], "blocked>rejected": ["user"],
+  "promoted>rejected": ["user"], "in_factory>rejected": ["user"],   // saída humana do card pendurado (rodada 4.5c/BD); filho aceito exige rejectProof
 };
 
 describePg("Fase 2 / 2.4 — cardState (Postgres real)", () => {
@@ -56,9 +57,12 @@ describePg("Fase 2 / 2.4 — cardState (Postgres real)", () => {
     let applied = 0, noop = 0, invalid = 0;
     for (const from of CARD_STATES) for (const to of CARD_STATES) for (const actor of ACTORS) {
       const id = await cardIn(from);
+      const kid = (await row(id)).child_project_id as string | null;
       const r = await transitionCard(pool, {
         ticketId: id, to, actorKind: actor, reason: to === "blocked" ? (from === "blocked" ? "seed" : "t") : null, // blocked→blocked com o MESMO motivo = noop (S-13)
         childProjectId: from === "ready" && to === "promoted" ? s.parentId : null,
+        // filho aceito só é recusado com a prova de que o PR NÃO foi mergeado (colhida fora do lock pelo chamador)
+        ...(to === "rejected" && kid ? { rejectProof: { childProjectId: kid, verified: true, merged: false } } : {}),
       });
       const want = from === to ? "noop" : (EDGES[`${from}>${to}`] ?? []).includes(actor) ? "applied" : "invalid";
       expect(r.kind, `${from}>${to} por ${actor}`).toBe(want);
@@ -174,7 +178,8 @@ describePg("Fase 2 / 2.4 — cardState (Postgres real)", () => {
     const final = (await row(id2)).card_state;
     expect(["promoted", "rejected"]).toContain(final);
     // os perdedores do destino oposto são invalid (a partir do estado final); os do mesmo destino, noop
-    for (const r of dup) expect(["applied", "noop", "invalid"]).toContain(r.kind);
+    // (`precondition_failed`: o card já promovido tem filho ACEITO e a recusa sem prova de merge é negada — fail-closed)
+    for (const r of dup) expect(["applied", "noop", "invalid", "precondition_failed"]).toContain(r.kind);
     expect(await events(id2)).toHaveLength(1);
     expect((await row(id2)).status).toBe(legacyStatusFor(final as CardState));
   });

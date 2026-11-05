@@ -35,7 +35,7 @@ export async function reconcileEvolutionMerges(db: Db = pool as unknown as Db): 
     `SELECT id, status, extra->>'evolution_origin' AS origin FROM projects
       WHERE ( status = 'accepted'
               -- N3: superada só entra se for filho de CARD (marcador gravado só pelo claim de card) e é apenas OBSERVADA; legada superada nunca é varrida.
-              OR (status = 'archived' AND coalesce(extra->>'superseded_by','') <> '' AND extra->>'evolution_origin' = 'card') )
+              OR (status = 'archived' AND coalesce(extra->>'superseded_by','') <> '' AND extra->>'evolution_origin' = 'card' AND extra->'card_rejected' IS NULL) )
         AND extra->>'evolution' = 'true'
         AND extra->>'evolution_pr_number' IS NOT NULL
         AND extra->>'evolution_merged_at' IS NULL

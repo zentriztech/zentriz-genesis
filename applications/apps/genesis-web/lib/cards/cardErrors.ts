@@ -75,6 +75,8 @@ export function errorDetail(err: ApiError): string {
       const who = [b.blockingCardCode, b.blockingPrNumber ? `PR #${String(b.blockingPrNumber)}` : null].filter(Boolean).join(" · ");
       return `${who ? `Bloqueio: ${who}. ` : ""}${typeof b.action === "string" ? b.action : ""}`.trim();
     }
+    case "CARD_ALREADY_DELIVERABLE":
+      return typeof b.action === "string" ? b.action : "";
     case "MATERIALIZATION_FAILED":
       return b.reason === "CODE_BASE_FETCH_FAILED" ? "Não foi possível buscar o código do repositório; nada foi copiado do disco. Tente promover de novo." : "";
     case "MATERIALIZATION_IN_PROGRESS":
@@ -113,6 +115,7 @@ export function cardErrorCode(err: unknown): string | undefined {
 export function blockedReasonLabel(reason: string | null | undefined): string {
   if (!reason) return "não registrado";
   if (reason.startsWith("budget:")) { const code = reason.slice("budget:".length); return `orçamento — ${tableMessage(code) ?? code}`; }
+  if (reason === "pr_closed_unmerged") return "o PR da execução foi fechado sem integração — recuse o card ou reabra o PR e retome";
   if (reason.startsWith("child_")) return `a execução não está mais ativa (${reason.slice("child_".length)})`;
   if (reason.startsWith("materialization_failed")) return tableMessage("MATERIALIZATION_FAILED") ?? reason;
   return reason;
@@ -122,6 +125,8 @@ const EVENT_REASON: Record<string, string> = {
   validated: "especificação validada",
   user_refine: "refinamento iniciado",
   user_reject: "recusado pelo usuário",
+  manual_reject_in_factory: "recusado na fábrica (execução arquivada)",
+  pr_closed_unmerged: "PR fechado sem integração",
   user_reopen: "reaberto para edição",
   revalidate_base: "base atualizada na revalidação",
   manual_patch: "pedido alterado manualmente",

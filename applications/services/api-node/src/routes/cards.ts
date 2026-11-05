@@ -32,6 +32,7 @@ import {
   MULTIPART_MAX_FILES, MULTIPART_MAX_FILE_BYTES, type AttachmentError,
 } from "../services/ticketAttachments.js";
 import { allowedCardTargets, cardsBancadaEnabled, isCardState, transitionCard, CARD_STATES, type CardState, type CardTransitionResult } from "../services/cardState.js";
+import { rejectCardByUser, rejectFailureOf } from "../services/cardReject.js";
 import {
   applyCardTextEdit, createCard, deleteCard, isCardKind, loadBaseSpec, loadCard, loadCardsPage, markCardReady, reopenCard, resolveCardTarget,
   revalidateCard, summarizeCards, MAX_CARD_BODY, MAX_CARD_TITLE, type CardRow, type IncomingFile,
@@ -419,6 +420,13 @@ export async function cardRoutes(app: FastifyInstance) {
       const card = await cardGuard(request, reply, request.params.id);
       if (!card) return;
       if ((path === "reject" ? denyOperate(user, card, reply) : denyMutation(user, reply))) return;
+      if (to === "rejected") {
+        // Recusa: prova de merge FORA do lock + filho arquivado na MESMA transação (inclusive promoted|in_factory).
+        const rr = await rejectCardByUser(pool, card.id, user, { reason: card.card_state === "promoted" || card.card_state === "in_factory" ? undefined : reason });
+        if (rr.kind === "applied" || rr.kind === "noop") return reply.send({ ok: true, replayed: rr.kind === "noop", card: await fresh(card.id) });
+        const fail = rejectFailureOf(card, rr);
+        return fail ? reply.status(fail.status).send(fail.body) : transitionFailure(reply, card, to, rr);
+      }
       const r = await transitionCard(pool, { ticketId: card.id, to, actorKind: "user", actorId: user.id, reason });
       if (r.kind === "applied" || r.kind === "noop") {
         return reply.send({ ok: true, replayed: r.kind === "noop", card: await fresh(card.id) });

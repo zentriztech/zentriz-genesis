@@ -103,6 +103,7 @@ describe("Fase 2 — guarda estática: só o código novo da Fase 2 menciona as 
   const ALLOWED = new Set([
     "services/cardState.ts", "services/cardsBackfill.ts", "services/cardDelivery.ts", "services/taskCardLinks.ts", // código novo (Fase 2, 2.1-2.5)
     "services/cardService.ts", "services/cardPromote.ts", "routes/cards.ts",           // API de cards (2.6)
+    "services/cardReject.ts",                                                          // recusa humana do card pendurado em in_factory (BD)
     // 2.6 (d): escritores legados roteados pela máquina. Cada um só TOCA a coluna para ticket que já é card (card_state não nulo);
     // com a flag off nenhum ticket tem card_state, e a regressão acima prova que nada muda.
     "routes/tickets.ts", "routes/projects.ts", "services/tickets.ts", "services/evolveClaim.ts", "services/evolveReconciler.ts",
